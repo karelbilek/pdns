@@ -276,7 +276,7 @@ class TestOutgoingDOHOpenSSL(DNSDistTest, OutgoingDOHTests):
     webserver("127.0.0.1:%s")
     setWebserverConfig({password="%s", apiKey="%s"})
 
-    pc = newPacketCache(100)
+    pc = newPacketCache(1000)
     getPool('cache'):setCache(pc)
     smn = newSuffixMatchNode()
     smn:add('cached.outgoing-doh.test.powerdns.com.')
