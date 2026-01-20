@@ -2490,13 +2490,17 @@ static void maintThread()
            expired entries when at least one pool using this cache
            has all its backends down) */
         if (packetCache->keepStaleData() && !iter->second) {
-          /* so far all pools had at least one backend up */
-          if (pool.shouldKeepStaleData()) {
+          if (packetCache->isLru()) {
+            // with LRU cache, we don't clear stale entries
+            // even if all servers are down
             iter->second = true;
           }
-        }
-        if (packetCache->alwaysKeepStaleData()) {
-          iter->second = true;
+          else {
+            /* so far all pools had at least one backend up */
+            if (pool.shouldKeepStaleData()) {
+              iter->second = true;
+            }
+          }
         }
       }
 
