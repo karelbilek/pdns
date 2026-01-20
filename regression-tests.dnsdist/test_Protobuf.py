@@ -1,4 +1,6 @@
 #!/usr/bin/env python
+import unittest
+import os
 import base64
 import threading
 import socket
@@ -683,6 +685,7 @@ class TestProtobufCacheHit(DNSDistProtobufTest):
         self.assertTrue(msg.HasField('outgoingQueries'))
         self.assertEqual(msg.outgoingQueries, 0)
 
+@unittest.skipIf('SKIP_DOH_TESTS' in os.environ, 'DNS over HTTPS tests are disabled')
 class TestProtobufMetaDOH(DNSDistProtobufTest):
 
     _serverKey = 'server.key'
@@ -692,21 +695,18 @@ class TestProtobufMetaDOH(DNSDistProtobufTest):
     _tlsServerPort = pickAvailablePort()
     _dohWithNGHTTP2ServerPort = pickAvailablePort()
     _dohWithNGHTTP2BaseURL = ("https://%s:%d/dns-query" % (_serverName, _dohWithNGHTTP2ServerPort))
-    _dohWithH2OServerPort = pickAvailablePort()
-    _dohWithH2OBaseURL = ("https://%s:%d/dns-query" % (_serverName, _dohWithH2OServerPort))
     _config_template = """
     newServer{address="127.0.0.1:%d"}
     rl = newRemoteLogger('127.0.0.1:%d')
 
     addTLSLocal("127.0.0.1:%d", "%s", "%s", { provider="openssl" })
     addDOHLocal("127.0.0.1:%d", "%s", "%s", { '/dns-query' }, { keepIncomingHeaders=true, library='nghttp2' })
-    addDOHLocal("127.0.0.1:%d", "%s", "%s", { '/dns-query' }, { keepIncomingHeaders=true, library='h2o' })
 
     local mytags = {path='doh-path', host='doh-host', ['query-string']='doh-query-string', scheme='doh-scheme', agent='doh-header:user-agent'}
     addAction(AllRule(), RemoteLogAction(rl, nil, {serverID='dnsdist-server-1'}, mytags))
     addResponseAction(AllRule(), RemoteLogResponseAction(rl, nil, false, {serverID='dnsdist-server-1'}, mytags))
     """
-    _config_params = ['_testServerPort', '_protobufServerPort', '_tlsServerPort', '_serverCert', '_serverKey', '_dohWithNGHTTP2ServerPort', '_serverCert', '_serverKey', '_dohWithH2OServerPort', '_serverCert', '_serverKey']
+    _config_params = ['_testServerPort', '_protobufServerPort', '_tlsServerPort', '_serverCert', '_serverKey', '_dohWithNGHTTP2ServerPort', '_serverCert', '_serverKey']
 
     def testProtobufMetaDoH(self):
         """
@@ -722,7 +722,7 @@ class TestProtobufMetaDOH(DNSDistProtobufTest):
                                     '127.0.0.1')
         response.answer.append(rrset)
 
-        for method in ("sendUDPQuery", "sendTCPQuery", "sendDOTQueryWrapper", "sendDOHWithNGHTTP2QueryWrapper", "sendDOHWithH2OQueryWrapper"):
+        for method in ("sendUDPQuery", "sendTCPQuery", "sendDOTQueryWrapper", "sendDOHWithNGHTTP2QueryWrapper"):
             sender = getattr(self, method)
             (receivedQuery, receivedResponse) = sender(query, response)
 
@@ -745,7 +745,7 @@ class TestProtobufMetaDOH(DNSDistProtobufTest):
                 pbMessageType = dnsmessage_pb2.PBDNSMessage.TCP
             elif method == "sendDOTQueryWrapper":
                 pbMessageType = dnsmessage_pb2.PBDNSMessage.DOT
-            elif method == "sendDOHWithNGHTTP2QueryWrapper" or method == "sendDOHWithH2OQueryWrapper":
+            elif method == "sendDOHWithNGHTTP2QueryWrapper":
                 pbMessageType = dnsmessage_pb2.PBDNSMessage.DOH
 
             self.checkProtobufQuery(msg, pbMessageType, query, dns.rdataclass.IN, dns.rdatatype.A, name)
@@ -756,13 +756,11 @@ class TestProtobufMetaDOH(DNSDistProtobufTest):
                 tags[entry.key] = entry.value.stringVal[0]
 
             self.assertIn('agent', tags)
-            if method == "sendDOHWithNGHTTP2QueryWrapper" or method == "sendDOHWithH2OQueryWrapper":
+            if method == "sendDOHWithNGHTTP2QueryWrapper":
                 self.assertIn('PycURL', tags['agent'])
                 self.assertIn('host', tags)
                 if method == "sendDOHWithNGHTTP2QueryWrapper":
                     self.assertEqual(tags['host'], self._serverName + ':' + str(self._dohWithNGHTTP2ServerPort))
-                elif method == "sendDOHWithH2OQueryWrapper":
-                    self.assertEqual(tags['host'], self._serverName + ':' + str(self._dohWithH2OServerPort))
                 self.assertIn('path', tags)
                 self.assertEqual(tags['path'], '/dns-query')
                 self.assertIn('query-string', tags)
@@ -781,13 +779,11 @@ class TestProtobufMetaDOH(DNSDistProtobufTest):
                 tags[entry.key] = entry.value.stringVal[0]
 
             self.assertIn('agent', tags)
-            if method == "sendDOHWithNGHTTP2QueryWrapper" or method == "sendDOHWithH2OQueryWrapper":
+            if method == "sendDOHWithNGHTTP2QueryWrapper":
                 self.assertIn('PycURL', tags['agent'])
                 self.assertIn('host', tags)
                 if method == "sendDOHWithNGHTTP2QueryWrapper":
                     self.assertEqual(tags['host'], self._serverName + ':' + str(self._dohWithNGHTTP2ServerPort))
-                elif method == "sendDOHWithH2OQueryWrapper":
-                    self.assertEqual(tags['host'], self._serverName + ':' + str(self._dohWithH2OServerPort))
                 self.assertIn('path', tags)
                 self.assertEqual(tags['path'], '/dns-query')
                 self.assertIn('query-string', tags)
@@ -1302,6 +1298,83 @@ query_rules:
         msg = self.getFirstProtobufMessage()
         self.checkProtobufQuery(msg, dnsmessage_pb2.PBDNSMessage.TCP, query, dns.rdataclass.IN, dns.rdatatype.A, name)
 
+
+class TestYamlProtobufDelayed(DNSDistProtobufTest):
+    _yaml_config_template = """---
+binds:
+  - listen_address: "127.0.0.1:%d"
+    reuseport: true
+    protocol: Do53
+    threads: 2
+
+backends:
+  - address: "127.0.0.1:%d"
+    protocol: Do53
+
+remote_logging:
+  protobuf_loggers:
+    - name: "my-logger"
+      address: "127.0.0.1:%d"
+      timeout: 1
+
+response_rules:
+  - name: "my-rule"
+    selector:
+      type: "All"
+    action:
+      type: "RemoteLog"
+      logger_name: "my-logger"
+      server_id: "%s"
+      export_tags:
+        - "tag-1"
+        - "tag-2"
+      delay: true
+"""
+    _dnsDistPort = pickAvailablePort()
+    _testServerPort = pickAvailablePort()
+    _yaml_config_params = ['_dnsDistPort', '_testServerPort', '_protobufServerPort', '_protobufServerID']
+    _config_params = []
+
+    def testProtobuf(self):
+        """
+        Yaml: Remote logging via protobuf
+        """
+        name = 'remote-logging.protobuf.yaml.test.powerdns.com.'
+        query = dns.message.make_query(name, 'A', 'IN')
+        query.flags &= ~dns.flags.RD
+        response = dns.message.make_response(query)
+        rrset = dns.rrset.from_text(name,
+                                    60,
+                                    dns.rdataclass.IN,
+                                    dns.rdatatype.A,
+                                    '127.0.0.1')
+
+        response.answer.append(rrset)
+
+        receivedResponses = list()
+        for method in ("sendUDPQuery", "sendTCPQuery"):
+            sender = getattr(self, method)
+            (receivedQuery, receivedResponse) = sender(query, response=response)
+            receivedQuery.id = query.id
+            self.assertEqual(receivedQuery, query)
+            self.assertEqual(receivedResponse, response)
+            receivedResponses.append(receivedResponse)
+
+        if self._protobufQueue.empty():
+            # let the protobuf messages the time to get there
+            time.sleep(1)
+        # check the protobuf message corresponding to the UDP query
+        msg = self.getFirstProtobufMessage()
+        self.checkProtobufResponse(msg, dnsmessage_pb2.PBDNSMessage.UDP, receivedResponses[0])
+
+        if self._protobufQueue.empty():
+            # let the protobuf messages the time to get there
+            time.sleep(1)
+        # TCP query
+        msg = self.getFirstProtobufMessage()
+        self.checkProtobufResponse(msg, dnsmessage_pb2.PBDNSMessage.TCP, receivedResponses[1])
+
+
 class TestTimeoutResponseRuleProtobuf(DNSDistProtobufTest):
 
     _yaml_config_template = """---
@@ -1393,3 +1466,147 @@ timeout_response_rules:
 
         self.assertTrue(gotUDP)
         self.assertTrue(gotTCP)
+
+class TestProtobufGlobalServerIDYaml(TestYamlProtobuf):
+    _yaml_config_template = """---
+binds:
+  - listen_address: "127.0.0.1:%d"
+    reuseport: true
+    protocol: Do53
+    threads: 2
+
+backends:
+  - address: "127.0.0.1:%d"
+    protocol: Do53
+
+remote_logging:
+  protobuf_loggers:
+    - name: "my-logger"
+      address: "127.0.0.1:%d"
+      timeout: 1
+
+general:
+  server_id: "%s"
+
+query_rules:
+  - name: "my-rule"
+    selector:
+      type: "All"
+    action:
+      type: "RemoteLog"
+      logger_name: "my-logger"
+      use_server_id: true
+      export_tags:
+        - "tag-1"
+        - "tag-2"
+"""
+
+class TestProtobufGlobalServerIDLua(DNSDistProtobufTest):
+    _config_params = ['_protobufServerID', '_testServerPort', '_protobufServerPort']
+    _config_template = """
+    setServerID("%s")
+    luasmn = newSuffixMatchNode()
+    luasmn:add(newDNSName('lua.protobuf.tests.powerdns.com.'))
+
+    function alterProtobufResponse(dq, protobuf)
+      if luasmn:check(dq.qname) then
+        requestor = newCA(tostring(dq.remoteaddr))		-- called by testLuaProtobuf()
+        if requestor:isIPv4() then
+          requestor:truncate(24)
+        else
+          requestor:truncate(56)
+        end
+        protobuf:setRequestor(requestor)
+
+        local tableTags = {}
+        table.insert(tableTags, "TestLabel1,TestData1")
+        table.insert(tableTags, "TestLabel2,TestData2")
+
+        protobuf:setTagArray(tableTags)
+
+        protobuf:setTag('TestLabel3,TestData3')
+
+        protobuf:setTag("Response,456")
+
+      else
+
+        local tableTags = {} 					-- called by testProtobuf()
+        table.insert(tableTags, "TestLabel1,TestData1")
+        table.insert(tableTags, "TestLabel2,TestData2")
+        protobuf:setTagArray(tableTags)
+
+        protobuf:setTag('TestLabel3,TestData3')
+
+        protobuf:setTag("Response,456")
+
+      end
+    end
+
+    function alterProtobufQuery(dq, protobuf)
+
+      if luasmn:check(dq.qname) then
+        requestor = newCA(tostring(dq.remoteaddr))		-- called by testLuaProtobuf()
+        if requestor:isIPv4() then
+          requestor:truncate(24)
+        else
+          requestor:truncate(56)
+        end
+        protobuf:setRequestor(requestor)
+
+        local tableTags = {}
+        tableTags = dq:getTagArray()				-- get table from DNSQuery
+
+        local tablePB = {}
+          for k, v in pairs( tableTags) do
+          table.insert(tablePB, k .. "," .. v)
+        end
+
+        protobuf:setTagArray(tablePB)				-- store table in protobuf
+        protobuf:setTag("Query,123")				-- add another tag entry in protobuf
+
+        protobuf:setResponseCode(DNSRCode.NXDOMAIN)        	-- set protobuf response code to be NXDOMAIN
+
+        local strReqName = tostring(dq.qname)		  	-- get request dns name
+
+        protobuf:setProtobufResponseType()			-- set protobuf to look like a response and not a query, with 0 default time
+
+        blobData = '\127' .. '\000' .. '\000' .. '\002'		-- 127.0.0.2, note: lua 5.1 can only embed decimal not hex
+
+        protobuf:addResponseRR(strReqName, 1, 1, 123, blobData) -- add a RR to the protobuf
+
+        protobuf:setBytes(65)					-- set the size of the query to confirm in checkProtobufBase
+
+      else
+
+        local tableTags = {}                                    -- called by testProtobuf()
+        table.insert(tableTags, "TestLabel1,TestData1")
+        table.insert(tableTags, "TestLabel2,TestData2")
+
+        protobuf:setTagArray(tableTags)
+        protobuf:setTag('TestLabel3,TestData3')
+        protobuf:setTag("Query,123")
+
+      end
+    end
+
+    function alterLuaFirst(dq)					-- called when dnsdist receives new request
+      local tt = {}
+      tt["TestLabel1"] = "TestData1"
+      tt["TestLabel2"] = "TestData2"
+
+      dq:setTagArray(tt)
+
+      dq:setTag("TestLabel3","TestData3")
+      return DNSAction.None, ""				-- continue to the next rule
+    end
+
+    newServer{address="127.0.0.1:%d", useClientSubnet=true}
+    rl = newRemoteLogger('127.0.0.1:%d')
+
+    addAction(AllRule(), LuaAction(alterLuaFirst))							-- Add tags to DNSQuery first
+
+    addAction(AllRule(), RemoteLogAction(rl, alterProtobufQuery, {useServerID=true}))				-- Send protobuf message before lookup
+
+    addResponseAction(AllRule(), RemoteLogResponseAction(rl, alterProtobufResponse, true, {useServerID=true}))	-- Send protobuf message after lookup
+
+    """

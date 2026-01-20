@@ -309,7 +309,7 @@ static std::vector<dnsdist::console::completion::ConsoleKeyword> s_consoleKeywor
   {"setVerbose", true, "bool", "set whether log messages at the verbose level will be logged"},
   {"setVerboseHealthChecks", true, "bool", "set whether health check errors will be logged"},
   {"setVerboseLogDestination", true, "destination file", "Set a destination file to write the 'verbose' log messages to, instead of sending them to syslog and/or the standard output"},
-  {"setWebserverConfig", true, "[{password=string, apiKey=string, customHeaders, statsRequireAuthentication}]", "Updates webserver configuration"},
+  {"setWebserverConfig", true, "[{password=string, apiKey=string, customHeaders, statsRequireAuthentication, prometheusAddInstanceLabel=bool}]", "Updates webserver configuration"},
   {"setWeightedBalancingFactor", true, "factor", "Set the balancing factor for bounded-load weighted policies (whashed, wrandom)"},
   {"setWHashedPerturbation", true, "value", "Set the hash perturbation value to be used in the whashed policy instead of a random one, allowing to have consistent whashed results on different instance"},
   {"show", true, "string", "outputs `string`"},
@@ -344,8 +344,8 @@ static std::vector<dnsdist::console::completion::ConsoleKeyword> s_consoleKeywor
   {"SetMacAddrAction", true, "option", "Add the source MAC address to the query as EDNS0 option option. This action is currently only supported on Linux. Subsequent rules are processed after this action"},
   {"SetEDNSOptionAction", true, "option, data", "Add arbitrary EDNS option and data to the query. Subsequent rules are processed after this action"},
   {"SetEDNSOptionResponseAction", true, "option, data", "Add arbitrary EDNS option and data to the response. Subsequent rules are processed after this action"},
-  {"SetExtendedDNSErrorAction", true, "infoCode [, extraText]", "Set an Extended DNS Error status that will be added to the response corresponding to the current query. Subsequent rules are processed after this action"},
-  {"SetExtendedDNSErrorResponseAction", true, "infoCode [, extraText]", "Set an Extended DNS Error status that will be added to this response. Subsequent rules are processed after this action"},
+  {"SetExtendedDNSErrorAction", true, "infoCode [, extraText [, clearExistingEntries]]", "Set an Extended DNS Error status that will be added to the response corresponding to the current query. Subsequent rules are processed after this action"},
+  {"SetExtendedDNSErrorResponseAction", true, "infoCode [, extraText [, clearExistingEntries]]", "Set an Extended DNS Error status that will be added to this response. Subsequent rules are processed after this action"},
   {"SetNoRecurseAction", true, "", "strip RD bit from the question, let it go through"},
   {"setOutgoingDoHWorkerThreads", true, "n", "Number of outgoing DoH worker threads"},
   {"SetProxyProtocolValuesAction", true, "values", "Set the Proxy-Protocol values for this queries to 'values'"},
@@ -381,6 +381,8 @@ static std::vector<dnsdist::console::completion::ConsoleKeyword> s_consoleKeywor
   {"whashed", false, "", "Weighted hashed ('sticky') distribution over available servers, based on the server 'weight' parameter"},
   {"chashed", false, "", "Consistent hashed ('sticky') distribution over available servers, also based on the server 'weight' parameter"},
   {"wrandom", false, "", "Weighted random over available servers, based on the server 'weight' parameter"},
+  {"setServerID", true, "name", "Set the internal Server ID to this value"},
+  {"getServerID", true, "", "Get the internal Server ID as a string"},
 };
 
 #if defined(HAVE_LIBEDIT)

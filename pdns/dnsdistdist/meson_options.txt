@@ -28,7 +28,6 @@ option('systemd-service-group', type: 'string', value: 'dnsdist', description: '
 option('auto-var-init', type: 'combo', value: 'disabled', choices: ['zero', 'pattern', 'disabled'], description: 'Enable initialization of automatic variables')
 option('snmp', type: 'feature', value: 'disabled', description: 'Enable SNMP')
 option('dnstap', type: 'feature', value: 'auto', description: 'Enable DNSTAP support through libfstrm')
-option('h2o', type: 'feature', value: 'disabled', description: 'Enable H2O library with event loop support for DNS over HTTP/2')
 option('nghttp2', type: 'feature', value: 'auto', description: 'Enable nghttp2 library support for DNS over HTTP/2')
 option('cdb', type: 'feature', value: 'auto', description: 'CDB key-value store support')
 option('lmdb', type: 'feature', value: 'auto', description: 'LMDB key-value store support')
@@ -41,3 +40,4 @@ option('fuzzer_ldflags', type: 'string', value: '', description: 'Linker flags u
 option('yaml', type: 'feature', value: 'disabled', description: 'Enable YAML configuration')
 option('man-pages', type: 'boolean', value: true, description: 'Generate man pages')
 option('clang-coverage-format', type: 'boolean', value: false, description: 'Whether to generate coverage data in clang format')
+option('benchmark', type: 'boolean', value: false, description: 'Whether to run microbenchmarks')

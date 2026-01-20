@@ -23,10 +23,12 @@
 #include <optional>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 #include "dnsdist-actions-factory.hh"
 
 #include "config.h"
+#include "dnsdist-configuration.hh"
 #include "dnsdist.hh"
 #include "dnsdist-async.hh"
 #include "dnsdist-dnsparser.hh"
@@ -547,10 +549,12 @@ public:
       return result;
     }
     catch (const std::exception& e) {
-      warnlog("LuaAction failed inside Lua, returning ServFail: %s", e.what());
+      SLOG(warnlog("LuaAction failed inside Lua, returning ServFail: %s", e.what()),
+           dnsquestion->getLogger()->error(Logr::Warning, e.what(), "LuaAction failed inside Lua, returning ServFail"));
     }
     catch (...) {
-      warnlog("LuaAction failed inside Lua, returning ServFail: [unknown exception]");
+      SLOG(warnlog("LuaAction failed inside Lua, returning ServFail: [unknown exception]"),
+           dnsquestion->getLogger()->error(Logr::Warning, "[unknown exception]", "LuaAction failed inside Lua, returning ServFail"));
     }
     return DNSAction::Action::ServFail;
   }
@@ -592,10 +596,12 @@ public:
       return result;
     }
     catch (const std::exception& e) {
-      warnlog("LuaResponseAction failed inside Lua, returning ServFail: %s", e.what());
+      SLOG(warnlog("LuaResponseAction failed inside Lua, returning ServFail: %s", e.what()),
+           response->getLogger()->error(Logr::Warning, e.what(), "LuaResponseAction failed inside Lua, returning ServFail"));
     }
     catch (...) {
-      warnlog("LuaResponseAction failed inside Lua, returning ServFail: [unknown exception]");
+      SLOG(warnlog("LuaResponseAction failed inside Lua, returning ServFail: [unknown exception]"),
+           response->getLogger()->error(Logr::Warning, "[unknown exception]", "LuaResponseAction failed inside Lua, returning ServFail"));
     }
     return DNSResponseAction::Action::ServFail;
   }
@@ -640,10 +646,12 @@ public:
       return result;
     }
     catch (const std::exception& e) {
-      warnlog("LuaFFIAction failed inside Lua, returning ServFail: %s", e.what());
+      SLOG(warnlog("LuaFFIAction failed inside Lua, returning ServFail: %s", e.what()),
+           dnsquestion->getLogger()->error(Logr::Warning, e.what(), "LuaFFIAction failed inside Lua, returning ServFail"));
     }
     catch (...) {
-      warnlog("LuaFFIAction failed inside Lua, returning ServFail: [unknown exception]");
+      SLOG(warnlog("LuaFFIAction failed inside Lua, returning ServFail: [unknown exception]"),
+           dnsquestion->getLogger()->error(Logr::Warning, "[unknown exception]", "LuaFFIAction failed inside Lua, returning ServFail"));
     }
     return DNSAction::Action::ServFail;
   }
@@ -697,10 +705,12 @@ public:
       return static_cast<DNSAction::Action>(ret);
     }
     catch (const std::exception& e) {
-      warnlog("LuaFFIPerThreadAction failed inside Lua, returning ServFail: %s", e.what());
+      SLOG(warnlog("LuaFFIPerthreadAction failed inside Lua, returning ServFail: %s", e.what()),
+           dnsquestion->getLogger()->error(Logr::Warning, e.what(), "LuaFFIPerthreadAction failed inside Lua, returning ServFail"));
     }
     catch (...) {
-      warnlog("LuaFFIPerthreadAction failed inside Lua, returning ServFail: [unknown exception]");
+      SLOG(warnlog("LuaFFIPerthreadAction failed inside Lua, returning ServFail: [unknown exception]"),
+           dnsquestion->getLogger()->error(Logr::Warning, "[unknown exception]", "LuaFFIPerthreadAction failed inside Lua, returning ServFail"));
     }
     return DNSAction::Action::ServFail;
   }
@@ -759,10 +769,12 @@ public:
       return result;
     }
     catch (const std::exception& e) {
-      warnlog("LuaFFIResponseAction failed inside Lua, returning ServFail: %s", e.what());
+      SLOG(warnlog("LuaFFIResponseAction failed inside Lua, returning ServFail: %s", e.what()),
+           response->getLogger()->error(Logr::Warning, e.what(), "LuaFFIResponseAction failed inside Lua, returning ServFail"));
     }
     catch (...) {
-      warnlog("LuaFFIResponseAction failed inside Lua, returning ServFail: [unknown exception]");
+      SLOG(warnlog("LuaFFIResponseAction failed inside Lua, returning ServFail: [unknown exception]"),
+           response->getLogger()->error(Logr::Warning, "[unknown exception]", "LuaFFIResponseAction failed inside Lua, returning ServFail"));
     }
     return DNSResponseAction::Action::ServFail;
   }
@@ -816,10 +828,12 @@ public:
       return static_cast<DNSResponseAction::Action>(ret);
     }
     catch (const std::exception& e) {
-      warnlog("LuaFFIPerThreadResponseAction failed inside Lua, returning ServFail: %s", e.what());
+      SLOG(warnlog("LuaFFIPerThreadResponseAction failed inside Lua, returning ServFail: %s", e.what()),
+           response->getLogger()->error(Logr::Warning, e.what(), "LuaFFIPerThreadResponseAction failed inside Lua, returning ServFail"));
     }
     catch (...) {
-      warnlog("LuaFFIPerthreadResponseAction failed inside Lua, returning ServFail: [unknown exception]");
+      SLOG(warnlog("LuaFFIPerThreadResponseAction failed inside Lua, returning ServFail: [unknown exception]"),
+           response->getLogger()->error(Logr::Warning, "[unknown exception]", "LuaFFIPerThreadResponseAction failed inside Lua, returning ServFail"));
     }
     return DNSResponseAction::Action::ServFail;
   }
@@ -975,7 +989,7 @@ public:
       PacketBuffer newContent;
       newContent.reserve(dnsquestion->getData().size());
 
-      if (!slowRewriteEDNSOptionInQueryWithRecords(dnsquestion->getData(), newContent, ednsAdded, d_code, optionAdded, true, optRData)) {
+      if (!slowRewriteEDNSOptionInQueryWithRecords(dnsquestion->getData(), newContent, ednsAdded, d_code, optionAdded, true, false, optRData)) {
         return Action::None;
       }
 
@@ -1107,10 +1121,12 @@ public:
     if (!filepointer) {
       if (!d_verboseOnly || dnsdist::configuration::getCurrentRuntimeConfiguration().d_verbose) {
         if (d_includeTimestamp) {
-          infolog("[%u.%u] Packet from %s for %s %s with id %d", static_cast<unsigned long long>(dnsquestion->getQueryRealTime().tv_sec), static_cast<unsigned long>(dnsquestion->getQueryRealTime().tv_nsec), dnsquestion->ids.origRemote.toStringWithPort(), dnsquestion->ids.qname.toString(), QType(dnsquestion->ids.qtype).toString(), dnsquestion->getHeader()->id);
+          SLOG(infolog("[%u.%u] Packet from %s for %s %s with id %d", static_cast<unsigned long long>(dnsquestion->getQueryRealTime().tv_sec), static_cast<unsigned long>(dnsquestion->getQueryRealTime().tv_nsec), dnsquestion->ids.origRemote.toStringWithPort(), dnsquestion->ids.qname.toString(), QType(dnsquestion->ids.qtype).toString(), dnsquestion->getHeader()->id),
+               dnsquestion->getLogger()->info(Logr::Info, "Logging packet", "dns.question.real_time_sec", Logging::Loggable(dnsquestion->getQueryRealTime().tv_sec), "dns.question.real_time_nsec", Logging::Loggable(dnsquestion->getQueryRealTime().tv_nsec)));
         }
         else {
-          infolog("Packet from %s for %s %s with id %d", dnsquestion->ids.origRemote.toStringWithPort(), dnsquestion->ids.qname.toString(), QType(dnsquestion->ids.qtype).toString(), dnsquestion->getHeader()->id);
+          SLOG(infolog("Packet from %s for %s %s with id %d", dnsquestion->ids.origRemote.toStringWithPort(), dnsquestion->ids.qname.toString(), QType(dnsquestion->ids.qtype).toString(), dnsquestion->getHeader()->id),
+               dnsquestion->getLogger()->info(Logr::Info, "Logging packet"));
         }
       }
     }
@@ -1159,7 +1175,9 @@ public:
   void reload() override
   {
     if (!reopenLogFile()) {
-      warnlog("Unable to open file '%s' for logging: %s", d_fname, stringerror());
+      int savederrno = errno;
+      SLOG(warnlog("Unable to open file '%s' for logging: %s", d_fname, stringerror(savederrno)),
+           dnsdist::logging::getTopLogger("LogAction::reload")->error(Logr::Warning, savederrno, "Unable to open file for logging", "path", Logging::Loggable(d_fname)));
     }
   }
 
@@ -1220,10 +1238,12 @@ public:
     if (!filepointer) {
       if (!d_verboseOnly || dnsdist::configuration::getCurrentRuntimeConfiguration().d_verbose) {
         if (d_includeTimestamp) {
-          infolog("[%u.%u] Answer to %s for %s %s (%s) with id %u", static_cast<unsigned long long>(response->getQueryRealTime().tv_sec), static_cast<unsigned long>(response->getQueryRealTime().tv_nsec), response->ids.origRemote.toStringWithPort(), response->ids.qname.toString(), QType(response->ids.qtype).toString(), RCode::to_s(response->getHeader()->rcode), response->getHeader()->id);
+          SLOG(infolog("[%u.%u] Answer to %s for %s %s (%s) with id %u", static_cast<unsigned long long>(response->getQueryRealTime().tv_sec), static_cast<unsigned long>(response->getQueryRealTime().tv_nsec), response->ids.origRemote.toStringWithPort(), response->ids.qname.toString(), QType(response->ids.qtype).toString(), RCode::to_s(response->getHeader()->rcode), response->getHeader()->id),
+               response->getLogger()->info(Logr::Info, "Logging response packet", "dns.question.real_time_sec", Logging::Loggable(response->getQueryRealTime().tv_sec), "dns.question.real_time_nsec", Logging::Loggable(response->getQueryRealTime().tv_nsec)));
         }
         else {
-          infolog("Answer to %s for %s %s (%s) with id %u", response->ids.origRemote.toStringWithPort(), response->ids.qname.toString(), QType(response->ids.qtype).toString(), RCode::to_s(response->getHeader()->rcode), response->getHeader()->id);
+          SLOG(infolog("Answer to %s for %s %s (%s) with id %u", response->ids.origRemote.toStringWithPort(), response->ids.qname.toString(), QType(response->ids.qtype).toString(), RCode::to_s(response->getHeader()->rcode), response->getHeader()->id),
+               response->getLogger()->info("Logging response packet"));
         }
       }
     }
@@ -1249,7 +1269,9 @@ public:
   void reload() override
   {
     if (!reopenLogFile()) {
-      warnlog("Unable to open file '%s' for logging: %s", d_fname, stringerror());
+      int savederrno = errno;
+      SLOG(warnlog("Unable to open file '%s' for logging: %s", d_fname, stringerror(savederrno)),
+           dnsdist::logging::getTopLogger("LogResponseAction::reload")->error(Logr::Warning, savederrno, "Unable to open file for logging", "path", Logging::Loggable(d_fname)));
     }
   }
 
@@ -1501,15 +1523,18 @@ static void remoteLoggerQueueData(RemoteLoggerInterface& remoteLogger, const std
   case RemoteLoggerInterface::Result::Queued:
     break;
   case RemoteLoggerInterface::Result::PipeFull: {
-    vinfolog("%s: %s", remoteLogger.name(), RemoteLoggerInterface::toErrorString(ret));
+    VERBOSESLOG(infolog("%s: %s", remoteLogger.name(), RemoteLoggerInterface::toErrorString(ret)),
+                dnsdist::logging::getTopLogger("remote-logger")->error(Logr::Info, RemoteLoggerInterface::toErrorString(ret), "Remote logger pipe full event", "remote_logger_name", Logging::Loggable(remoteLogger.name())));
     break;
   }
   case RemoteLoggerInterface::Result::TooLarge: {
-    warnlog("%s: %s", remoteLogger.name(), RemoteLoggerInterface::toErrorString(ret));
+    SLOG(warnlog("%s: %s", remoteLogger.name(), RemoteLoggerInterface::toErrorString(ret)),
+         dnsdist::logging::getTopLogger("remote-logger")->error(Logr::Warning, RemoteLoggerInterface::toErrorString(ret), "Remote logger too large event", "remote_logger_name", Logging::Loggable(remoteLogger.name())));
     break;
   }
   case RemoteLoggerInterface::Result::OtherError:
-    warnlog("%s: %s", remoteLogger.name(), RemoteLoggerInterface::toErrorString(ret));
+    SLOG(warnlog("%s: %s", remoteLogger.name(), RemoteLoggerInterface::toErrorString(ret)),
+         dnsdist::logging::getTopLogger("remote-logger")->error(Logr::Warning, RemoteLoggerInterface::toErrorString(ret), "Remote logger error event", "remote_logger_name", Logging::Loggable(remoteLogger.name())));
   }
 }
 
@@ -1606,7 +1631,7 @@ class RemoteLogAction : public DNSAction, public boost::noncopyable
 public:
   // this action does not stop the processing
   RemoteLogAction(RemoteLogActionConfiguration& config) :
-    d_tagsToExport(std::move(config.tagsToExport)), d_metas(std::move(config.metas)), d_logger(config.logger), d_alterFunc(std::move(config.alterQueryFunc)), d_serverID(config.serverID), d_ipEncryptKey(config.ipEncryptKey), d_ipEncryptMethod(config.ipEncryptMethod)
+    d_tagsToExport(std::move(config.tagsToExport)), d_metas(std::move(config.metas)), d_logger(config.logger), d_alterFunc(std::move(config.alterQueryFunc)), d_serverID(config.serverID), d_ipEncryptKey(config.ipEncryptKey), d_ipEncryptMethod(config.ipEncryptMethod), d_useServerID(config.useServerID)
   {
     if (!d_ipEncryptKey.empty() && d_ipEncryptMethod == "ipcrypt-pfx") {
       d_ipcrypt2 = pdns::ipcrypt2::IPCrypt2(pdns::ipcrypt2::IPCryptMethod::pfx, d_ipEncryptKey);
@@ -1624,7 +1649,10 @@ public:
     }
 
     DNSDistProtoBufMessage message(*dnsquestion);
-    if (!d_serverID.empty()) {
+    if (d_useServerID) {
+      message.setServerIdentity(dnsdist::configuration::getCurrentRuntimeConfiguration().d_server_id);
+    }
+    else if (!d_serverID.empty()) {
       message.setServerIdentity(d_serverID);
     }
 
@@ -1674,50 +1702,91 @@ private:
   std::string d_ipEncryptKey;
   std::string d_ipEncryptMethod;
   std::optional<pdns::ipcrypt2::IPCrypt2> d_ipcrypt2{std::nullopt};
+  bool d_useServerID;
 };
 #endif /* DISABLE_PROTOBUF */
 
+#ifndef DISABLE_PROTOBUF
 class SetTraceAction : public DNSAction
 {
 public:
-  SetTraceAction(bool value, std::optional<bool> useIncomingTraceID, std::optional<short unsigned int> incomingTraceIDOptionCode) :
-    d_value{value}, d_useIncomingTraceID(useIncomingTraceID), d_incomingTraceIDOptionCode(incomingTraceIDOptionCode) {};
+  SetTraceAction(SetTraceActionConfiguration& config) :
+    d_loggers(config.remote_loggers), d_incomingTraceIDOptionCode(config.trace_edns_option), d_value{config.value}, d_useIncomingTraceID(config.use_incoming_traceid), d_stripIncomingTraceID(config.strip_incoming_traceid) {};
 
   DNSAction::Action operator()([[maybe_unused]] DNSQuestion* dnsquestion, [[maybe_unused]] std::string* ruleresult) const override
   {
-#ifndef DISABLE_PROTOBUF
     auto tracer = dnsquestion->ids.getTracer();
     if (tracer == nullptr) {
-      vinfolog("SetTraceAction called, but OpenTelemetry tracing is globally disabled. Did you forget to call setOpenTelemetryTracing?");
+      VERBOSESLOG(infolog("SetTraceAction called, but OpenTelemetry tracing is globally disabled. Did you forget to call setOpenTelemetryTracing?"),
+                  dnsquestion->getLogger()->info(Logr::Info, "SetTraceAction called, but OpenTelemetry tracing is globally disabled. Did you forget to call setOpenTelemetryTracing?"));
       return Action::None;
     }
+
     dnsquestion->ids.tracingEnabled = d_value;
-    if (d_value) {
-      tracer->setRootSpanAttribute("query.qname", AnyValue{dnsquestion->ids.qname.toStringNoDot()});
-      tracer->setRootSpanAttribute("query.qtype", AnyValue{QType(dnsquestion->ids.qtype).toString()});
-      tracer->setRootSpanAttribute("query.remote.address", AnyValue{dnsquestion->ids.origRemote.toString()});
-      tracer->setRootSpanAttribute("query.remote.port", AnyValue{dnsquestion->ids.origRemote.getPort()});
-      if (d_useIncomingTraceID.value_or(false)) {
-        if (dnsquestion->ednsOptions == nullptr && !parseEDNSOptions(*dnsquestion)) {
-          // Maybe parsed, but no EDNS found
-          return Action::None;
-        }
-        if (dnsquestion->ednsOptions == nullptr) {
-          // Parsing failed, log a warning and return
-          vinfolog("parsing EDNS options failed while looking for OpenTelemetry Trace ID");
-          return Action::None;
-        }
-        pdns::trace::TraceID traceID;
-        pdns::trace::SpanID spanID;
-        if (pdns::trace::extractOTraceIDs(*(dnsquestion->ednsOptions), EDNSOptionCode::EDNSOptionCodeEnum(d_incomingTraceIDOptionCode.value_or(EDNSOptionCode::OTTRACEIDS)), traceID, spanID)) {
-          tracer->setTraceID(traceID);
-          if (spanID != pdns::trace::s_emptySpanID) {
-            tracer->setRootSpanID(spanID);
-          }
+
+    if (!d_value) {
+      // Tracing has been turned off or should not be enabled, clean up
+      dnsquestion->ids.ottraceLoggers.clear();
+      return Action::None;
+    }
+
+    dnsquestion->ids.ottraceLoggers = d_loggers;
+    tracer->setRootSpanAttribute("query.qname", AnyValue{dnsquestion->ids.qname.toStringNoDot()});
+    tracer->setRootSpanAttribute("query.qtype", AnyValue{QType(dnsquestion->ids.qtype).toString()});
+    tracer->setRootSpanAttribute("query.remote.address", AnyValue{dnsquestion->ids.origRemote.toString()});
+    tracer->setRootSpanAttribute("query.remote.port", AnyValue{dnsquestion->ids.origRemote.getPort()});
+
+    if (!d_useIncomingTraceID && !d_stripIncomingTraceID) {
+      // No need to check EDNS
+      return Action::None;
+    }
+
+    // We need to check if EDNS Options exist
+    if (dnsquestion->ednsOptions == nullptr && !parseEDNSOptions(*dnsquestion)) {
+      // Maybe parsed, but no EDNS found
+      return Action::None;
+    }
+    if (dnsquestion->ednsOptions == nullptr) {
+      // Parsing failed, log a warning and return
+      VERBOSESLOG(infolog("parsing EDNS options failed while looking for OpenTelemetry Trace ID"),
+                  dnsquestion->getLogger()->info(Logr::Info, "Parsing EDNS options failed while looking for OpenTelemetry Trace ID"));
+      return Action::None;
+    }
+
+    if (d_useIncomingTraceID) {
+      pdns::trace::TraceID traceID;
+      pdns::trace::SpanID spanID;
+      if (pdns::trace::extractOTraceIDs(*(dnsquestion->ednsOptions), EDNSOptionCode::EDNSOptionCodeEnum(d_incomingTraceIDOptionCode), traceID, spanID)) {
+        tracer->setTraceID(traceID);
+        if (spanID != pdns::trace::s_emptySpanID) {
+          tracer->setRootSpanID(spanID);
         }
       }
     }
-#endif
+
+    if (d_stripIncomingTraceID) {
+      uint16_t optStart;
+      size_t optLen;
+      bool last;
+
+      if (locateEDNSOptRR(dnsquestion->getData(), &optStart, &optLen, &last) != 0) {
+        // Can't find the EDNS OPT RR, can't happen
+        return Action::None;
+      }
+
+      if (!last) {
+        VERBOSESLOG(infolog("SetTraceAction: EDNS options is not the last RR in the packet, not removing TRACEPARENT"),
+                    dnsquestion->getLogger()->info(Logr::Info, "SetTraceAction: EDNS options is not the last RR in the packet, not removing TRACEPARENT"));
+        return Action::None;
+      }
+
+      size_t existingOptLen = optLen;
+      removeEDNSOptionFromOPT(reinterpret_cast<char*>(&dnsquestion->getMutableData().at(optStart)), &optLen, d_incomingTraceIDOptionCode);
+      dnsquestion->getMutableData().resize(dnsquestion->getData().size() - (existingOptLen - optLen));
+      // Ensure the EDNS Option View is not out of date
+      dnsquestion->ednsOptions.reset();
+    }
+
     return Action::None;
   }
 
@@ -1727,10 +1796,14 @@ public:
   }
 
 private:
+  std::vector<std::shared_ptr<RemoteLoggerInterface>> d_loggers;
+  short unsigned int d_incomingTraceIDOptionCode;
+
   bool d_value;
-  std::optional<bool> d_useIncomingTraceID;
-  std::optional<short unsigned int> d_incomingTraceIDOptionCode;
+  bool d_useIncomingTraceID;
+  bool d_stripIncomingTraceID;
 };
+#endif
 
 class SNMPTrapAction : public DNSAction
 {
@@ -1831,7 +1904,7 @@ class RemoteLogResponseAction : public DNSResponseAction, public boost::noncopya
 public:
   // this action does not stop the processing
   RemoteLogResponseAction(RemoteLogActionConfiguration& config) :
-    d_tagsToExport(std::move(config.tagsToExport)), d_metas(std::move(config.metas)), d_logger(config.logger), d_alterFunc(std::move(config.alterResponseFunc)), d_serverID(config.serverID), d_ipEncryptKey(config.ipEncryptKey), d_ipEncryptMethod(config.ipEncryptMethod), d_exportExtendedErrorsToMeta(std::move(config.exportExtendedErrorsToMeta)), d_includeCNAME(config.includeCNAME), d_delay(config.delay)
+    d_tagsToExport(std::move(config.tagsToExport)), d_metas(std::move(config.metas)), d_logger(config.logger), d_alterFunc(std::move(config.alterResponseFunc)), d_serverID(config.serverID), d_ipEncryptKey(config.ipEncryptKey), d_ipEncryptMethod(config.ipEncryptMethod), d_exportExtendedErrorsToMeta(std::move(config.exportExtendedErrorsToMeta)), d_includeCNAME(config.includeCNAME), d_useServerID(config.useServerID), d_delay(config.delay)
   {
     if (!d_ipEncryptKey.empty() && d_ipEncryptMethod == "ipcrypt-pfx") {
       d_ipcrypt2 = pdns::ipcrypt2::IPCrypt2(pdns::ipcrypt2::IPCryptMethod::pfx, d_ipEncryptKey);
@@ -1848,7 +1921,10 @@ public:
     }
 
     DNSDistProtoBufMessage message(*response, d_includeCNAME);
-    if (!d_serverID.empty()) {
+    if (d_useServerID) {
+      message.setServerIdentity(dnsdist::configuration::getCurrentRuntimeConfiguration().d_server_id);
+    }
+    else if (!d_serverID.empty()) {
       message.setServerIdentity(d_serverID);
     }
 
@@ -1911,6 +1987,7 @@ private:
   std::optional<pdns::ipcrypt2::IPCrypt2> d_ipcrypt2{std::nullopt};
   std::optional<std::string> d_exportExtendedErrorsToMeta{std::nullopt};
   bool d_includeCNAME;
+  bool d_useServerID{false};
   bool d_delay{false};
 };
 
@@ -2393,54 +2470,76 @@ class SetExtendedDNSErrorAction : public DNSAction
 {
 public:
   // this action does not stop the processing
-  SetExtendedDNSErrorAction(uint16_t infoCode, const std::string& extraText)
+  SetExtendedDNSErrorAction(uint16_t infoCode, const std::string& extraText, bool clearExistingEntries)
   {
-    d_ede.infoCode = infoCode;
-    d_ede.extraText = extraText;
+    d_ede.error.infoCode = infoCode;
+    d_ede.error.extraText = extraText;
+    d_ede.clearExisting = clearExistingEntries;
   }
 
   DNSAction::Action operator()(DNSQuestion* dnsQuestion, std::string* ruleresult) const override
   {
     (void)ruleresult;
-    dnsQuestion->ids.d_extendedError = std::make_unique<EDNSExtendedError>(d_ede);
+    if (d_ede.clearExisting) {
+      dnsQuestion->ids.d_extendedErrors = std::make_unique<std::vector<edns::SetExtendedDNSErrorOperation>>(std::initializer_list<edns::SetExtendedDNSErrorOperation>({d_ede}));
+    }
+    else {
+      if (!dnsQuestion->ids.d_extendedErrors) {
+        dnsQuestion->ids.d_extendedErrors = std::make_unique<std::vector<edns::SetExtendedDNSErrorOperation>>(std::initializer_list<edns::SetExtendedDNSErrorOperation>({d_ede}));
+      }
+      else {
+        dnsQuestion->ids.d_extendedErrors->emplace_back(d_ede);
+      }
+    }
 
     return DNSAction::Action::None;
   }
 
   [[nodiscard]] std::string toString() const override
   {
-    return "set EDNS Extended DNS Error to " + std::to_string(d_ede.infoCode) + (d_ede.extraText.empty() ? std::string() : std::string(": \"") + d_ede.extraText + std::string("\""));
+    return "set EDNS Extended DNS Error to " + std::to_string(d_ede.error.infoCode) + (d_ede.error.extraText.empty() ? std::string() : std::string(": \"") + d_ede.error.extraText + std::string("\""));
   }
 
 private:
-  EDNSExtendedError d_ede;
+  edns::SetExtendedDNSErrorOperation d_ede;
 };
 
 class SetExtendedDNSErrorResponseAction : public DNSResponseAction
 {
 public:
   // this action does not stop the processing
-  SetExtendedDNSErrorResponseAction(uint16_t infoCode, const std::string& extraText)
+  SetExtendedDNSErrorResponseAction(uint16_t infoCode, const std::string& extraText, bool clearExistingEntries)
   {
-    d_ede.infoCode = infoCode;
-    d_ede.extraText = extraText;
+    d_ede.error.infoCode = infoCode;
+    d_ede.error.extraText = extraText;
+    d_ede.clearExisting = clearExistingEntries;
   }
 
   DNSResponseAction::Action operator()(DNSResponse* dnsResponse, std::string* ruleresult) const override
   {
     (void)ruleresult;
-    dnsResponse->ids.d_extendedError = std::make_unique<EDNSExtendedError>(d_ede);
+    if (d_ede.clearExisting) {
+      dnsResponse->ids.d_extendedErrors = std::make_unique<std::vector<edns::SetExtendedDNSErrorOperation>>(std::initializer_list<edns::SetExtendedDNSErrorOperation>({d_ede}));
+    }
+    else {
+      if (!dnsResponse->ids.d_extendedErrors) {
+        dnsResponse->ids.d_extendedErrors = std::make_unique<std::vector<edns::SetExtendedDNSErrorOperation>>(std::initializer_list<edns::SetExtendedDNSErrorOperation>({d_ede}));
+      }
+      else {
+        dnsResponse->ids.d_extendedErrors->emplace_back(d_ede);
+      }
+    }
 
     return DNSResponseAction::Action::None;
   }
 
   [[nodiscard]] std::string toString() const override
   {
-    return "set EDNS Extended DNS Error to " + std::to_string(d_ede.infoCode) + (d_ede.extraText.empty() ? std::string() : std::string(": \"") + d_ede.extraText + std::string("\""));
+    return "set EDNS Extended DNS Error to " + std::to_string(d_ede.error.infoCode) + (d_ede.error.extraText.empty() ? std::string() : std::string(": \"") + d_ede.error.extraText + std::string("\""));
   }
 
 private:
-  EDNSExtendedError d_ede;
+  edns::SetExtendedDNSErrorOperation d_ede;
 };
 
 class LimitTTLResponseAction : public DNSResponseAction, public boost::noncopyable
@@ -2506,6 +2605,11 @@ std::shared_ptr<DNSResponseAction> getLuaFFIResponseAction(dnsdist::actions::Lua
 }
 
 #ifndef DISABLE_PROTOBUF
+std::shared_ptr<DNSAction> getSetTraceAction(SetTraceActionConfiguration& config)
+{
+  return std::shared_ptr<DNSAction>(new SetTraceAction(config));
+}
+
 std::shared_ptr<DNSAction> getRemoteLogAction(RemoteLogActionConfiguration& config)
 {
   return std::shared_ptr<DNSAction>(new RemoteLogAction(config));

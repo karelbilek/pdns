@@ -82,7 +82,7 @@ bool g_reusePort{false};
 bool g_gettagNeedsEDNSOptions{false};
 bool g_useKernelTimestamp;
 std::atomic<uint32_t> g_maxCacheEntries, g_maxPacketCacheEntries;
-boost::container::flat_set<uint16_t> g_avoidUdpSourcePorts;
+std::vector<bool> g_avoidUdpSourcePorts;
 uint16_t g_minUdpSourcePort;
 uint16_t g_maxUdpSourcePort;
 double g_balancingFactor;
@@ -176,7 +176,7 @@ int UDPClientSocks::makeClientSocket(int family, const std::optional<ComboAddres
     else {
       do {
         port = g_minUdpSourcePort + dns_random(g_maxUdpSourcePort - g_minUdpSourcePort + 1);
-      } while (g_avoidUdpSourcePorts.count(port) != 0);
+      } while (g_avoidUdpSourcePorts[port]);
     }
 
     // localAddress is set if a cookie was involved, bind to the same address the cookie is
@@ -2124,7 +2124,10 @@ void requestWipeCaches(const DNSName& canon)
   ThreadMSG* tmsg = new ThreadMSG(); // NOLINT: pointer owner
   tmsg->func = [=] { return pleaseWipeCaches(canon, true, 0xffff); };
   tmsg->wantAnswer = false;
+  __tsan_release(tmsg);
+
   if (write(RecThreadInfo::info(0).getPipes().writeToThread, &tmsg, sizeof(tmsg)) != sizeof(tmsg)) { // NOLINT: correct sizeof
+    __tsan_acquire(tmsg);
     delete tmsg; // NOLINT: pointer owner
 
     unixDie("write to thread pipe returned wrong size or error");
@@ -2889,6 +2892,7 @@ void distributeAsyncFunction(const string& packet, const pipefunc_t& func)
   ThreadMSG* tmsg = new ThreadMSG(); // NOLINT: pointer ownership
   tmsg->func = func;
   tmsg->wantAnswer = false;
+  __tsan_release(tmsg);
 
   if (!trySendingQueryToWorker(target, tmsg)) {
     /* if this function failed but did not raise an exception, it means that the pipe
@@ -2900,6 +2904,7 @@ void distributeAsyncFunction(const string& packet, const pipefunc_t& func)
 
     if (!trySendingQueryToWorker(newTarget, tmsg)) {
       t_Counters.at(rec::Counter::queryPipeFullDrops)++;
+      __tsan_acquire(tmsg);
       delete tmsg; // NOLINT: pointer ownership
     }
   }

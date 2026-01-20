@@ -19,38 +19,26 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
-#pragma once
+#define CATCH_CONFIG_NO_MAIN
+#include <catch2/catch_test_macros.hpp>
+#include <catch2/benchmark/catch_benchmark.hpp>
 
-#include "config.h"
+#include "dnsdist-dnsparser.hh"
 
-#ifdef HAVE_DNS_OVER_HTTPS
-#ifdef HAVE_LIBH2OEVLOOP
-
-#include <ctime>
-#include <memory>
-#include <string>
-
-struct CrossProtocolQuery;
-struct DNSQuestion;
-
-std::unique_ptr<CrossProtocolQuery> getDoHCrossProtocolQueryFromDQ(DNSQuestion& dq, bool isResponse);
-
-#include "dnsdist-doh-common.hh"
-
-struct H2ODOHFrontend : public DOHFrontend
+TEST_CASE("dnsdist-dnsparser")
 {
-public:
-  void setup() override;
-  void reloadCertificates() override;
+  const DNSName target("powerdns.com.");
+  const DNSName newTarget("dnsdist.org.");
+  const DNSName notTheTarget("not-powerdns.com.");
 
-  void rotateTicketsKey(time_t now) override;
-  void loadTicketsKeys(const std::string& keyFile) override;
-  void handleTicketsKeyRotation() override;
-  std::string getNextTicketsKeyRotation() const override;
-  size_t getTicketsKeysCount() override;
-};
+  PacketBuffer query;
+  GenericDNSPacketWriter<PacketBuffer> pw(query, target, QType::A, QClass::IN, 0);
+  pw.getHeader()->rd = 1;
+  pw.getHeader()->id = htons(42);
+  pw.commit();
 
-void dohThread(ClientState* clientState);
-
-#endif /* HAVE_LIBH2OEVLOOP */
-#endif /* HAVE_DNS_OVER_HTTPS  */
+  BENCHMARK("changeNameInDNSPacket")
+  {
+    dnsdist::changeNameInDNSPacket(query, target, newTarget);
+  };
+}

@@ -28,8 +28,12 @@
 #include "dnsdist-protobuf.hh"
 #include "dnsdist-rule-chains.hh"
 #include "dnstap.hh"
+#include "dolog.hh"
 #include "remote_logger.hh"
+#include <memory>
+#include <optional>
 #include <stdexcept>
+#include <vector>
 
 using responseParams_t = std::unordered_map<std::string, boost::variant<bool, uint32_t>>;
 
@@ -235,10 +239,36 @@ void setupLuaActions(LuaContext& luaCtx)
   });
 
 #ifndef DISABLE_PROTOBUF
+  luaCtx.writeFunction("SetTraceAction", [](bool value, std::optional<LuaAssociativeTable<std::shared_ptr<RemoteLoggerInterface>>> remote_loggers, std::optional<bool> use_incoming_traceid, std::optional<uint16_t> trace_edns_option, std::optional<bool> strip_incoming_traceid) {
+    dnsdist::actions::SetTraceActionConfiguration config;
+
+    if (remote_loggers) {
+      std::vector<std::shared_ptr<RemoteLoggerInterface>> loggers;
+      for (auto& remote_logger : remote_loggers.value()) {
+        if (remote_logger.second != nullptr) {
+          // avoids potentially-evaluated-expression warning with clang.
+          RemoteLoggerInterface& remoteLoggerRef = *remote_logger.second;
+          if (typeid(remoteLoggerRef) != typeid(RemoteLogger)) {
+            // We could let the user do what he wants, but wrapping PowerDNS Protobuf inside a FrameStream tagged as dnstap is logically wrong.
+            throw std::runtime_error(std::string("SetTraceAction only takes RemoteLogger."));
+          }
+          loggers.push_back(remote_logger.second);
+        }
+      }
+      config.remote_loggers = std::move(loggers);
+    }
+    config.value = value;
+    config.trace_edns_option = trace_edns_option.value_or(65500);
+    config.use_incoming_traceid = use_incoming_traceid.value_or(false);
+    config.strip_incoming_traceid = strip_incoming_traceid.value_or(false);
+
+    return dnsdist::actions::getSetTraceAction(config);
+  });
+
   // Used for both RemoteLogAction and RemoteLogResponseAction
   static const std::array<std::string, 2> s_validIpEncryptMethods = {"legacy", "ipcrypt-pfx"};
 
-  luaCtx.writeFunction("RemoteLogAction", [](std::shared_ptr<RemoteLoggerInterface> logger, std::optional<dnsdist::actions::ProtobufAlterFunction> alterFunc, std::optional<LuaAssociativeTable<std::string>> vars, std::optional<LuaAssociativeTable<std::string>> metas) {
+  luaCtx.writeFunction("RemoteLogAction", [](std::shared_ptr<RemoteLoggerInterface> logger, std::optional<dnsdist::actions::ProtobufAlterFunction> alterFunc, std::optional<LuaAssociativeTable<boost::variant<std::string, bool>>> vars, std::optional<LuaAssociativeTable<std::string>> metas) {
     if (logger) {
       // avoids potentially-evaluated-expression warning with clang.
       RemoteLoggerInterface& remoteLoggerRef = *logger;
@@ -254,10 +284,26 @@ void setupLuaActions(LuaContext& luaCtx)
     if (alterFunc) {
       config.alterQueryFunc = std::move(*alterFunc);
     }
-    getOptionalValue<std::string>(vars, "serverID", config.serverID);
-    getOptionalValue<std::string>(vars, "ipEncryptKey", config.ipEncryptKey);
-    getOptionalValue<std::string>(vars, "ipEncryptMethod", config.ipEncryptMethod);
-    getOptionalValue<std::string>(vars, "exportTags", tags);
+    if (getOptionalValue<std::string>(vars, "serverID", config.serverID) < 0) {
+      throw std::runtime_error("serverID in RemoteLogAction is not a string");
+    }
+    if (getOptionalValue<std::string>(vars, "ipEncryptKey", config.ipEncryptKey) < 0) {
+      throw std::runtime_error("ipEncryptKey in RemoteLogAction is not a string");
+    }
+    if (getOptionalValue<std::string>(vars, "ipEncryptMethod", config.ipEncryptMethod) < 0) {
+      throw std::runtime_error("ipEncryptMethod in RemoteLogAction is not a string");
+    }
+    if (getOptionalValue<std::string>(vars, "exportTags", tags) < 0) {
+      throw std::runtime_error("exportTags in RemoteLogAction is not a string");
+    }
+    if (getOptionalValue<bool>(vars, "useServerID", config.useServerID) < 0) {
+      throw std::runtime_error("useServerID in RemoteLogAction is not a string");
+    }
+
+    if (config.useServerID && !config.serverID.empty()) {
+      SLOG(warnlog("useServerID and serverID set in RemoteLogAction configuration. value for serverID will not be used"),
+           dnsdist::logging::getTopLogger("RemoteLogAction")->info(Logr::Warning, "useServerID and serverID set in RemoteLogAction configuration. value for serverID will not be used"));
+    }
 
     if (metas) {
       for (const auto& [key, value] : *metas) {
@@ -285,7 +331,7 @@ void setupLuaActions(LuaContext& luaCtx)
     return dnsdist::actions::getRemoteLogAction(config);
   });
 
-  luaCtx.writeFunction("RemoteLogResponseAction", [](std::shared_ptr<RemoteLoggerInterface> logger, std::optional<dnsdist::actions::ProtobufAlterResponseFunction> alterFunc, std::optional<bool> includeCNAME, std::optional<LuaAssociativeTable<std::string>> vars, std::optional<LuaAssociativeTable<std::string>> metas, std::optional<bool> delay) {
+  luaCtx.writeFunction("RemoteLogResponseAction", [](std::shared_ptr<RemoteLoggerInterface> logger, std::optional<dnsdist::actions::ProtobufAlterResponseFunction> alterFunc, std::optional<bool> includeCNAME, std::optional<LuaAssociativeTable<boost::variant<std::string, bool>>> vars, std::optional<LuaAssociativeTable<std::string>> metas, std::optional<bool> delay) {
     if (logger) {
       // avoids potentially-evaluated-expression warning with clang.
       RemoteLoggerInterface& remoteLoggerRef = *logger;
@@ -302,11 +348,29 @@ void setupLuaActions(LuaContext& luaCtx)
       config.alterResponseFunc = std::move(*alterFunc);
     }
     config.includeCNAME = includeCNAME ? *includeCNAME : false;
-    getOptionalValue<std::string>(vars, "serverID", config.serverID);
-    getOptionalValue<std::string>(vars, "ipEncryptKey", config.ipEncryptKey);
-    getOptionalValue<std::string>(vars, "ipEncryptMethod", config.ipEncryptMethod);
-    getOptionalValue<std::string>(vars, "exportTags", tags);
-    getOptionalValue<std::string>(vars, "exportExtendedErrorsToMeta", config.exportExtendedErrorsToMeta);
+    if (getOptionalValue<std::string>(vars, "serverID", config.serverID) < 0) {
+      throw std::runtime_error("serverID in RemoteLogResponseAction is not a string");
+    }
+    if (getOptionalValue<std::string>(vars, "ipEncryptKey", config.ipEncryptKey) < 0) {
+      throw std::runtime_error("ipEncryptKey in RemoteLogResponseAction is not a string");
+    }
+    if (getOptionalValue<std::string>(vars, "ipEncryptMethod", config.ipEncryptMethod) < 0) {
+      throw std::runtime_error("ipEncryptMethod in RemoteLogResponseAction is not a string");
+    }
+    if (getOptionalValue<std::string>(vars, "exportTags", tags) < 0) {
+      throw std::runtime_error("exportTags in RemoteLogResponseAction is not a string");
+    }
+    if (getOptionalValue<std::string>(vars, "exportExtendedErrorsToMeta", config.exportExtendedErrorsToMeta) < 0) {
+      throw std::runtime_error("exportExtendedErrorsToMeta in RemoteLogResponseAction is not a string");
+    }
+    if (getOptionalValue<bool>(vars, "useServerID", config.useServerID) < 0) {
+      throw std::runtime_error("useServerID in RemoteLogResponseAction is not a string");
+    }
+
+    if (config.useServerID && !config.serverID.empty()) {
+      SLOG(warnlog("useServerID and serverID set in RemoteLogResponseAction configuration. value for serverID will not be used"),
+           dnsdist::logging::getTopLogger("RemoteLogResponseAction")->info(Logr::Warning, "useServerID and serverID set in RemoteLogResponseAction configuration. value for serverID will not be used"));
+    }
 
     if (metas) {
       for (const auto& [key, value] : *metas) {

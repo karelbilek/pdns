@@ -74,7 +74,6 @@ subdir('meson' / 'ipcipher')                # IPCipher (requires libcrypto)
 subdir('meson' / 'cdb')                     # CDB
 subdir('meson' / 'ebpf')                    # eBPF
 subdir('meson' / 'gnutls')                  # GNUTLS
-subdir('meson' / 'h2o')                     # H2O
 subdir('meson' / 'lmdb')                    # LMDB
 subdir('meson' / 'nghttp2')                 # NGHTTP2
 subdir('meson' / 'quiche')                  # Quiche
@@ -85,6 +84,7 @@ subdir('meson' / 'doh2')                    # DNS over HTTP/2
 subdir('meson' / 'doq')                     # DNS over QUIC
 subdir('meson' / 'doh3')                    # DNS over HTTP/3
 subdir('meson' / 'yaml-configuration')      # YAML configuration
+subdir('meson' / 'catch2')                  # Microbenchmark
 
 common_sources = []
 
@@ -147,6 +147,7 @@ common_sources += files(
   src_dir / 'dnsdist-ipcrypt2.cc',
   src_dir / 'dnsdist-kvs.cc',
   src_dir / 'dnsdist-lbpolicies.cc',
+  src_dir / 'dnsdist-logging.cc',
   src_dir / 'dnsdist-lua-actions.cc',
   src_dir / 'dnsdist-lua-bindings.cc',
   src_dir / 'dnsdist-lua-bindings-dnscrypt.cc',
@@ -201,6 +202,7 @@ common_sources += files(
   src_dir / 'gettime.cc',
   src_dir / 'iputils.cc',
   src_dir / 'libssl.cc',
+  src_dir / 'logging.cc',
   src_dir / 'misc.cc',
   src_dir / 'protozero.cc',
   src_dir / 'protozero-trace.cc',
@@ -224,12 +226,6 @@ conditional_sources = {
     ],
     'condition': dep_cdb.found(),
   },
-  'doh': {
-    'sources': [
-      src_dir / 'doh.cc',
-    ],
-    'condition': dep_libh2o_evloop.found(),
-   },
   'doq': {
     'sources': [
       src_dir / 'doq.cc',
@@ -390,7 +386,6 @@ deps = [
   dep_libcrypto,
   dep_gnutls,
   dep_libedit,
-  dep_libh2o_evloop,
   dep_json11,
   dep_libnghttp2,
   dep_libquiche,
@@ -495,7 +490,10 @@ if get_option('fuzz-targets')
     'fuzz-target-dnsdistcache' : {
       'main': src_dir / 'fuzz_dnsdistcache.cc',
       'link-args': fuzzer_ldflags,
-      'files-extra': fuzz_extra_sources
+      'files-extra': fuzz_extra_sources,
+      'deps-extra': [
+         dep_libsystemd,
+       ]
     },
   }
   if get_option('xsk').allowed() and dep_libbpf.found() and dep_libxdp.found()
@@ -509,7 +507,10 @@ if get_option('fuzz-targets')
            src_dir / 'iputils.cc',
            src_dir / 'misc.cc',
            src_dir / 'xsk.cc'
-           ]
+           ],
+        'deps-extra': [
+           dep_libsystemd,
+         ]
        },
     }
   endif
@@ -588,7 +589,42 @@ if get_option('unit-tests')
           dep_ffi_interface,
           dep_lua,
           dep_protozero,
+          dep_libsystemd, # because of the journal logging backend
         ],
+    }
+  }
+endif
+
+benchmark_sources = files(
+  src_dir / 'bench-dnsdist-action-rcode.cc',
+  src_dir / 'bench-dnsdist-dnsparser_cc.cc',
+  src_dir / 'bench-dnsdist-opentelemetry_cc.cc',
+  src_dir / 'bench-dnsdist-rings_cc.cc',
+  src_dir / 'bench-misc_hh.cc',
+)
+
+if get_option('benchmark')
+  tools += {
+    'benchmarkrunner' : {
+      'main': [
+        src_dir / 'benchmarkrunner.cc',
+      ],
+      'files-extra': [
+        benchmark_sources,
+        config_h,
+        mplexer_sources,
+        src_dir / 'dnsdist-lbpolicies.cc',
+        src_dir / 'dnsdist-lua-ffi.cc',
+        src_dir / 'dnstap.cc',
+        src_dir / 'fstrm_logger.cc',
+      ],
+      'deps-extra': [
+        dep_catch2,
+        dep_dnstap,
+        dep_ffi_interface,
+        dep_lua,
+        dep_protozero,
+      ],
     }
   }
 endif
@@ -630,6 +666,10 @@ endforeach
 
 if get_option('unit-tests')
   test('testrunner', testrunner)
+endif
+
+if get_option('benchmark')
+  benchmark('benchmarkrunner', benchmarkrunner, timeout:240)
 endif
 
 # Man-pages.
