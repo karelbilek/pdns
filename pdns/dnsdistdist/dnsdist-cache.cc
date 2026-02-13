@@ -127,7 +127,7 @@ bool DNSDistPacketCache::insertLocked(MaybeLruCache<uint32_t, CacheValue>& map, 
 
   value = newValue;
 
-  map.putFront(key);
+  map.visit(key);
   return false;
 }
 
@@ -228,18 +228,18 @@ void DNSDistPacketCache::insert(uint32_t key, const std::optional<Netmask>& subn
   }
 }
 
-std::pair<bool, bool> DNSDistPacketCache::getWriteLocked(MaybeLruCache<uint32_t, CacheValue>& map, DNSQuestion& dnsQuestion, bool& stale, PacketBuffer& response, time_t& age, uint32_t key, bool recordMiss, time_t now, uint32_t allowExpired, bool receivedOverUDP, bool dnssecOK, const std::optional<Netmask>& subnet, bool truncatedOK, uint16_t queryId, const DNSName::string_t& dnsQName)
-{
-  auto mapIt = map.findAndPutFront(key);
-  if (mapIt == map.end()) {
-    if (recordMiss) {
-      ++d_misses;
-    }
-    return {false, false};
-  }
+// std::pair<bool, bool> DNSDistPacketCache::getWriteLocked(MaybeLruCache<uint32_t, CacheValue>& map, DNSQuestion& dnsQuestion, bool& stale, PacketBuffer& response, time_t& age, uint32_t key, bool recordMiss, time_t now, uint32_t allowExpired, bool receivedOverUDP, bool dnssecOK, const std::optional<Netmask>& subnet, bool truncatedOK, uint16_t queryId, const DNSName::string_t& dnsQName)
+// {
+//   auto mapIt = map.findAndPutFront(key);
+//   if (mapIt == map.end()) {
+//     if (recordMiss) {
+//       ++d_misses;
+//     }
+//     return {false, false};
+//   }
 
-  return getLocked(mapIt->second, dnsQuestion, stale, response, age, recordMiss, now, allowExpired, receivedOverUDP, dnssecOK, subnet, truncatedOK, queryId, dnsQName);
-}
+//   return getLocked(mapIt->second, dnsQuestion, stale, response, age, recordMiss, now, allowExpired, receivedOverUDP, dnssecOK, subnet, truncatedOK, queryId, dnsQName);
+// }
 
 std::pair<bool, bool> DNSDistPacketCache::getLocked(const CacheValue& value, DNSQuestion& dnsQuestion, bool& stale, PacketBuffer& response, time_t& age, bool recordMiss, time_t now, uint32_t allowExpired, bool receivedOverUDP, bool dnssecOK, const std::optional<Netmask>& subnet, bool truncatedOK, uint16_t queryId, const DNSName::string_t& dnsQName)
 {
@@ -341,24 +341,24 @@ bool DNSDistPacketCache::get(DNSQuestion& dnsQuestion, uint16_t queryId, uint32_
     bool hitHeader{false};
 
     // LRU cache needs a write lock
-    if (isLru()) {
-      auto wmap = shard.d_map.try_write_lock();
-      if (wmap.owns_lock()) {
-        std::tie(hit, hitHeader) = getWriteLocked(*wmap, dnsQuestion, stale, response, age, key, recordMiss, now, allowExpired, receivedOverUDP, dnssecOK, subnet, truncatedOK, queryId, dnsQName);
-      }
-      else {
-        ++d_deferredLookups;
-        return false;
-      }
+    // if (isLru()) {
+    //   auto wmap = shard.d_map.try_write_lock();
+    //   if (wmap.owns_lock()) {
+    //     std::tie(hit, hitHeader) = getWriteLocked(*wmap, dnsQuestion, stale, response, age, key, recordMiss, now, allowExpired, receivedOverUDP, dnssecOK, subnet, truncatedOK, queryId, dnsQName);
+    //   }
+    //   else {
+    //     ++d_deferredLookups;
+    //     return false;
+    //   }
+    // }
+    // else {
+    auto map = shard.d_map.try_read_lock();
+    if (!map.owns_lock()) {
+      ++d_deferredLookups;
+      return false;
     }
-    else {
-      auto map = shard.d_map.try_read_lock();
-      if (!map.owns_lock()) {
-        ++d_deferredLookups;
-        return false;
-      }
-      std::tie(hit, hitHeader) = getReadLocked(*map, dnsQuestion, stale, response, age, key, recordMiss, now, allowExpired, receivedOverUDP, dnssecOK, subnet, truncatedOK, queryId, dnsQName);
-    }
+    std::tie(hit, hitHeader) = getReadLocked(*map, dnsQuestion, stale, response, age, key, recordMiss, now, allowExpired, receivedOverUDP, dnssecOK, subnet, truncatedOK, queryId, dnsQName);
+    // }
 
     if (!hit) {
       return false;

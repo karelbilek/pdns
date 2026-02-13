@@ -53,24 +53,34 @@ public:
 
   const typename std::unordered_map<K, V>::const_iterator find(const K& key) const
   {
-    // this is const; without putFront
-    return d_baseMap.find(key);
-  }
-
-  const typename std::unordered_map<K, V>::iterator findAndPutFront(const K& key)
-  {
+    auto k = d_baseMap.find(key);
     if (!d_isLru) {
-      // should not happen? but return something anyway
-      return d_baseMap.find(key);
+      return k;
     }
 
-    auto f = d_baseMap.find(key);
-    if (f == d_baseMap.end()) {
-      return f;
+    if (k == d_baseMap.end()) {
+      return k;
     }
-    putFront(key);
-    return f;
+
+    visit(key);
+
+    return k;
   }
+
+  // const typename std::unordered_map<K, V>::iterator findAndPutFront(const K& key)
+  // {
+  //   if (!d_isLru) {
+  //     // should not happen? but return something anyway
+  //     return d_baseMap.find(key);
+  //   }
+
+  //   auto f = d_baseMap.find(key);
+  //   if (f == d_baseMap.end()) {
+  //     return f;
+  //   }
+  //   putFront(key);
+  //   return f;
+  // }
 
   size_t size() const
   {
@@ -86,18 +96,29 @@ public:
 
     auto mapIt = d_baseMap.find(key);
     if (mapIt != d_baseMap.end()) {
-      // it's there, we return iterator; but we will need to putFront it later
+      // it's there, we return iterator; but we will need to visit it later
       return std::pair<typename std::unordered_map<K, V>::iterator, bool>(mapIt, false);
     }
 
     // we would insert; but first we need to check the sizes
     if (d_baseMap.size() == d_maxSize) {
       lru_removed = true;
-      // we need to throw out last
-      auto& k = d_lruList.back();
-      d_baseMap.erase(k);
-      d_lruMap.erase(k);
-      d_lruList.pop_back();
+
+      while (d_hand->d_visited) {
+        d_hand->d_visited = false;
+        ++d_hand;
+        if (d_hand == d_lruList.rend()) {
+          d_hand = d_lruList.rbegin();
+        }
+      }
+      auto to_erase = std::prev(d_hand.base());
+      ++d_hand;
+      if (d_hand == d_lruList.rend()) {
+        d_hand = d_lruList.rbegin();
+      }
+      d_baseMap.erase(to_erase->d_key);
+      d_lruMap.erase(to_erase->d_key);
+      d_lruList.erase(to_erase);
     }
     else {
       lru_removed = false;
@@ -105,8 +126,11 @@ public:
 
     // we can insert now
     auto res = d_baseMap.insert({key, value});
-    d_lruList.push_front(key);
+    d_lruList.emplace_back(key);
     d_lruMap.insert({key, d_lruList.begin()});
+    if (d_lruList.size() == 1) {
+      d_hand = d_lruList.rbegin();
+    }
 
     return res;
   }
@@ -124,6 +148,15 @@ public:
   typename std::unordered_map<K, V>::iterator erase(typename std::unordered_map<K, V>::const_iterator it)
   {
     if (d_isLru) {
+      if (d_hand->d_key == it->first) {
+        // if this is the last item, we don't care about the hand
+        if (d_lruList.size() != 1) {
+          ++d_hand;
+          if (d_hand == d_lruList.rend()) {
+            d_hand = d_lruList.rbegin();
+          }
+        }
+      }
       auto lruIt = d_lruMap.find(it->first);
       d_lruList.erase(lruIt->second);
       d_lruMap.erase(lruIt);
@@ -139,18 +172,18 @@ public:
     }
   }
 
-  void putFront(const K& key)
+  void visit(const K& key) const
   {
     if (!d_isLru) {
       return; // noop
     }
+
     auto lruIt = d_lruMap.find(key);
     if (lruIt == d_lruMap.end()) {
-      // should not happen...?
       return;
     }
 
-    d_lruList.splice(d_lruList.begin(), d_lruList, lruIt->second);
+    lruIt->second->d_visited = true;
   }
 
   void clear()
@@ -163,12 +196,28 @@ public:
   }
 
 private:
+  class Node
+  {
+  public:
+    K d_key;
+    bool d_visited;
+
+    Node(const K& key) {
+      d_key = key;
+      d_visited = false;
+    }
+  };
+
   bool d_isLru;
   size_t d_maxSize;
 
   std::unordered_map<K, V> d_baseMap;
-  std::list<K> d_lruList;
-  std::unordered_map<K, typename std::list<K>::iterator> d_lruMap;
+  // the start of the list - newest
+  // the end of the list - oldest
+  // d_hand travels from end to start by `++` because it's reverse
+  std::list<Node> d_lruList;
+  std::unordered_map<K, typename std::list<Node>::iterator> d_lruMap;
+  typename std::list<Node>::reverse_iterator d_hand;
 };
 
 class DNSDistPacketCache : boost::noncopyable
