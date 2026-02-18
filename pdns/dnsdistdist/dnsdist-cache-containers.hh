@@ -189,7 +189,8 @@ private:
     // inversion of visited in sieve
     std::atomic_flag d_eraseable;
 
-    SieveNode(uint32_t key, V value) : d_key(key), d_value(std::move(value))
+    SieveNode(uint32_t key, V value) :
+      d_key(key), d_value(std::move(value))
     {
       d_eraseable.test_and_set(std::memory_order_relaxed);
     }

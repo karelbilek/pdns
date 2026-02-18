@@ -101,7 +101,7 @@ bool DNSDistPacketCache::insertLocked(CacheContainer<CacheValue>& map, uint32_t 
   if (result.first == CacheInsertState::Inserted) {
     return true;
   }
-  
+
   /* in case of collision, don't override the existing entry
      except if it has expired */
   CacheValue& value = *result.second;
