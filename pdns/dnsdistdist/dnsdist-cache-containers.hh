@@ -23,6 +23,7 @@
 
 #include <atomic>
 #include <unordered_map>
+#include <optional>
 
 enum class CacheInsertState : uint8_t
 {
