@@ -24,201 +24,13 @@
 #include <atomic>
 #include <unordered_map>
 
-#include "iputils.hh"
+#include "dnsdist-cache-containers.hh"
 #include "lock.hh"
 #include "noinitvector.hh"
 #include "stat_t.hh"
 #include "ednsoptions.hh"
 
 struct DNSQuestion;
-
-// lru cache is NOT locked; we need to use shared lock
-template <typename K, typename V>
-class MaybeLruCache
-{
-public:
-  MaybeLruCache() {}
-
-  void init(size_t t, bool isLRU)
-  {
-    // we reserve maxEntries + 1 to avoid rehashing from occurring
-    // when we get to maxEntries, as it means a load factor of 1
-    d_maxSize = t;
-    d_baseMap.reserve(t + 1);
-    if (d_isLru) {
-      d_lruMap.reserve(t + 1);
-    }
-    d_isLru = isLRU;
-  }
-
-  const typename std::unordered_map<K, V>::const_iterator find(const K& key) const
-  {
-    auto k = d_baseMap.find(key);
-    if (!d_isLru) {
-      return k;
-    }
-
-    if (k == d_baseMap.end()) {
-      return k;
-    }
-
-    visit(key);
-
-    return k;
-  }
-
-  // const typename std::unordered_map<K, V>::iterator findAndPutFront(const K& key)
-  // {
-  //   if (!d_isLru) {
-  //     // should not happen? but return something anyway
-  //     return d_baseMap.find(key);
-  //   }
-
-  //   auto f = d_baseMap.find(key);
-  //   if (f == d_baseMap.end()) {
-  //     return f;
-  //   }
-  //   putFront(key);
-  //   return f;
-  // }
-
-  size_t size() const
-  {
-    return d_baseMap.size();
-  }
-
-  const std::pair<typename std::unordered_map<K, V>::iterator, bool> insert(const K& key, const V& value, bool& lru_removed)
-  {
-    if (!d_isLru) {
-      lru_removed = false;
-      return d_baseMap.insert({key, value});
-    }
-
-    auto mapIt = d_baseMap.find(key);
-    if (mapIt != d_baseMap.end()) {
-      // it's there, we return iterator; but we will need to visit it later
-      return std::pair<typename std::unordered_map<K, V>::iterator, bool>(mapIt, false);
-    }
-
-    // we would insert; but first we need to check the sizes
-    if (d_baseMap.size() == d_maxSize) {
-      lru_removed = true;
-
-      while (d_hand->d_visited) {
-        d_hand->d_visited = false;
-        ++d_hand;
-        if (d_hand == d_lruList.rend()) {
-          d_hand = d_lruList.rbegin();
-        }
-      }
-      auto to_erase = std::prev(d_hand.base());
-      ++d_hand;
-      if (d_hand == d_lruList.rend()) {
-        d_hand = d_lruList.rbegin();
-      }
-      d_baseMap.erase(to_erase->d_key);
-      d_lruMap.erase(to_erase->d_key);
-      d_lruList.erase(to_erase);
-    }
-    else {
-      lru_removed = false;
-    }
-
-    // we can insert now
-    auto res = d_baseMap.insert({key, value});
-    d_lruList.emplace_back(key);
-    d_lruMap.insert({key, d_lruList.begin()});
-    if (d_lruList.size() == 1) {
-      d_hand = d_lruList.rbegin();
-    }
-
-    return res;
-  }
-
-  const typename std::unordered_map<K, V>::const_iterator begin() const
-  {
-    return d_baseMap.begin();
-  }
-
-  const typename std::unordered_map<K, V>::const_iterator end() const
-  {
-    return d_baseMap.end();
-  }
-
-  typename std::unordered_map<K, V>::iterator erase(typename std::unordered_map<K, V>::const_iterator it)
-  {
-    if (d_isLru) {
-      if (d_hand->d_key == it->first) {
-        // if this is the last item, we don't care about the hand
-        if (d_lruList.size() != 1) {
-          ++d_hand;
-          if (d_hand == d_lruList.rend()) {
-            d_hand = d_lruList.rbegin();
-          }
-        }
-      }
-      auto lruIt = d_lruMap.find(it->first);
-      d_lruList.erase(lruIt->second);
-      d_lruMap.erase(lruIt);
-    }
-
-    return d_baseMap.erase(it);
-  }
-
-  void erase(typename std::unordered_map<K, V>::const_iterator start, typename std::unordered_map<K, V>::const_iterator end)
-  {
-    for (auto it = start; it != end;) {
-      it = erase(it);
-    }
-  }
-
-  void visit(const K& key) const
-  {
-    if (!d_isLru) {
-      return; // noop
-    }
-
-    auto lruIt = d_lruMap.find(key);
-    if (lruIt == d_lruMap.end()) {
-      return;
-    }
-
-    lruIt->second->d_visited = true;
-  }
-
-  void clear()
-  {
-    d_baseMap.clear();
-    if (d_isLru) {
-      d_lruList.clear();
-      d_lruMap.clear();
-    }
-  }
-
-private:
-  class Node
-  {
-  public:
-    K d_key;
-    bool d_visited;
-
-    Node(const K& key) {
-      d_key = key;
-      d_visited = false;
-    }
-  };
-
-  bool d_isLru;
-  size_t d_maxSize;
-
-  std::unordered_map<K, V> d_baseMap;
-  // the start of the list - newest
-  // the end of the list - oldest
-  // d_hand travels from end to start by `++` because it's reverse
-  std::list<Node> d_lruList;
-  std::unordered_map<K, typename std::list<Node>::iterator> d_lruMap;
-  typename std::list<Node>::reverse_iterator d_hand;
-};
 
 class DNSDistPacketCache : boost::noncopyable
 {
@@ -327,21 +139,25 @@ private:
     }
     ~CacheShard() = default;
 
-    void init(size_t maxSize, bool isLRU)
+    void init(size_t maxSize, [[maybe_unused]] bool isLRU)
     {
-      d_map.write_lock()->init(maxSize, isLRU);
+      auto kokos = d_container.write_lock();
+      *kokos = std::make_unique<SieveCache<uint32_t, CacheValue>>();
+      (*kokos)->init(maxSize);
     }
 
-    SharedLockGuarded<MaybeLruCache<uint32_t, CacheValue>> d_map{};
+    SharedLockGuarded<std::unique_ptr<CacheContainer<uint32_t, CacheValue>>> d_container{};
+
+    // SharedLockGuarded<MaybeLruCache<uint32_t, CacheValue>> d_map{};
     std::atomic<uint64_t> d_entriesCount{0};
   };
 
   [[nodiscard]] bool cachedValueMatches(const CacheValue& cachedValue, uint16_t queryFlags, const DNSName& qname, uint16_t qtype, uint16_t qclass, bool receivedOverUDP, bool dnssecOK, const std::optional<Netmask>& subnet) const;
   [[nodiscard]] uint32_t getShardIndex(uint32_t key) const;
-  bool insertLocked(MaybeLruCache<uint32_t, CacheValue>& map, uint32_t key, CacheValue& newValue, bool checkSize);
+  bool insertLocked(CacheContainer<uint32_t, CacheValue>& map, uint32_t key, CacheValue& newValue);
 
-  [[nodiscard]] std::pair<bool, bool> getWriteLocked(MaybeLruCache<uint32_t, CacheValue>& map, DNSQuestion& dnsQuestion, bool& stale, PacketBuffer& response, time_t& age, uint32_t key, bool recordMiss, time_t now, uint32_t allowExpired, bool receivedOverUDP, bool dnssecOK, const std::optional<Netmask>& subnet, bool truncatedOK, uint16_t queryId, const DNSName::string_t& dnsQName);
-  [[nodiscard]] std::pair<bool, bool> getReadLocked(const MaybeLruCache<uint32_t, CacheValue>& map, DNSQuestion& dnsQuestion, bool& stale, PacketBuffer& response, time_t& age, uint32_t key, bool recordMiss, time_t now, uint32_t allowExpired, bool receivedOverUDP, bool dnssecOK, const std::optional<Netmask>& subnet, bool truncatedOK, uint16_t queryId, const DNSName::string_t& dnsQName);
+  [[nodiscard]] std::pair<bool, bool> getWriteLocked(CacheContainer<uint32_t, CacheValue>& map, DNSQuestion& dnsQuestion, bool& stale, PacketBuffer& response, time_t& age, uint32_t key, bool recordMiss, time_t now, uint32_t allowExpired, bool receivedOverUDP, bool dnssecOK, const std::optional<Netmask>& subnet, bool truncatedOK, uint16_t queryId, const DNSName::string_t& dnsQName);
+  [[nodiscard]] std::pair<bool, bool> getReadLocked(const CacheContainer<uint32_t, CacheValue>& map, DNSQuestion& dnsQuestion, bool& stale, PacketBuffer& response, time_t& age, uint32_t key, bool recordMiss, time_t now, uint32_t allowExpired, bool receivedOverUDP, bool dnssecOK, const std::optional<Netmask>& subnet, bool truncatedOK, uint16_t queryId, const DNSName::string_t& dnsQName);
   [[nodiscard]] std::pair<bool, bool> getLocked(const CacheValue& value, DNSQuestion& dnsQuestion, bool& stale, PacketBuffer& response, time_t& age, bool recordMiss, time_t now, uint32_t allowExpired, bool receivedOverUDP, bool dnssecOK, const std::optional<Netmask>& subnet, bool truncatedOK, uint16_t queryId, const DNSName::string_t& dnsQName);
 
   std::vector<CacheShard> d_shards{};
