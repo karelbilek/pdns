@@ -32,28 +32,29 @@ enum class CacheInsertState : uint8_t
   Existing,
 };
 
-template <typename K, typename V>
+template <typename V>
 class CacheContainer
 {
 public:
   virtual void init(size_t t) = 0;
 
   // container should have only one implemented
-  virtual std::optional<std::reference_wrapper<const V>> find(const K& key) const = 0;
-  virtual std::optional<std::reference_wrapper<const V>> find(const K& key) = 0;
+  virtual std::optional<std::reference_wrapper<const V>> find(uint32_t key) const = 0;
+  virtual std::optional<std::reference_wrapper<const V>> find(uint32_t key) = 0;
 
-  virtual std::pair<CacheInsertState, std::optional<std::reference_wrapper<V>>> insert(const K& key, const V& value) = 0;
+  // note - after successful insertion, V is moved out
+  virtual std::pair<CacheInsertState, std::optional<std::reference_wrapper<V>>> insert(uint32_t key, V& value) = 0;
   virtual size_t remove(const std::function<bool(const V&)>& pred, size_t toRemove) = 0;
-  virtual void visit(const K& key) = 0;
+  virtual void visit(uint32_t key) = 0;
 
   virtual size_t size() const = 0;
-  virtual void walk(const std::function<void(const K&, const V&)>& fun) const = 0;
+  virtual void walk(const std::function<void(uint32_t, const V&)>& fun) const = 0;
 
   virtual ~CacheContainer() = default;
 };
 
-template <typename K, typename V>
-class SieveCache : public CacheContainer<K, V>
+template <typename V>
+class SieveCache : public CacheContainer<V>
 {
 public:
   void init(size_t t) override
@@ -62,31 +63,30 @@ public:
     // when we get to maxEntries, as it means a load factor of 1
     d_maxSize = t;
     d_map.reserve(t + 1);
-    d_sieve_hand = d_list.end();
+    d_sieveHand = d_list.end();
   };
 
-  std::optional<std::reference_wrapper<const V>> find(const K& key) const override
+  std::optional<std::reference_wrapper<const V>> find(uint32_t key) const override
   {
     auto mapIt = d_map.find(key);
     if (mapIt == d_map.end()) {
       return std::nullopt;
     }
 
-    mapIt->second->can_erase.clear(std::memory_order_relaxed);
-    return mapIt->second->value;
+    mapIt->second->d_eraseable.clear(std::memory_order_relaxed);
+    return mapIt->second->d_value;
   };
 
-  [[noreturn]] std::optional<std::reference_wrapper<const V>> find([[maybe_unused]] const K& key) override
+  [[noreturn]] std::optional<std::reference_wrapper<const V>> find(uint32_t) override
   {
     throw std::logic_error("SieveCache does not need lock on reading");
   };
 
-  std::pair<CacheInsertState, std::optional<std::reference_wrapper<V>>> insert(const K& key, const V& value) override
+  std::pair<CacheInsertState, std::optional<std::reference_wrapper<V>>> insert(uint32_t key, V& value) override
   {
     auto mapIt = d_map.find(key);
     if (mapIt != d_map.end()) {
-      std::optional<std::reference_wrapper<V>> res = std::ref(mapIt->second->value);
-      return std::make_pair(CacheInsertState::Existing, res);
+      return {CacheInsertState::Existing, mapIt->second->d_value};
     }
 
     auto state = CacheInsertState::Inserted;
@@ -94,27 +94,27 @@ public:
     if (d_map.size() == d_maxSize) {
       state = CacheInsertState::Replaced;
 
-      while (!d_sieve_hand->can_erase.test_and_set(std::memory_order_relaxed)) {
-        d_sieve_hand++;
-        if (d_sieve_hand == d_list.end()) {
-          d_sieve_hand = d_list.begin();
+      while (!d_sieveHand->d_eraseable.test_and_set(std::memory_order_relaxed)) {
+        d_sieveHand++;
+        if (d_sieveHand == d_list.end()) {
+          d_sieveHand = d_list.begin();
         }
       }
 
-      d_map.erase(d_sieve_hand->key);
-      d_sieve_hand = d_list.erase(d_sieve_hand);
-      if (d_sieve_hand == d_list.end()) {
-        d_sieve_hand = d_list.begin();
+      d_map.erase(d_sieveHand->d_key);
+      d_sieveHand = d_list.erase(d_sieveHand);
+      if (d_sieveHand == d_list.end()) {
+        d_sieveHand = d_list.begin();
       }
     }
 
-    d_list.emplace_back(key, value);
+    d_list.emplace_back(key, std::move(value));
     d_map.insert({key, std::prev(d_list.end())});
 
-    if (d_sieve_hand == d_list.end()) {
-      d_sieve_hand = d_list.begin();
+    if (d_sieveHand == d_list.end()) {
+      d_sieveHand = d_list.begin();
     }
-    return std::make_pair(state, std::nullopt);
+    return {state, std::nullopt};
   }
 
   size_t size() const override
@@ -122,10 +122,10 @@ public:
     return d_map.size();
   }
 
-  void walk(const std::function<void(const K&, const V&)>& fun) const override
+  void walk(const std::function<void(uint32_t, const V&)>& fun) const override
   {
     for (auto it = d_list.begin(); it != d_list.end(); ++it) {
-      fun(it->key, it->value);
+      fun(it->d_key, it->d_value);
     }
   }
 
@@ -137,43 +137,44 @@ public:
 
     // expunging does not move the sieve hand, but starts at it
     // we need separate hand
-    auto expunge_hand = d_sieve_hand;
+    auto expungeHand = d_sieveHand;
     while (d_map.size() > 0 && removed != toRemove && walked != origsize) {
-      bool should_remove = pred(expunge_hand->value);
-      bool should_move_sieve = false;
-      if (!should_remove) {
-        ++expunge_hand;
+      bool rem = pred(expungeHand->d_value);
+      bool moveSieve = false;
+      if (!rem) {
+        ++expungeHand;
         ++walked;
       }
       else {
-        if (!expunge_hand->can_erase.test_and_set(std::memory_order_relaxed)) {
-          ++expunge_hand;
-        } else {
-          should_move_sieve = (d_sieve_hand == expunge_hand);
-          d_map.erase(expunge_hand->key);
-          expunge_hand = d_list.erase(expunge_hand);
+        if (!expungeHand->d_eraseable.test_and_set(std::memory_order_relaxed)) {
+          ++expungeHand;
+        }
+        else {
+          moveSieve = (d_sieveHand == expungeHand);
+          d_map.erase(expungeHand->d_key);
+          expungeHand = d_list.erase(expungeHand);
           ++removed;
           ++walked;
         }
       }
-      if (expunge_hand == d_list.end()) {
-        expunge_hand = d_list.begin();
+      if (expungeHand == d_list.end()) {
+        expungeHand = d_list.begin();
       }
-      if (should_move_sieve) {
-        d_sieve_hand = expunge_hand;
+      if (moveSieve) {
+        d_sieveHand = expungeHand;
       }
     }
     return removed;
   };
 
-  void visit(const K& key) override
+  void visit(uint32_t key) override
   {
     auto mapIt = d_map.find(key);
     if (mapIt == d_map.end()) {
       // should not happen?
       return;
     }
-    mapIt->second->can_erase.clear(std::memory_order_relaxed);
+    mapIt->second->d_eraseable.clear(std::memory_order_relaxed);
   };
 
 private:
@@ -181,14 +182,14 @@ private:
 
   struct SieveNode
   {
-    K key;
-    V value;
-    // inversion of visited in sieve,
-    std::atomic_flag can_erase;
+    uint32_t d_key;
+    V d_value;
+    // inversion of visited in sieve
+    std::atomic_flag d_eraseable;
 
-    SieveNode(const K& k, const V& v) : key(k), value(v)
+    SieveNode(uint32_t key, V value) : d_key(key), d_value(std::move(value))
     {
-      can_erase.test_and_set(std::memory_order_relaxed);
+      d_eraseable.test_and_set(std::memory_order_relaxed);
     }
   };
 
@@ -197,15 +198,15 @@ private:
 
   // front: oldest; back: newest; bool - visited (starts at false)
   sieve_list d_list;
-  std::unordered_map<K, sieve_iter> d_map;
+  std::unordered_map<uint32_t, sieve_iter> d_map;
 
   // if std::list is empty - std::list::end; otherwise - always pointing at list item, never at end()
   // hand moves from front to back
-  sieve_iter d_sieve_hand;
+  sieve_iter d_sieveHand;
 };
 
-template <typename K, typename V>
-class LruCache : public CacheContainer<K, V>
+template <typename V>
+class LruCache : public CacheContainer<V>
 {
 public:
   void init(size_t t) override
@@ -216,12 +217,12 @@ public:
     d_map.reserve(t + 1);
   };
 
-  [[noreturn]] std::optional<std::reference_wrapper<const V>> find([[maybe_unused]] const K& key) const override
+  [[noreturn]] std::optional<std::reference_wrapper<const V>> find(uint32_t) const override
   {
     throw std::logic_error("LruCache needs lock on reading");
   };
 
-  std::optional<std::reference_wrapper<const V>> find(const K& key) override
+  std::optional<std::reference_wrapper<const V>> find(uint32_t key) override
   {
     auto mapIt = d_map.find(key);
     if (mapIt == d_map.end()) {
@@ -232,12 +233,11 @@ public:
     return mapIt->second->second;
   };
 
-  std::pair<CacheInsertState, std::optional<std::reference_wrapper<V>>> insert(const K& key, const V& value) override
+  std::pair<CacheInsertState, std::optional<std::reference_wrapper<V>>> insert(uint32_t key, V& value) override
   {
     auto mapIt = d_map.find(key);
     if (mapIt != d_map.end()) {
-      std::optional<std::reference_wrapper<V>> res = mapIt->second->second;
-      return std::make_pair(CacheInsertState::Existing, res);
+      return {CacheInsertState::Existing, mapIt->second->second};
     }
 
     auto state = CacheInsertState::Inserted;
@@ -249,9 +249,9 @@ public:
       d_list.pop_front();
     }
 
-    d_list.emplace_back(key, value);
+    d_list.emplace_back(key, std::move(value));
     d_map.insert({key, std::prev(d_list.end())});
-    return std::make_pair(state, std::nullopt);
+    return {state, std::nullopt};
   }
 
   size_t size() const override
@@ -259,7 +259,7 @@ public:
     return d_map.size();
   }
 
-  void walk(const std::function<void(const K&, const V&)>& fun) const override
+  void walk(const std::function<void(uint32_t, const V&)>& fun) const override
   {
     for (auto it = d_list.begin(); it != d_list.end(); ++it) {
       fun(it->first, it->second);
@@ -285,7 +285,7 @@ public:
     return removed;
   };
 
-  void visit(const K& key) override
+  void visit(uint32_t key) override
   {
     auto mapIt = d_map.find(key);
     if (mapIt == d_map.end()) {
@@ -299,12 +299,12 @@ private:
   size_t d_maxSize;
 
   // front: oldest; back: newest
-  std::list<std::pair<K, V>> d_list;
-  std::unordered_map<K, typename std::list<std::pair<K, V>>::iterator> d_map;
+  std::list<std::pair<uint32_t, V>> d_list;
+  std::unordered_map<uint32_t, typename std::list<std::pair<uint32_t, V>>::iterator> d_map;
 };
 
-template <typename K, typename V>
-class NoEvictionCache : public CacheContainer<K, V>
+template <typename V>
+class NoEvictionCache : public CacheContainer<V>
 {
 public:
   void init(size_t t) override
@@ -315,7 +315,7 @@ public:
     d_map.reserve(t + 1);
   };
 
-  std::optional<std::reference_wrapper<const V>> find(const K& key) const override
+  std::optional<std::reference_wrapper<const V>> find(uint32_t key) const override
   {
     auto it = d_map.find(key);
     if (it == d_map.end()) {
@@ -324,23 +324,24 @@ public:
     return it->second;
   };
 
-  [[noreturn]] std::optional<std::reference_wrapper<const V>> find([[maybe_unused]] const K& key) override
+  [[noreturn]] std::optional<std::reference_wrapper<const V>> find(uint32_t) override
   {
     throw std::logic_error("NoEvictionCache does not lock on reading");
   };
 
-  std::pair<CacheInsertState, std::optional<std::reference_wrapper<V>>> insert(const K& key, const V& value) override
+  std::pair<CacheInsertState, std::optional<std::reference_wrapper<V>>> insert(uint32_t key, V& value) override
   {
     if (d_map.size() == d_maxSize) {
-      return std::make_pair(CacheInsertState::Full, std::nullopt);
+      return {CacheInsertState::Full, std::nullopt};
     }
 
-    auto [it, result] = d_map.insert({key, value});
+    // value is moved only if emplacing worked
+    auto [it, result] = d_map.try_emplace(key, std::move(value));
     if (result) {
-      return std::make_pair(CacheInsertState::Inserted, std::nullopt);
+      return {CacheInsertState::Inserted, std::nullopt};
     }
 
-    return std::make_pair(CacheInsertState::Existing, it->second);
+    return {CacheInsertState::Existing, it->second};
   };
 
   size_t size() const override
@@ -348,7 +349,7 @@ public:
     return d_map.size();
   }
 
-  void walk(const std::function<void(const K&, const V&)>& fun) const override
+  void walk(const std::function<void(uint32_t, const V&)>& fun) const override
   {
     for (auto it = d_map.begin(); it != d_map.end(); ++it) {
       fun(it->first, it->second);
@@ -373,11 +374,11 @@ public:
     return removed;
   };
 
-  void visit([[maybe_unused]] const K& key) override {
+  void visit(uint32_t) override {
     // noop
   };
 
 private:
   size_t d_maxSize;
-  std::unordered_map<K, V> d_map;
+  std::unordered_map<uint32_t, V> d_map;
 };

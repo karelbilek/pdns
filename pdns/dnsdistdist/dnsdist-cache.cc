@@ -44,7 +44,7 @@ DNSDistPacketCache::DNSDistPacketCache(CacheSettings settings) :
   d_shards.resize(d_settings.d_shardCount);
 
   for (auto& shard : d_shards) {
-    shard.init((d_settings.d_maxEntries / d_settings.d_shardCount), d_settings.d_lru);
+    shard.init((d_settings.d_maxEntries / d_settings.d_shardCount), d_settings.d_eviction);
   }
 }
 
@@ -89,8 +89,9 @@ bool DNSDistPacketCache::cachedValueMatches(const CacheValue& cachedValue, uint1
   return true;
 }
 
-bool DNSDistPacketCache::insertLocked(CacheContainer<uint32_t, CacheValue>& map, uint32_t key, CacheValue& newValue)
+bool DNSDistPacketCache::insertLocked(CacheContainer<CacheValue>& map, uint32_t key, CacheValue& newValue)
 {
+  // note: newValue is moved out on successful insert, not on existing
   auto result = map.insert(key, newValue);
 
   if (result.first == CacheInsertState::Full || result.first == CacheInsertState::Replaced) {
@@ -100,8 +101,6 @@ bool DNSDistPacketCache::insertLocked(CacheContainer<uint32_t, CacheValue>& map,
   if (result.first == CacheInsertState::Inserted) {
     return true;
   }
-
-  // result.first == CacheInsertState::Existing
   
   /* in case of collision, don't override the existing entry
      except if it has expired */
@@ -177,7 +176,7 @@ void DNSDistPacketCache::insert(uint32_t key, const std::optional<Netmask>& subn
   uint32_t shardIndex = getShardIndex(key);
 
   // with LRU cache, we don't check size; we always insert
-  bool checkSize = !isLru();
+  bool checkSize = checkSizeBeforeInsert();
   if (checkSize) {
     if (d_shards.at(shardIndex).d_entriesCount >= (d_settings.d_maxEntries / d_settings.d_shardCount)) {
       return;
@@ -221,7 +220,7 @@ void DNSDistPacketCache::insert(uint32_t key, const std::optional<Netmask>& subn
   }
 }
 
-std::pair<bool, bool> DNSDistPacketCache::getWriteLocked(CacheContainer<uint32_t, CacheValue>& map, DNSQuestion& dnsQuestion, bool& stale, PacketBuffer& response, time_t& age, uint32_t key, bool recordMiss, time_t now, uint32_t allowExpired, bool receivedOverUDP, bool dnssecOK, const std::optional<Netmask>& subnet, bool truncatedOK, uint16_t queryId, const DNSName::string_t& dnsQName)
+std::pair<bool, bool> DNSDistPacketCache::getWriteLocked(CacheContainer<CacheValue>& map, DNSQuestion& dnsQuestion, bool& stale, PacketBuffer& response, time_t& age, uint32_t key, bool recordMiss, time_t now, uint32_t allowExpired, bool receivedOverUDP, bool dnssecOK, const std::optional<Netmask>& subnet, bool truncatedOK, uint16_t queryId, const DNSName::string_t& dnsQName)
 {
   auto found = map.find(key);
   if (!found.has_value()) {
@@ -292,7 +291,7 @@ std::pair<bool, bool> DNSDistPacketCache::getLocked(const CacheValue& value, DNS
   return {true, false};
 }
 
-std::pair<bool, bool> DNSDistPacketCache::getReadLocked(const CacheContainer<uint32_t, CacheValue>& map, DNSQuestion& dnsQuestion, bool& stale, PacketBuffer& response, time_t& age, uint32_t key, bool recordMiss, time_t now, uint32_t allowExpired, bool receivedOverUDP, bool dnssecOK, const std::optional<Netmask>& subnet, bool truncatedOK, uint16_t queryId, const DNSName::string_t& dnsQName)
+std::pair<bool, bool> DNSDistPacketCache::getReadLocked(const CacheContainer<CacheValue>& map, DNSQuestion& dnsQuestion, bool& stale, PacketBuffer& response, time_t& age, uint32_t key, bool recordMiss, time_t now, uint32_t allowExpired, bool receivedOverUDP, bool dnssecOK, const std::optional<Netmask>& subnet, bool truncatedOK, uint16_t queryId, const DNSName::string_t& dnsQName)
 {
   auto found = map.find(key);
   if (!found.has_value()) {
@@ -333,8 +332,7 @@ bool DNSDistPacketCache::get(DNSQuestion& dnsQuestion, uint16_t queryId, uint32_
     bool hit{false};
     bool hitHeader{false};
 
-    // LRU cache needs a write lock
-    if (isLru()) {
+    if (getNeedsWriteLock()) {
       auto wmap = shard.d_container.try_write_lock();
       if (wmap.owns_lock()) {
         std::tie(hit, hitHeader) = getWriteLocked(**wmap, dnsQuestion, stale, response, age, key, recordMiss, now, allowExpired, receivedOverUDP, dnssecOK, subnet, truncatedOK, queryId, dnsQName);
@@ -544,7 +542,7 @@ uint64_t DNSDistPacketCache::dump(int fileDesc, bool rawResponse)
   time_t now = time(nullptr);
   for (auto& shard : d_shards) {
     auto map = shard.d_container.read_lock();
-    (*map)->walk([&count, &filePtr, now, rawResponse](const uint32_t& key, const CacheValue& value) {
+    (*map)->walk([&count, &filePtr, now, rawResponse](uint32_t key, const CacheValue& value) {
       count++;
       try {
         uint8_t rcode = 0;
@@ -577,7 +575,7 @@ std::set<DNSName> DNSDistPacketCache::getDomainsContainingRecords(const ComboAdd
 
   for (auto& shard : d_shards) {
     auto map = shard.d_container.read_lock();
-    (*map)->walk([&domains, &addr](const uint32_t&, const CacheValue& value) {
+    (*map)->walk([&domains, &addr](uint32_t, const CacheValue& value) {
       try {
         if (value.len < sizeof(dnsheader)) {
           return;
@@ -630,7 +628,7 @@ std::set<ComboAddress> DNSDistPacketCache::getRecordsForDomain(const DNSName& do
 
   for (auto& shard : d_shards) {
     auto map = shard.d_container.read_lock();
-    (*map)->walk([&domain, &addresses](const uint32_t&, const CacheValue& value) {
+    (*map)->walk([&domain, &addresses](uint32_t, const CacheValue& value) {
       try {
         if (value.qname != domain) {
           return;

@@ -31,7 +31,7 @@
 void setupLuaBindingsPacketCache(LuaContext& luaCtx, bool client)
 {
   /* PacketCache */
-  luaCtx.writeFunction("newPacketCache", [client](size_t maxEntries, std::optional<LuaAssociativeTable<boost::variant<bool, size_t, LuaArray<uint16_t>>>> vars) {
+  luaCtx.writeFunction("newPacketCache", [client](size_t maxEntries, std::optional<LuaAssociativeTable<boost::variant<std::string, bool, size_t, LuaArray<uint16_t>>>> vars) {
     DNSDistPacketCache::CacheSettings settings{
       .d_maxEntries = maxEntries,
       .d_shardCount = 20,
@@ -46,7 +46,6 @@ void setupLuaBindingsPacketCache(LuaContext& luaCtx, bool client)
     getOptionalValue<bool>(vars, "dontAge", settings.d_dontAge);
     getOptionalValue<bool>(vars, "keepStaleData", settings.d_keepStaleData);
     getOptionalValue<bool>(vars, "shuffle", settings.d_shuffle);
-    getOptionalValue<bool>(vars, "lru", settings.d_lru);
     getOptionalValue<size_t>(vars, "maxNegativeTTL", settings.d_maxNegativeTTL);
     getOptionalValue<size_t>(vars, "maxTTL", settings.d_maxTTL);
     getOptionalValue<size_t>(vars, "minTTL", settings.d_minTTL);
@@ -57,6 +56,14 @@ void setupLuaBindingsPacketCache(LuaContext& luaCtx, bool client)
     getOptionalValue<size_t>(vars, "truncatedTTL", settings.d_truncatedTTL);
     getOptionalValue<bool>(vars, "cookieHashing", cookieHashing);
     getOptionalValue<size_t>(vars, "maximumEntrySize", maximumEntrySize);
+
+    std::string eviction;
+    if (getOptionalValue<std::string>(vars, "eviction", eviction) > 0) {
+      if (!DNSDistPacketCache::parseEvictionType(eviction, settings.d_eviction)) {
+        SLOG(warnlog("Ignoring unknown value '%s' for 'eviction' on 'newPacketCache'", eviction),
+             dnsdist::logging::getTopLogger("configuration")->info(Logr::Warning, "Ignoring unknown value for 'eviction' on 'newPacketCache'", "value", Logging::Loggable(eviction)));
+      }
+    };
 
     if (maximumEntrySize >= sizeof(dnsheader)) {
       settings.d_maximumEntrySize = maximumEntrySize;

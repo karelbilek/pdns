@@ -1027,7 +1027,7 @@ static void handleConsoleConfiguration(const dnsdist::rust::settings::ConsoleCon
   }
 }
 
-static void handlePacketCacheConfiguration(const ::rust::Vec<dnsdist::rust::settings::PacketCacheConfiguration>& caches)
+static void handlePacketCacheConfiguration(const Context& context, const ::rust::Vec<dnsdist::rust::settings::PacketCacheConfiguration>& caches)
 {
   for (const auto& cache : caches) {
     DNSDistPacketCache::CacheSettings settings{
@@ -1043,8 +1043,15 @@ static void handlePacketCacheConfiguration(const ::rust::Vec<dnsdist::rust::sett
       .d_parseECS = cache.parse_ecs,
       .d_keepStaleData = cache.keep_stale_data,
       .d_shuffle = cache.shuffle,
-      .d_lru = cache.lru,
     };
+    const auto evictionStr = std::string(cache.eviction);
+    if (!evictionStr.empty()) {
+      if (!DNSDistPacketCache::parseEvictionType(evictionStr, settings.d_eviction)) {
+        SLOG(warnlog("Ignoring unknown value '%s' for 'eviction' on 'newPacketCache'", evictionStr),
+             context.logger->info(Logr::Warning, "Ignoring unknown value for 'eviction' on 'newPacketCache'", "value", Logging::Loggable(evictionStr)));
+      }
+    }
+
     std::unordered_set<uint16_t> ranks;
     if (!cache.options_to_skip.empty()) {
       settings.d_optionsToSkip.clear();
@@ -1260,7 +1267,7 @@ bool loadConfigurationFromFile(const std::string& fileName, [[maybe_unused]] boo
       });
     }
 
-    handlePacketCacheConfiguration(globalConfig.packet_caches);
+    handlePacketCacheConfiguration(context, globalConfig.packet_caches);
 
     loadCustomPolicies(globalConfig.load_balancing_policies.custom_policies);
 
