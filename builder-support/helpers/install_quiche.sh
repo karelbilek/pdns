@@ -33,7 +33,7 @@ echo "LIBDIR is ${LIBDIR}"
 
 cd /tmp
 echo $0: Downloading ${QUICHE_TARBALL}
-curl -L -o "${QUICHE_TARBALL}" "${QUICHE_TARBALL_URL}"
+curl --fail -L -o "${QUICHE_TARBALL}" "${QUICHE_TARBALL_URL}"
 echo $0: Checking that the hash of ${QUICHE_TARBALL} is ${QUICHE_TARBALL_HASH}
 # Line below should echo two spaces between digest and name
 if echo "${QUICHE_TARBALL_HASH}  ${QUICHE_TARBALL}" | sha256sum -c -; then
@@ -48,7 +48,7 @@ cd "quiche-${QUICHE_VERSION}"
 # Disable SONAME in the quiche shared library, we do not intend this library to be used by anyone else and it makes things more complicated since we rename it to libdnsdist-quiche
 sed -i.bak 's/ffi = \["dep:cdylib-link-lines"\]/ffi = \[\]/' quiche/Cargo.toml
 sed -i.bak 's,cdylib_link_lines::metabuild();,//cdylib_link_lines::metabuild();,' quiche/src/build.rs
-RUST_BACKTRACE=1 cargo build --release --no-default-features --features ffi,boringssl-boring-crate --package quiche
+RUST_BACKTRACE=1 cargo build --release --no-default-features --features ffi,boringssl-boring-crate,qlog --package quiche
 
 # While we tried to get rid of the SONAME in libquiche.so, on debian trixie's
 # packaged rustc puts it in anyway.

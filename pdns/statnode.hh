@@ -61,23 +61,23 @@ public:
 
   Stat s;
   std::string name;
-  std::string fullname;
+  DNSName fullname;
   uint8_t labelsCount{0};
 
   void submit(const DNSName& domain, int rcode, uint32_t bytes, bool hit, const std::optional<ComboAddress>& remote, size_t samplingRate);
   Stat print(unsigned int depth=0, Stat newstat=Stat(), bool silent=false) const;
   void visit(const visitor_t& visitor, Stat& newstat, unsigned int depth = 0) const;
-  bool empty() const
+  [[nodiscard]] bool empty() const
   {
     return children.empty() && s.remotes.empty();
   }
-  size_t size() const
+  [[nodiscard]] size_t getNumberOfChildren() const
   {
     return children.size();
   }
 
 private:
-  void submit(std::vector<string>::const_iterator end, std::vector<string>::const_iterator begin, const std::string& domain, int rcode, uint32_t bytes, const std::optional<ComboAddress>& remote, unsigned int count, bool hit, size_t samplingRate);
+  void submit(std::vector<string>::const_iterator end, std::vector<string>::const_iterator begin, const DNSName& domain, int rcode, uint32_t bytes, const std::optional<ComboAddress>& remote, unsigned int count, bool hit, size_t samplingRate);
 
   using children_t = std::map<std::string, StatNode, CIStringCompare>;
   children_t children;

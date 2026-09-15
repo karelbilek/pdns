@@ -78,7 +78,7 @@ class NotificationQueue
 public:
   void add(const ZoneName& domain, const string& ipstring, time_t delay = 0)
   {
-    const ComboAddress ipaddress(ipstring);
+    const ComboAddress ipaddress(ipstring); // may not contain a port number
     add(domain, ipaddress, delay);
   }
 
@@ -98,7 +98,7 @@ public:
   {
     for (auto i = d_nqueue.begin(); i != d_nqueue.end(); ++i) {
       ComboAddress stQueued{i->ip};
-      if (i->id == id && stQueued == remote && i->domain == domain) {
+      if (i->id == id && ComboAddress::addressOnlyEqual()(stQueued, remote) && i->domain == domain) {
         d_nqueue.erase(i);
         return true;
       }
@@ -166,6 +166,10 @@ public:
     d_nsock6 = -1;
     d_preventSelfNotification = false;
   }
+  void setSLog(Logr::log_t slog)
+  {
+    d_slog = slog;
+  }
   time_t doNotifications(PacketHandler* P);
   void go();
 
@@ -177,13 +181,13 @@ public:
   void notify(const ZoneName& domain, const string& ipAddress);
   void mainloop();
   void retrievalLoopThread();
-  static void sendNotification(int sock, const ZoneName& domain, const ComboAddress& remote, uint16_t notificationId, UeberBackend* ueber);
+  void sendNotification(int sock, const ZoneName& domain, const ComboAddress& remote, uint16_t notificationId, UeberBackend* ueber);
   bool notifyDomain(const ZoneName& domain, UeberBackend* ueber);
   vector<pair<ZoneName, ComboAddress>> getSuckRequests();
   size_t getSuckRequestsWaiting();
 
 private:
-  static void loadArgsIntoSet(const char* listname, set<string>& listset);
+  void loadArgsIntoSet(const char* listname, set<string>& listset);
   void makeNotifySockets();
   void queueNotifyDomain(const DomainInfo& di, UeberBackend* B);
   int d_nsock4, d_nsock6;
@@ -208,6 +212,8 @@ private:
   bool d_secondarieschanged;
   bool d_preventSelfNotification;
   time_t d_delayNotifications{0};
+
+  std::shared_ptr<Logr::Logger> d_slog;
 
   struct Data
   {

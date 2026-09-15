@@ -22,6 +22,8 @@
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
+#include <exception>
+#include <sstream>
 #include "auth-caches.hh"
 #include "auth-querycache.hh"
 #include "auth-packetcache.hh"
@@ -30,6 +32,7 @@
 #include "statbag.hh"
 #include "logger.hh"
 #include "dns.hh"
+#include "misc.hh"
 #include "arguments.hh"
 #include <csignal>
 #include "misc.hh"
@@ -39,6 +42,7 @@
 #include "responsestats.hh"
 #include "ueberbackend.hh"
 #include "auth-main.hh"
+#include "dnspacket.hh"
 
 extern ResponseStats g_rs;
 
@@ -50,13 +54,14 @@ bool DLQuitPlease()
   return s_pleasequit;
 }
 
-string DLQuitHandler(const vector<string>& parts, Utility::pid_t /* ppid */)
+string DLQuitHandler(const vector<string>& parts, pid_t /* ppid */, Logr::log_t slog)
 {
   string ret="No return value";
   if(parts[0]=="QUIT") {
     s_pleasequit=true;
     ret="Scheduling exit";
-    g_log<<Logger::Error<<"Scheduling exit on remote request"<<endl;
+    SLOG(g_log<<Logger::Error<<"Scheduling exit on remote request"<<endl,
+         slog->info(Logr::Error, "Scheduling exit on remote request"));
   }
   return ret;
 }
@@ -66,7 +71,7 @@ static void dokill(int)
   exit(0);
 }
 
-string DLCurrentConfigHandler(const vector<string>& parts, Utility::pid_t /* ppid */)
+string DLCurrentConfigHandler(const vector<string>& parts, pid_t /* ppid */, Logr::log_t /* slog */)
 {
   if(parts.size() > 1) {
     if(parts.size() == 2 && parts[1] == "diff") {
@@ -77,19 +82,19 @@ string DLCurrentConfigHandler(const vector<string>& parts, Utility::pid_t /* ppi
   return ::arg().configstring(true, true);
 }
 
-string DLRQuitHandler(const vector<string>& /* parts */, Utility::pid_t /* ppid */)
+string DLRQuitHandler(const vector<string>& /* parts */, pid_t /* ppid */, Logr::log_t /* slog */)
 {
   signal(SIGALRM, dokill);
   alarm(1);
   return "Exiting";
 }
 
-string DLPingHandler(const vector<string>& /* parts */, Utility::pid_t /* ppid */)
+string DLPingHandler(const vector<string>& /* parts */, pid_t /* ppid */, Logr::log_t /* slog */)
 {
   return "PONG";
 }
 
-string DLShowHandler(const vector<string>& parts, Utility::pid_t /* ppid */)
+string DLShowHandler(const vector<string>& parts, pid_t /* ppid */, Logr::log_t /* slog */)
 {
   try {
     extern StatBag S;
@@ -115,21 +120,106 @@ void setStatus(const string &str)
   d_status=str;
 }
 
-string DLStatusHandler(const vector<string>& /* parts */, Utility::pid_t ppid)
+string DLManageCookieSecret(const vector<string>& parts, [[maybe_unused]] pid_t ppid, [[maybe_unused]] Logr::log_t slog)
+{
+  std::ostringstream oss;
+#ifdef HAVE_CRYPTO_SHORTHASH
+  static string cookieUsage = "Usage: cookie-secret COMMAND [OPTIONS]\n    Where COMMAND is 'list', 'add', or 'delete'";
+  if (parts.size() == 1) {
+    return cookieUsage;
+  }
+
+  const auto &command = parts.at(1);
+  if (command == "add") {
+    if (parts.size() != 3) {
+      return "Usage: cookie-secret add <SECRET|random>";
+    }
+    auto oldSecret = DNSPacket::s_EDNSCookieKey;
+    std::array<char, EDNSCookiesOpt::EDNSCookieSecretSize / 2> key{};
+    const auto &newSecret = parts.at(2);
+    if (newSecret == "random") {
+      dns_random(key.data(), key.size());
+      DNSPacket::s_EDNSCookieKey = std::string(key.data(), key.size());
+    } else {
+      if (newSecret.size() != EDNSCookiesOpt::EDNSCookieSecretSize) {
+        return "wrong size for new secret (" + std::to_string(newSecret.size()) + "), must be " + std::to_string(EDNSCookiesOpt::EDNSCookieSecretSize);
+      }
+      try {
+        auto secretBytes = makeBytesFromHex(newSecret);
+        DNSPacket::s_EDNSCookieKey = std::move(secretBytes);
+      } catch (const std::exception& exc) {
+        return "Can not convert " + newSecret + " to bytes: " + exc.what();
+      }
+    }
+    if (!oldSecret.empty()) {
+      DNSPacket::s_OldEDNSCookieKeys.insert(DNSPacket::s_OldEDNSCookieKeys.begin(), oldSecret);
+    }
+    DNSPacket::s_doEDNSCookieProcessing = true;
+    return "COOKIE secret set to " + makeHexDump(DNSPacket::s_EDNSCookieKey, "");
+  }
+
+  if (command == "delete") {
+    if (parts.size() != 3) {
+      return "Usage: cookie-secret delete <SECRET|last>";
+    }
+    const auto &secret = parts.at(2);
+    if (secret == "last") {
+      if (DNSPacket::s_OldEDNSCookieKeys.empty()) {
+        return "No inactive keys, nothing removed";
+      }
+      auto removedSecret = DNSPacket::s_OldEDNSCookieKeys.back();
+      DNSPacket::s_OldEDNSCookieKeys.pop_back();
+      return "COOKIE secret " + makeHexDump(removedSecret, "") +" removed";
+    }
+    if (secret.size() != EDNSCookiesOpt::EDNSCookieSecretSize) {
+      return "wrong size for old secret (" + std::to_string(secret.size()) + "), must be " + std::to_string(EDNSCookiesOpt::EDNSCookieSecretSize);
+    }
+    try {
+      auto secretBytes = makeBytesFromHex(secret);
+      if (secretBytes == DNSPacket::s_EDNSCookieKey) {
+        return "COOKIE secret " + makeHexDump(secretBytes, "") +" is the active secret, refusing to remove";
+      }
+      auto it = std::find(DNSPacket::s_OldEDNSCookieKeys.begin(), DNSPacket::s_OldEDNSCookieKeys.end(), secretBytes); // NOLINT(readability-identifier-length)
+      if (it != DNSPacket::s_OldEDNSCookieKeys.end()) {
+        DNSPacket::s_OldEDNSCookieKeys.erase(it);
+        return "COOKIE secret " + secret +" removed";
+      }
+    } catch (const std::exception& exc) {
+        return "Can not convert " + secret + " to bytes: " + exc.what();
+    }
+    return "COOKIE secret " + secret +" not found";
+  }
+  if (command == "list") {
+    if (DNSPacket::s_EDNSCookieKey.empty()) {
+      return "No EDNS Cookie secrets";
+    }
+    oss << makeHexDump(DNSPacket::s_EDNSCookieKey, "") << " *";
+    for (const auto& secret : DNSPacket::s_OldEDNSCookieKeys) {
+      oss << std::endl << makeHexDump(secret, "");
+    }
+    return oss.str();
+  }
+  return cookieUsage;
+#else
+  return "COOKIEs are not supported as the required crypto library is not available";
+#endif
+}
+
+string DLStatusHandler(const vector<string>& /* parts */, pid_t ppid, Logr::log_t /* slog */)
 {
   ostringstream os;
   os<<ppid<<": "<<d_status;
   return os.str();
 }
 
-string DLUptimeHandler(const vector<string>& /* parts */, Utility::pid_t /* ppid */)
+string DLUptimeHandler(const vector<string>& /* parts */, pid_t /* ppid */, Logr::log_t /* slog */)
 {
   ostringstream os;
   os<<humanDuration(time(nullptr)-g_starttime);
   return os.str();
 }
 
-string DLPurgeHandler(const vector<string>& parts, Utility::pid_t /* ppid */)
+string DLPurgeHandler(const vector<string>& parts, pid_t /* ppid */, Logr::log_t slog)
 {
   ostringstream os;
   int ret=0;
@@ -137,7 +227,8 @@ string DLPurgeHandler(const vector<string>& parts, Utility::pid_t /* ppid */)
 
   if(parts.size()>1) {
     for (vector<string>::const_iterator i=++parts.begin();i<parts.end();++i) {
-      g_log<<Logger::Warning<<"Cache clear request for '"<<*i<<"' received from operator"<<endl;
+      SLOG(g_log<<Logger::Warning<<"Cache clear request for '"<<*i<<"' received from operator"<<endl,
+           slog->info(Logr::Warning, "Cache clear request received from operator", "request", Logging::Loggable(*i)));
       ret+=purgeAuthCaches(*i);
       if (!boost::ends_with(*i, "$")) {
         if (!clearAllDNSSECcaches) {
@@ -150,7 +241,8 @@ string DLPurgeHandler(const vector<string>& parts, Utility::pid_t /* ppid */)
     }
   }
   else {
-    g_log<<Logger::Warning<<"Cache clear request received from operator"<<endl;
+    SLOG(g_log<<Logger::Warning<<"Cache clear request received from operator"<<endl,
+         slog->info(Logr::Warning, "Cache clear request received from operator"));
     ret = purgeAuthCaches();
     clearAllDNSSECcaches = true;
   }
@@ -163,7 +255,7 @@ string DLPurgeHandler(const vector<string>& parts, Utility::pid_t /* ppid */)
   return os.str();
 }
 
-string DLCCHandler(const vector<string>& /* parts */, Utility::pid_t /* ppid */)
+string DLCCHandler(const vector<string>& /* parts */, pid_t /* ppid */, Logr::log_t /* slog */)
 {
   extern AuthPacketCache PC;
   extern AuthQueryCache QC;
@@ -192,12 +284,12 @@ string DLCCHandler(const vector<string>& /* parts */, Utility::pid_t /* ppid */)
   return os.str();
 }
 
-string DLQTypesHandler(const vector<string>& /* parts */, Utility::pid_t /* ppid */)
+string DLQTypesHandler(const vector<string>& /* parts */, pid_t /* ppid */, Logr::log_t /* slog */)
 {
   return g_rs.getQTypeReport();
 }
 
-string DLRSizesHandler(const vector<string>& /* parts */, Utility::pid_t /* ppid */)
+string DLRSizesHandler(const vector<string>& /* parts */, pid_t /* ppid */, Logr::log_t /* slog */)
 {
   typedef map<uint16_t, uint64_t> respsizes_t;
   respsizes_t respsizes = g_rs.getSizeResponseCounts();
@@ -209,7 +301,7 @@ string DLRSizesHandler(const vector<string>& /* parts */, Utility::pid_t /* ppid
   return os.str();
 }
 
-string DLRemotesHandler(const vector<string>& /* parts */, Utility::pid_t /* ppid */)
+string DLRemotesHandler(const vector<string>& /* parts */, pid_t /* ppid */, Logr::log_t /* slog */)
 {
   extern StatBag S;
   typedef vector<pair<string, unsigned int> > totals_t;
@@ -222,7 +314,7 @@ string DLRemotesHandler(const vector<string>& /* parts */, Utility::pid_t /* ppi
   return ret;
 }
 
-string DLSettingsHandler(const vector<string>& parts, Utility::pid_t /* ppid */)
+string DLSettingsHandler(const vector<string>& parts, pid_t /* ppid */, Logr::log_t slog)
 {
   static const char *whitelist[]={"query-logging",nullptr};
   const char **p;
@@ -236,7 +328,8 @@ string DLSettingsHandler(const vector<string>& parts, Utility::pid_t /* ppid */)
       break;
   if(*p) {
     ::arg().set(parts[1])=parts[2];
-    g_log<<Logger::Warning<<"Configuration change for setting '"<<parts[1]<<"' to value '"<<parts[2]<<"' received from operator"<<endl;
+    SLOG(g_log<<Logger::Warning<<"Configuration change for setting '"<<parts[1]<<"' to value '"<<parts[2]<<"' received from operator"<<endl,
+         slog->info(Logr::Warning, "Configuration change received from operator", "setting", Logging::Loggable(parts[1]), "new value", Logging::Loggable(parts[2])));
     return "done";
   }
   else
@@ -244,12 +337,12 @@ string DLSettingsHandler(const vector<string>& parts, Utility::pid_t /* ppid */)
 
 }
 
-string DLVersionHandler(const vector<string>& /* parts */, Utility::pid_t /* ppid */)
+string DLVersionHandler(const vector<string>& /* parts */, pid_t /* ppid */, Logr::log_t /* slog */)
 {
   return VERSION;
 }
 
-string DLNotifyRetrieveHandler(const vector<string>& parts, Utility::pid_t /* ppid */)
+string DLNotifyRetrieveHandler(const vector<string>& parts, pid_t /* ppid */, Logr::log_t slog)
 {
   extern CommunicatorClass Communicator;
   ostringstream os;
@@ -291,11 +384,12 @@ string DLNotifyRetrieveHandler(const vector<string>& parts, Utility::pid_t /* pp
   shuffle(di.primaries.begin(), di.primaries.end(), pdns::dns_random_engine());
   const auto& primary = di.primaries.front();
   Communicator.addSuckRequest(domain, primary, SuckRequest::PdnsControl, override_primary);
-  g_log << Logger::Warning << "Retrieval request for zone '" << domain << "' from primary '" << primary << "' received from operator" << endl;
+  SLOG(g_log << Logger::Warning << "Retrieval request for zone '" << domain << "' from primary '" << primary << "' received from operator" << endl,
+       slog->info(Logr::Warning, "Retrieval request received from operator", "zone", Logging::Loggable(domain), "primary", Logging::Loggable(primary)));
   return "Added retrieval request for '" + domain.toLogString() + "' from primary " + primary.toLogString();
 }
 
-string DLNotifyHostHandler(const vector<string>& parts, Utility::pid_t /* ppid */)
+string DLNotifyHostHandler(const vector<string>& parts, pid_t /* ppid */, Logr::log_t slog)
 {
   extern CommunicatorClass Communicator;
   ostringstream os;
@@ -318,12 +412,13 @@ string DLNotifyHostHandler(const vector<string>& parts, Utility::pid_t /* ppid *
     return "Unable to convert '"+parts[2]+"' to an IP address";
   }
 
-  g_log << Logger::Warning << "Notification request to host " << parts[2] << " for zone '" << domain << "' received from operator" << endl;
+  SLOG(g_log << Logger::Warning << "Notification request to host " << parts[2] << " for zone '" << domain << "' received from operator" << endl,
+       slog->info(Logr::Warning, "Notification request received from operator", "host", Logging::Loggable(parts[2]), "zone", Logging::Loggable(domain)));
   Communicator.notify(domain, parts[2]);
   return "Added to queue";
 }
 
-string DLNotifyHandler(const vector<string>& parts, Utility::pid_t /* ppid */)
+string DLNotifyHandler(const vector<string>& parts, pid_t /* ppid */, Logr::log_t slog)
 {
   extern CommunicatorClass Communicator;
   UeberBackend B;
@@ -331,7 +426,8 @@ string DLNotifyHandler(const vector<string>& parts, Utility::pid_t /* ppid */)
     return "syntax: notify zone";
   if(!::arg().mustDo("primary") && !(::arg().mustDo("secondary") && ::arg().mustDo("secondary-do-renotify")))
     return "PowerDNS not configured as primary (primary), or secondary (secondary) with re-notifications";
-  g_log << Logger::Warning << "Notification request for zone '" << parts[1] << "' received from operator" << endl;
+  SLOG(g_log << Logger::Warning << "Notification request for zone '" << parts[1] << "' received from operator" << endl,
+       slog->info(Logr::Warning, "Notification request received from operator", "zone", Logging::Loggable(parts[1])));
 
   if (parts[1] == "*") {
     vector<DomainInfo> domains;
@@ -364,11 +460,12 @@ string DLNotifyHandler(const vector<string>& parts, Utility::pid_t /* ppid */)
   }
 }
 
-string DLRediscoverHandler(const vector<string>& /* parts */, Utility::pid_t /* ppid */)
+string DLRediscoverHandler(const vector<string>& /* parts */, pid_t /* ppid */, Logr::log_t slog)
 {
   UeberBackend B;
   try {
-    g_log<<Logger::Error<<"Rediscovery was requested"<<endl;
+    SLOG(g_log<<Logger::Error<<"Rediscovery was requested"<<endl,
+         slog->info(Logr::Warning, "Rediscovery was requested"));
     string status="Ok";
     B.rediscover(&status);
     return status;
@@ -379,18 +476,20 @@ string DLRediscoverHandler(const vector<string>& /* parts */, Utility::pid_t /* 
 
 }
 
-string DLReloadHandler(const vector<string>& /* parts */, Utility::pid_t /* ppid */)
+string DLReloadHandler(const vector<string>& /* parts */, pid_t /* ppid */, Logr::log_t slog)
 {
   UeberBackend B;
   B.reload();
-  g_log<<Logger::Error<<"Reload was requested"<<endl;
+  SLOG(g_log<<Logger::Error<<"Reload was requested"<<endl,
+       slog->info(Logr::Warning, "Reload was requested"));
   return "Ok";
 }
 
-string DLListZones(const vector<string>& parts, Utility::pid_t /* ppid */)
+string DLListZones(const vector<string>& parts, pid_t /* ppid */, Logr::log_t slog)
 {
   UeberBackend B;
-  g_log<<Logger::Notice<<"Received request to list zones."<<endl;
+  SLOG(g_log<<Logger::Notice<<"Received request to list zones."<<endl,
+       slog->info(Logr::Notice, "Received request to list zones."));
   vector<DomainInfo> domains;
   B.getAllDomains(&domains, false, false);
   ostringstream ret;
@@ -416,19 +515,20 @@ string DLListZones(const vector<string>& parts, Utility::pid_t /* ppid */)
   return ret.str();
 }
 
-string DLFlushHandler(const vector<string>& /*parts*/, Utility::pid_t /*ppid*/)
+string DLFlushHandler(const vector<string>& /*parts*/, pid_t /*ppid*/, Logr::log_t slog)
 {
   UeberBackend B; // NOLINT(readability-identifier-length)
   B.flush();
-  g_log<<Logger::Error<<"Backend flush was requested"<<endl;
+  SLOG(g_log<<Logger::Error<<"Backend flush was requested"<<endl,
+       slog->info(Logr::Warning, "Backend flush was requested"));
   return "Ok";
 }
 
 #ifdef HAVE_P11KIT1
-extern bool PKCS11ModuleSlotLogin(const std::string& module, const string& tokenId, const std::string& pin);
+#include "pkcs11signers.hh"
 #endif
 
-string DLTokenLogin([[maybe_unused]] const vector<string>& parts, [[maybe_unused]] Utility::pid_t /* ppid */)
+string DLTokenLogin([[maybe_unused]] const vector<string>& parts, [[maybe_unused]] pid_t /* ppid */, [[maybe_unused]] Logr::log_t slog)
 {
 #ifndef HAVE_P11KIT1
   return "PKCS#11 support not compiled in";
@@ -437,7 +537,7 @@ string DLTokenLogin([[maybe_unused]] const vector<string>& parts, [[maybe_unused
     return "invalid number of parameters, needs 4, got " + std::to_string(parts.size());
   }
 
-  if (PKCS11ModuleSlotLogin(parts[1], parts[2], parts[3])) {
+  if (PKCS11ModuleSlotLogin(slog, parts[1], parts[2], parts[3])) {
     return "logged in";
   } else {
     return "could not log in, check logs";
@@ -445,7 +545,7 @@ string DLTokenLogin([[maybe_unused]] const vector<string>& parts, [[maybe_unused
 #endif
 }
 
-string DLSuckRequests(const vector<string>& /* parts */, Utility::pid_t /* ppid */)
+string DLSuckRequests(const vector<string>& /* parts */, pid_t /* ppid */, Logr::log_t /* slog */)
 {
   string ret;
   for (auto const &d: Communicator.getSuckRequests()) {

@@ -1068,8 +1068,15 @@ public:
   string getZoneRepresentation(bool noDot=false) const override;
   void toPacket(DNSPacketWriter& pw) const override;
 
-  uint8_t d_version{0}, d_size{0}, d_horizpre{0}, d_vertpre{0};
-  uint32_t d_latitude{0}, d_longitude{0}, d_altitude{0};
+  uint8_t d_version{0};
+  uint8_t d_size{0x12};         /* default = 1e2 cm = 1.00m */
+  uint8_t d_horizpre{0x16};     /* default = 1e6 cm = 10000.00m = 10km */
+  uint8_t d_vertpre{0x13};      /* default = 1e3 cm = 10.00m */
+
+  uint32_t d_latitude{0};
+  uint32_t d_longitude{0};
+  uint32_t d_altitude{10000000};
+
   uint16_t getType() const override
   {
     return QType::LOC;
@@ -1139,6 +1146,20 @@ private:
   DNSName d_fqdn;
 };
 
+class WALLETRecordContent : public DNSRecordContent
+{
+public:
+  includeboilerplate(WALLET)
+
+  [[nodiscard]] size_t sizeEstimate() const override
+  {
+    return sizeof(*this) + d_text.size();
+  }
+
+  string d_text;
+};
+
+
 class EUI48RecordContent : public DNSRecordContent
 {
 public:
@@ -1207,7 +1228,7 @@ private:
 class TKEYRecordContent : public DNSRecordContent
 {
 public:
-  TKEYRecordContent();
+  TKEYRecordContent() = default;
   includeboilerplate(TKEY)
   [[nodiscard]] size_t sizeEstimate() const override
   {

@@ -31,11 +31,11 @@
 #include "sstuff.hh"
 #include "threadname.hh"
 
+#include "dnsdist-concurrent-connections.hh"
 #include "dnsdist-dnsparser.hh"
 #include "dnsdist-ecs.hh"
 #include "dnsdist-proxy-protocol.hh"
 #include "dnsdist-tcp.hh"
-#include "dnsdist-random.hh"
 
 #include "doq-common.hh"
 
@@ -48,36 +48,7 @@ using namespace dnsdist::doq;
 #define DEBUGLOG(x)
 #endif
 
-class Connection
-{
-public:
-  Connection(const ComboAddress& peer, const ComboAddress& localAddr, QuicheConfig config, QuicheConnection conn) :
-    d_peer(peer), d_localAddr(localAddr), d_conn(std::move(conn)), d_config(std::move(config))
-  {
-  }
-  Connection(const Connection&) = delete;
-  Connection(Connection&&) = default;
-  Connection& operator=(const Connection&) = delete;
-  Connection& operator=(Connection&&) = default;
-  ~Connection() = default;
-
-  std::shared_ptr<const std::string> getSNI()
-  {
-    if (!d_sni) {
-      d_sni = std::make_shared<const std::string>(getSNIFromQuicheConnection(d_conn));
-    }
-    return d_sni;
-  }
-
-  ComboAddress d_peer;
-  ComboAddress d_localAddr;
-  QuicheConnection d_conn;
-  QuicheConfig d_config;
-
-  std::unordered_map<uint64_t, PacketBuffer> d_streamBuffers;
-  std::unordered_map<uint64_t, PacketBuffer> d_streamOutBuffers;
-  std::shared_ptr<const std::string> d_sni{nullptr};
-};
+using Connection = QUICConnection;
 
 static void sendBackDOQUnit(DOQUnitUniquePtr&& unit, const char* description);
 
@@ -143,11 +114,16 @@ public:
     memcpy(&cleartextDH, dnsResponse.getHeader().get(), sizeof(cleartextDH));
 
     if (!response.isAsync()) {
+      if (!responseContentMatches(unit->response, dnsResponse.ids.qname, dnsResponse.ids.qtype, dnsResponse.ids.qclass, unit->downstream, dnsdist::configuration::getCurrentRuntimeConfiguration().d_allowEmptyResponse)) {
+        return;
+      }
+
       dnsResponse.ids.doqu = std::move(unit);
 
       if (!processResponse(dnsResponse.ids.doqu->response, dnsResponse, false)) {
         if (dnsResponse.ids.doqu) {
-
+          /* this will signal an error */
+          dnsResponse.ids.doqu->response.clear();
           sendBackDOQUnit(std::move(dnsResponse.ids.doqu), "Response dropped by rules");
         }
         return;
@@ -163,7 +139,7 @@ public:
     if (!unit->ids.selfGenerated) {
       auto udiff = unit->ids.queryRealTime.udiff();
       VERBOSESLOG(infolog("Got answer from %s, relayed to %s (quic, %d bytes), took %d us", unit->downstream->d_config.remote.toStringWithPort(), unit->ids.origRemote.toStringWithPort(), unit->response.size(), udiff),
-                  dnsResponse.getLogger()->info("Got answer from backend, relayed to client"));
+                  dnsResponse.getLogger()->info(Logr::Info, "Got answer from backend, relayed to client"));
 
       auto backendProtocol = unit->downstream->getProtocol();
       if (backendProtocol == dnsdist::Protocol::DoUDP && unit->tcp) {
@@ -369,7 +345,14 @@ static std::optional<std::reference_wrapper<Connection>> createConnection(DOQSer
     quiche_conn_set_keylog_path(quicheConn.get(), config.df->d_quicheParams.d_keyLogFile.c_str());
   }
 
-  auto conn = Connection(peer, localAddr, std::move(quicheConfig), std::move(quicheConn));
+#ifdef HAVE_QUICHE_CONN_SET_QLOG_PATH
+  if (config.df && !config.df->d_quicheParams.d_qLogDir.empty()) {
+    configureQLog(quicheConn, config.df->d_quicheParams.d_qLogDir, peer);
+  }
+#endif
+
+  auto conn = Connection(*config.clientState, peer, localAddr, std::move(quicheConfig), std::move(quicheConn));
+  gettimeofday(&conn.d_connectionStartTime, nullptr);
   auto pair = config.d_connections.emplace(serverSideID, std::move(conn));
   return pair.first->second;
 }
@@ -424,7 +407,7 @@ static void processDOQQuery(DOQUnitUniquePtr&& doqUnit)
 
     if (!dnsdist::configuration::getCurrentRuntimeConfiguration().d_ACL.match(remote)) {
       VERBOSESLOG(infolog("Query from %s (DoQ) dropped because of ACL", remote.toStringWithPort()),
-                  dsc->df->getLogger().info("DoQ query dropped because of ACL", "client.address", Logging::Loggable(remote)));
+                  dsc->df->getLogger().info(Logr::Info, "DoQ query dropped because of ACL", "client.address", Logging::Loggable(remote)));
       ++dnsdist::metrics::g_stats.aclDrops;
       unit->response.clear();
 
@@ -505,7 +488,7 @@ static void processDOQQuery(DOQUnitUniquePtr&& doqUnit)
       if (unit->response.size() >= sizeof(dnsheader)) {
         const dnsheader_aligned dnsHeader(unit->response.data());
 
-        handleResponseSent(unit->ids.qname, QType(unit->ids.qtype), 0, unit->ids.origRemote, ComboAddress(), unit->response.size(), *dnsHeader, dnsdist::Protocol::DoQ, dnsdist::Protocol::DoQ, false);
+        handleResponseSent(DNSName(unit->ids.qname), QType(unit->ids.qtype), 0., unit->ids.origRemote, ComboAddress(), unit->response.size(), *dnsHeader, dnsdist::Protocol::DoQ, dnsdist::Protocol::DoQ, false);
       }
       handleImmediateResponse(std::move(unit), "DoQ self-answered response");
       return;
@@ -545,9 +528,12 @@ static void processDOQQuery(DOQUnitUniquePtr&& doqUnit)
     if (downstream->passCrossProtocolQuery(std::move(cpq))) {
       return;
     }
-    // NOLINTNEXTLINE(bugprone-use-after-move): it was only moved if the call succeeded
-    unit = cpq->releaseDU();
-    handleImmediateResponse(std::move(unit), "DoQ internal error");
+    /* On exceptional cases, cpq is moved but returns false above. So we check to make sure. See https://github.com/PowerDNS/pdns/issues/17109 */
+    // NOLINTNEXTLINE(bugprone-use-after-move): the behaviour of a moved std::unique_ptr is actually specified
+    if (cpq) {
+      unit = cpq->releaseDU();
+      handleImmediateResponse(std::move(unit), "DoQ internal error");
+    }
     return;
   }
   catch (const std::exception& e) {
@@ -597,7 +583,7 @@ static void flushResponses(pdns::channel::Receiver<DOQUnit>& receiver, const Log
     }
     catch (const std::exception& e) {
       SLOG(errlog("Error while processing response received over DoQ: %s", e.what()),
-           frontendLogger.error(e.what(), "Error while processing response received over DoQ"));
+           frontendLogger.error(Logr::Error, e.what(), "Error while processing response received over DoQ"));
     }
     catch (...) {
       SLOG(errlog("Unspecified error while processing response received over DoQ"),
@@ -647,9 +633,21 @@ static void handleReadableStream(DOQFrontend& frontend, ClientState& clientState
       ++dnsdist::metrics::g_stats.nonCompliantQueries;
       ++clientState.nonCompliantQueries;
       quiche_conn_stream_shutdown(conn.d_conn.get(), streamID, QUICHE_SHUTDOWN_WRITE, static_cast<uint64_t>(DOQ_Error_Codes::DOQ_PROTOCOL_ERROR));
+      conn.d_streamBuffers.erase(streamID);
       return;
     }
 
+    if (received > std::numeric_limits<uint16_t>::max() || (std::numeric_limits<uint16_t>::max() - existingLength) < static_cast<size_t>(received)) {
+      VERBOSESLOG(infolog("DoQ data frame of size %d is too large for a DNS query (we already have %d)", received, existingLength),
+                  frontend.d_logger->info(Logr::Info, "DoQ data frame is too large for a DNS query", "stream_id", Logging::Loggable(streamID), "frame_size", Logging::Loggable(received), "existing_payload_size", Logging::Loggable(existingLength)));
+      conn.d_streamBuffers.erase(streamID);
+      ++dnsdist::metrics::g_stats.nonCompliantQueries;
+      ++clientState.nonCompliantQueries;
+      quiche_conn_stream_shutdown(conn.d_conn.get(), streamID, QUICHE_SHUTDOWN_WRITE, static_cast<uint64_t>(DOQ_Error_Codes::DOQ_PROTOCOL_ERROR));
+      return;
+    }
+
+    ++conn.d_readIOsTotal;
     streamBuffer.resize(existingLength + received);
     if (fin) {
       break;
@@ -660,6 +658,7 @@ static void handleReadableStream(DOQFrontend& frontend, ClientState& clientState
     ++dnsdist::metrics::g_stats.nonCompliantQueries;
     ++clientState.nonCompliantQueries;
     quiche_conn_stream_shutdown(conn.d_conn.get(), streamID, QUICHE_SHUTDOWN_WRITE, static_cast<uint64_t>(DOQ_Error_Codes::DOQ_PROTOCOL_ERROR));
+    conn.d_streamBuffers.erase(streamID);
     return;
   }
 
@@ -669,9 +668,11 @@ static void handleReadableStream(DOQFrontend& frontend, ClientState& clientState
     ++dnsdist::metrics::g_stats.nonCompliantQueries;
     ++clientState.nonCompliantQueries;
     quiche_conn_stream_shutdown(conn.d_conn.get(), streamID, QUICHE_SHUTDOWN_WRITE, static_cast<uint64_t>(DOQ_Error_Codes::DOQ_PROTOCOL_ERROR));
+    conn.d_streamBuffers.erase(streamID);
     return;
   }
   DEBUGLOG("Dispatching query");
+  ++conn.d_queriesCount;
   doq_dispatch_query(*(frontend.d_server_config), std::move(streamBuffer), conn.d_localAddr, client, serverConnID, streamID, conn.getSNI());
   conn.d_streamBuffers.erase(streamID);
 }
@@ -751,6 +752,12 @@ static void handleSocketReadable(DOQFrontend& frontend, ClientState& clientState
       if (!originalDestinationID) {
         ++frontend.d_doqInvalidTokensReceived;
         DEBUGLOG("Discarding invalid token");
+        continue;
+      }
+
+      auto connectionResult = dnsdist::IncomingConcurrentTCPConnectionsManager::accountNewTCPConnection(client, true, true);
+      if (connectionResult == dnsdist::IncomingConcurrentTCPConnectionsManager::NewConnectionResult::Denied) {
+        DEBUGLOG("Connection not allowed!");
         continue;
       }
 

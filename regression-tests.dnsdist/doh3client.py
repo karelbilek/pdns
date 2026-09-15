@@ -25,6 +25,7 @@ from doqclient import StreamResetError
 
 HttpConnection = Union[H0Connection, H3Connection]
 
+
 class URL:
     def __init__(self, url: str) -> None:
         parsed = urlparse(url)
@@ -52,6 +53,7 @@ class HttpRequest:
         self.method = method
         self.url = url
 
+
 class HttpClient(QuicConnectionProtocol):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -70,20 +72,13 @@ class HttpClient(QuicConnectionProtocol):
         """
         Perform a GET request.
         """
-        return await self._request(
-            HttpRequest(method="GET", url=URL(url), headers=headers)
-        )
+        return await self._request(HttpRequest(method="GET", url=URL(url), headers=headers))
 
-    async def post(
-        self, url: str, data: bytes, headers: Optional[Dict] = None
-    ) -> Deque[H3Event]:
+    async def post(self, url: str, data: bytes, headers: Optional[Dict] = None) -> Deque[H3Event]:
         """
         Perform a POST request.
         """
-        return await self._request(
-            HttpRequest(method="POST", url=URL(url), content=data, headers=headers)
-        )
-
+        return await self._request(HttpRequest(method="POST", url=URL(url), content=data, headers=headers))
 
     def http_event_received(self, event: H3Event) -> None:
         if isinstance(event, (HeadersReceived, DataReceived)):
@@ -132,9 +127,7 @@ class HttpClient(QuicConnectionProtocol):
             end_stream=not request.content,
         )
         if request.content:
-            self._http.send_data(
-                stream_id=stream_id, data=request.content, end_stream=True
-            )
+            self._http.send_data(stream_id=stream_id, data=request.content, end_stream=True)
 
         waiter = self._loop.create_future()
         self._request_events[stream_id] = deque()
@@ -188,11 +181,16 @@ async def async_h3_query(
     post: bool,
     create_protocol=HttpClient,
     additional_headers: Optional[Dict] = None,
+    raw_query=False,
 ) -> Union[Tuple[str, Dict[str, str]], Tuple[asyncio.TimeoutError, Dict[str, str]]]:
 
     url = baseurl
+    if not raw_query:
+        query = query.to_wire()
+    else:
+        post = True
     if not post:
-        url = "{}?dns={}".format(baseurl, base64.urlsafe_b64encode(query.to_wire()).decode('UTF8').rstrip('='))
+        url = "{}?dns={}".format(baseurl, base64.urlsafe_b64encode(query).decode("UTF8").rstrip("="))
     async with connect(
         host,
         port,
@@ -203,11 +201,10 @@ async def async_h3_query(
 
         try:
             async with async_timeout.timeout(timeout):
-
                 answer = await perform_http_request(
                     client=client,
                     url=url,
-                    data=query.to_wire() if post else None,
+                    data=query if post else None,
                     include=False,
                     output_dir=None,
                     additional_headers=additional_headers,
@@ -215,10 +212,22 @@ async def async_h3_query(
 
                 return answer
         except asyncio.TimeoutError as e:
-            return (e,{})
+            return (e, {})
 
 
-def doh3_query(query, host, baseurl, timeout=2, port=853, verify=None, server_hostname=None, post=False, additional_headers=None, raw_response=False):
+def doh3_query(
+    query,
+    host,
+    baseurl,
+    timeout=2,
+    port=853,
+    verify=None,
+    server_hostname=None,
+    post=False,
+    additional_headers=None,
+    raw_response=False,
+    raw_query=False,
+):
     configuration = QuicConfiguration(alpn_protocols=H3_ALPN, is_client=True, server_name=server_hostname)
     if verify:
         configuration.load_verify_locations(verify)
@@ -233,13 +242,14 @@ def doh3_query(query, host, baseurl, timeout=2, port=853, verify=None, server_ho
             timeout=timeout,
             create_protocol=HttpClient,
             post=post,
-            additional_headers=additional_headers
+            additional_headers=additional_headers,
+            raw_query=raw_query,
         )
     )
 
-    if (isinstance(result, StreamReset)):
+    if isinstance(result, StreamReset):
         raise StreamResetError(result.error_code)
-    if (isinstance(result, asyncio.TimeoutError)):
+    if isinstance(result, asyncio.TimeoutError):
         raise TimeoutError()
     if raw_response:
         return (result, headers)

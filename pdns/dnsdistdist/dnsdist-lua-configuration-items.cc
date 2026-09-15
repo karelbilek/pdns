@@ -20,6 +20,8 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 
+#include <optional>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -27,6 +29,8 @@
 #include "dnsdist-configuration.hh"
 #include "dnsdist-lua.hh"
 #include "dolog.hh"
+#include "otlp_logger.hh"
+#include "ext/luawrapper/include/LuaContext.hpp"
 
 namespace dnsdist::lua
 {
@@ -75,7 +79,9 @@ static const std::map<std::string, BooleanConfigurationItems> s_booleanConfigIte
   {"setRoundRobinFailOnNoServer", {[](dnsdist::configuration::RuntimeConfiguration& config, bool newValue) { config.d_roundrobinFailOnNoServer = newValue; }}},
   {"setDropEmptyQueries", {[](dnsdist::configuration::RuntimeConfiguration& config, bool newValue) { config.d_dropEmptyQueries = newValue; }}},
   {"setAllowEmptyResponse", {[](dnsdist::configuration::RuntimeConfiguration& config, bool newValue) { config.d_allowEmptyResponse = newValue; }}},
+  {"setConsoleBindFatal", {[](dnsdist::configuration::RuntimeConfiguration& config, bool newValue) { config.d_consoleBindFatal = newValue; }}},
   {"setConsoleConnectionsLogging", {[](dnsdist::configuration::RuntimeConfiguration& config, bool newValue) { config.d_logConsoleConnections = newValue; }}},
+  {"setWebserverBindFatal", {[](dnsdist::configuration::RuntimeConfiguration& config, bool newValue) { config.d_webserverBindFatal = newValue; }}},
   {"setProxyProtocolApplyACLToProxiedClients", {[](dnsdist::configuration::RuntimeConfiguration& config, bool newValue) { config.d_applyACLToProxiedClients = newValue; }}},
   {"setAddEDNSToSelfGeneratedResponses", {[](dnsdist::configuration::RuntimeConfiguration& config, bool newValue) { config.d_addEDNSToSelfGeneratedResponses = newValue; }}},
 };
@@ -146,7 +152,7 @@ static const std::map<std::string, UnsignedIntegerImmutableConfigurationItems> s
   {"setDoHDownstreamCleanupInterval", {[](dnsdist::configuration::ImmutableConfiguration& config, uint64_t newValue) { config.d_outgoingDoHCleanupInterval = newValue; }, std::numeric_limits<uint32_t>::max()}},
   {"setDoHDownstreamMaxIdleTime", {[](dnsdist::configuration::ImmutableConfiguration& config, uint64_t newValue) { config.d_outgoingDoHMaxIdleTime = newValue; }, std::numeric_limits<uint16_t>::max()}},
 #endif /* HAVE_DNS_OVER_HTTPS && HAVE_NGHTTP2 */
-  {"setMaxUDPOutstanding", {[](dnsdist::configuration::ImmutableConfiguration& config, uint64_t newValue) { config.d_maxUDPOutstanding = newValue; }, std::numeric_limits<uint16_t>::max()}},
+  {"setMaxUDPOutstanding", {[](dnsdist::configuration::ImmutableConfiguration& config, uint64_t newValue) { config.d_maxUDPOutstanding = newValue; }, 65536U}},
   {"setWHashedPertubation" /* Deprecated */, {[](dnsdist::configuration::ImmutableConfiguration& config, uint64_t newValue) { config.d_hashPerturbation = newValue; }, std::numeric_limits<uint32_t>::max()}},
   {"setWHashedPerturbation", {[](dnsdist::configuration::ImmutableConfiguration& config, uint64_t newValue) { config.d_hashPerturbation = newValue; }, std::numeric_limits<uint32_t>::max()}},
 #ifndef DISABLE_RECVMMSG
@@ -162,11 +168,10 @@ static const std::map<std::string, UnsignedIntegerImmutableConfigurationItems> s
   {"setMaxTCPReadIOsPerQuery", {[](dnsdist::configuration::ImmutableConfiguration& config, uint64_t newValue) { config.d_maxTCPReadIOsPerQuery = newValue; }, std::numeric_limits<uint32_t>::max()}},
   {"setBanDurationForExceedingMaxReadIOsPerQuery", {[](dnsdist::configuration::ImmutableConfiguration& config, uint64_t newValue) { config.d_tcpBanDurationForExceedingMaxReadIOsPerQuery = newValue; }, std::numeric_limits<uint32_t>::max()}},
   {"setBanDurationForExceedingTCPTLSRate", {[](dnsdist::configuration::ImmutableConfiguration& config, uint64_t newValue) { config.d_tcpBanDurationForExceedingTCPTLSRate = newValue; }, std::numeric_limits<uint32_t>::max()}},
-  {"setTCPConnectionsOverloadThreshold", {[](dnsdist::configuration::ImmutableConfiguration& config, uint64_t newValue) { config.d_tcpConnectionsOverloadThreshold = newValue; }, std::numeric_limits<uint8_t>::max()}},
   {"setTCPConnectionsMaskV4", {[](dnsdist::configuration::ImmutableConfiguration& config, uint64_t newValue) { config.d_tcpConnectionsMaskV4 = newValue; }, std::numeric_limits<uint8_t>::max()}},
   {"setTCPConnectionsMaskV6", {[](dnsdist::configuration::ImmutableConfiguration& config, uint64_t newValue) { config.d_tcpConnectionsMaskV6 = newValue; }, std::numeric_limits<uint8_t>::max()}},
   {"setTCPConnectionsMaskV4Port", {[](dnsdist::configuration::ImmutableConfiguration& config, uint64_t newValue) { config.d_tcpConnectionsMaskV4Port = newValue; }, std::numeric_limits<uint8_t>::max()}},
-  {"setTCPConnectionsOverloadThreshold", {[](dnsdist::configuration::ImmutableConfiguration& config, uint64_t newValue) { config.d_tcpConnectionsOverloadThreshold = newValue; }, 100}},
+  {"setTCPConnectionsOverloadThreshold", {[](dnsdist::configuration::ImmutableConfiguration& config, uint64_t newValue) { config.d_tcpConnectionsOverloadThreshold = newValue; }, 100U}},
 };
 
 static const std::map<std::string, DoubleImmutableConfigurationItems> s_doubleImmutableConfigItems{
@@ -174,6 +179,38 @@ static const std::map<std::string, DoubleImmutableConfigurationItems> s_doubleIm
   {"setWeightedBalancingFactor", {[](dnsdist::configuration::ImmutableConfiguration& config, double newValue) { config.d_weightedBalancingFactor = newValue; }, 1.0}},
 };
 // clang-format on
+
+static void setupOpenTelemetryConfigurationItems(LuaContext& luaCtx)
+{
+  luaCtx.writeFunction("setOpenTelemetryInternalTrace", []([[maybe_unused]] const std::string& kind, [[maybe_unused]] const LuaAssociativeTable<std::shared_ptr<RemoteLoggerInterface>>& remote_loggers, [[maybe_unused]] size_t sample_interval = 60) {
+#ifndef DISABLE_PROTOBUF
+    static const std::vector<std::string> validKinds{
+      "maintenance",
+    };
+    if (auto it = std::find(validKinds.cbegin(), validKinds.cend(), kind); it == validKinds.cend()) {
+      throw std::runtime_error(kind + " is not a valid Trace kind for setOpenTelemetryInternalTrace");
+    }
+
+    setLuaSideEffect();
+    dnsdist::configuration::updateRuntimeConfiguration([kind, remote_loggers, sample_interval](dnsdist::configuration::RuntimeConfiguration& config) {
+      std::vector<std::shared_ptr<RemoteLoggerInterface>> loggers;
+      for (const auto& remote_logger : remote_loggers) {
+        if (remote_logger.second != nullptr) {
+          // avoids potentially-evaluated-expression warning with clang.
+          RemoteLoggerInterface& remoteLoggerRef = *remote_logger.second;
+          if (typeid(remoteLoggerRef) != typeid(RemoteLogger) && typeid(remoteLoggerRef) != typeid(OTLPLogger)) {
+            // We could let the user do what he wants, but wrapping PowerDNS Protobuf inside a FrameStream tagged as dnstap is logically wrong.
+            throw std::runtime_error(std::string("setOpenTelemetryInternalTrace only takes RemoteLogger and OTLPLogger."));
+          }
+          loggers.push_back(remote_logger.second);
+        }
+      }
+      config.d_maintenanceRemoteLoggers = std::move(loggers);
+      config.d_opentelemetryMaintenanceInterval = sample_interval == 0 ? 60 : sample_interval;
+    });
+#endif
+  });
+}
 
 void setupConfigurationItems(LuaContext& luaCtx)
 {
@@ -257,5 +294,6 @@ void setupConfigurationItems(LuaContext& luaCtx)
       setLuaSideEffect();
     });
   }
+  setupOpenTelemetryConfigurationItems(luaCtx);
 }
 }

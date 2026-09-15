@@ -38,6 +38,7 @@ use http_body_util::{BodyExt, Full};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{body::Incoming as IncomingBody, header, Method, Request, Response, StatusCode};
+use hyper::body::Body;
 use hyper_util::rt::TokioIo;
 use pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer};
 use std::str::FromStr;
@@ -174,11 +175,6 @@ fn api_wrapper(
     headers: &mut header::HeaderMap,
     allow_password: bool,
 ) {
-    // security headers
-    headers.insert(
-        header::ACCESS_CONTROL_ALLOW_ORIGIN,
-        header::HeaderValue::from_static("*"),
-    );
 
     // XXX AUDIT!
 
@@ -237,6 +233,16 @@ fn api_wrapper(
     }
     response.status = StatusCode::OK.as_u16(); // 200;
 
+    // security headers
+    if !ctx.cross_origin_request_header.is_empty()  {
+        if let Ok(value) = header::HeaderValue::from_str(&ctx.cross_origin_request_header) {
+            headers.insert(
+                header::ACCESS_CONTROL_ALLOW_ORIGIN,
+                value,
+            );
+        }
+    }
+
     headers.insert(
         header::X_CONTENT_TYPE_OPTIONS,
         header::HeaderValue::from_static("nosniff"),
@@ -278,6 +284,8 @@ struct Context {
     acl: cxx::UniquePtr<rustmisc::NetmaskGroup>,
     logger: cxx::SharedPtr<rustmisc::Logger>,
     loglevel: rustmisc::LogLevel,
+    max_request_size: u64,
+    cross_origin_request_header: String,
 }
 
 // Serve a file
@@ -413,6 +421,7 @@ fn matcher(
 
 // This constructs the answer to an OPTIONS query
 fn collect_options(
+    ctx: &Context,
     path: &str,
     response: &mut rustweb::Response,
     my_logger: &cxx::SharedPtr<rustmisc::Logger>,
@@ -451,10 +460,14 @@ fn collect_options(
     }
     response.status = 200;
     methods.push(Method::OPTIONS.to_string());
-    response.headers.push(rustweb::KeyValue {
-        key: String::from("access-control-allow-origin"),
-        value: String::from("*"),
-    });
+
+    if !ctx.cross_origin_request_header.is_empty() {
+        response.headers.push(rustweb::KeyValue {
+            key: String::from("access-control-allow-origin"),
+            value: ctx.cross_origin_request_header.clone(),
+        });
+    }
+
     response.headers.push(rustweb::KeyValue {
         key: String::from("access-control-allow-headers"),
         value: String::from("Content-Type, X-API-Key"),
@@ -599,7 +612,7 @@ async fn process_request(
     let version = rust_request.version().to_owned();
 
     if method == Method::OPTIONS {
-        collect_options(&path, &mut response, &my_logger);
+        collect_options(&ctx, &path, &mut response, &my_logger);
     } else {
         // Find the right function implementing what the request wants
         let mut matchmethod = method.clone();
@@ -619,6 +632,55 @@ async fn process_request(
         if let Some(func) = apifunc {
             let reqheaders = rust_request.headers().clone();
             if rust_request.method() == Method::POST || rust_request.method() == Method::PUT {
+                let body_size = rust_request.size_hint().upper();
+                // From observation, hyper handles invalid or missing content length in a safe way
+                // by making the value 0. The actual body collect() is limited by the promised
+                // content length in the request
+                if body_size.is_none_or(|x| x > ctx.max_request_size) {
+                    let mut body = vec![];
+                    let status = StatusCode::PAYLOAD_TOO_LARGE; // 413
+                    if let Some(reason) = status.canonical_reason() {
+                        body = reason.as_bytes().to_vec();
+                    }
+                    if ctx.loglevel != rustmisc::LogLevel::None {
+                        let version = format!("{:?}", version);
+                        rustmisc::log(
+                            &my_logger,
+                            rustweb::Priority::Warning,
+                            "Request",
+                            &vec![
+                                rustmisc::KeyValue {
+                                    key: "remote".to_string(),
+                                    value: remote.to_string(),
+                                },
+                                rustmisc::KeyValue {
+                                    key: "method".to_string(),
+                                    value: method.to_string(),
+                                },
+                                rustmisc::KeyValue {
+                                    key: "urlpath".to_string(),
+                                    value: path.to_string(),
+                                },
+                                rustmisc::KeyValue {
+                                    key: "HTTPVersion".to_string(),
+                                    value: version,
+                                },
+                                rustmisc::KeyValue {
+                                    key: "status".to_string(),
+                                    value: status.as_u16().to_string(),
+                                },
+                                rustmisc::KeyValue {
+                                    key: "respsize".to_string(),
+                                    value: body.len().to_string(),
+                                },
+                            ],
+                        );
+                    }
+                    let rust_response = rust_response
+                        .status(status)
+                        .body(full(body))?;
+                    return Ok(rust_response);
+                }
                 request.body = rust_request.collect().await?.to_bytes().to_vec();
             }
             // This calls indirectly into C++
@@ -889,6 +951,8 @@ pub fn serveweb(
     acl: cxx::UniquePtr<rustmisc::NetmaskGroup>,
     logger: cxx::SharedPtr<rustmisc::Logger>,
     loglevel: rustmisc::LogLevel,
+    max_request_size: u64,
+    cross_origin_request_header: String,
 ) -> Result<(), std::io::Error> {
     // Context, atomically reference counted
     let ctx = Arc::new(Context {
@@ -897,6 +961,8 @@ pub fn serveweb(
         acl,
         logger,
         loglevel,
+        max_request_size,
+        cross_origin_request_header,
     });
 
     // We use a single thread to handle all the requests, letting the runtime abstracts from this
@@ -1196,6 +1262,8 @@ mod rustweb {
             acl: UniquePtr<NetmaskGroup>,
             logger: SharedPtr<Logger>,
             loglevel: LogLevel,
+            max_request_size: u64,
+            cross_origin_request_header: String,
         ) -> Result<()>;
     }
 

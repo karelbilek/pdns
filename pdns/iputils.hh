@@ -32,6 +32,7 @@
 #include <netdb.h>
 #include <sstream>
 #include <sys/un.h>
+#include "expected.hh"
 
 #include "namespaces.hh"
 
@@ -602,7 +603,7 @@ union SockaddrWrapper
   [[nodiscard]] string toString() const
   {
     if (sinun.sun_family == AF_UNIX) {
-      return sinun.sun_path;
+      return static_cast<const char*>(sinun.sun_path);
     }
     std::array<char, 1024> host{};
     if (sin4.sin_family != 0) {
@@ -645,7 +646,7 @@ inline ComboAddress makeComboAddress(const string& str)
 {
   ComboAddress address;
   address.sin4.sin_family = AF_INET;
-  if (inet_pton(AF_INET, str.c_str(), &address.sin4.sin_addr) <= 0) {
+  if (makeIPv4sockaddr(str, &address.sin4) < 0) {
     address.sin4.sin_family = AF_INET6;
     if (makeIPv6sockaddr(str, &address.sin6) < 0) {
       throw NetmaskException("Unable to convert '" + str + "' to a netmask");
@@ -745,7 +746,7 @@ public:
     }
   }
 
-  enum stringType
+  enum stringType : uint8_t
   {
     humanString,
     byteString,
@@ -808,6 +809,11 @@ public:
       }
       // still here, now match remaining bits
       uint8_t bits = d_bits % 8;
+      if (bits == 0) {
+        // no partial byte left to match, and lhs[index] would be one past the
+        // address for a /128
+        return true;
+      }
       auto mask = static_cast<uint8_t>(~(0xFF >> bits));
 
       return ((lhs[index]) == (rhs[index] & mask));
@@ -1511,6 +1517,9 @@ public:
   //<! Returns "best match" for key_type, which might not be value
   [[nodiscard]] node_type* lookup(const key_type& value) const
   {
+    if (empty()) {
+      return nullptr;
+    }
     uint8_t max_bits = value.getBits();
     return lookupImpl(value, max_bits);
   }
@@ -1518,6 +1527,9 @@ public:
   //<! Perform best match lookup for value, using at most max_bits
   [[nodiscard]] node_type* lookup(const ComboAddress& value, int max_bits = 128) const
   {
+    if (empty()) {
+      return nullptr;
+    }
     uint8_t addr_bits = value.getBits();
     if (max_bits < 0 || max_bits > addr_bits) {
       max_bits = addr_bits;
@@ -2071,7 +2083,7 @@ bool HarvestDestinationAddress(const struct msghdr* msgh, ComboAddress* destinat
 bool HarvestTimestamp(struct msghdr* msgh, struct timeval* timeval);
 void fillMSGHdr(struct msghdr* msgh, struct iovec* iov, cmsgbuf_aligned* cbuf, size_t cbufsize, char* data, size_t datalen, ComboAddress* addr);
 int sendOnNBSocket(int fileDesc, const struct msghdr* msgh);
-size_t sendMsgWithOptions(int socketDesc, const void* buffer, size_t len, const ComboAddress* dest, const ComboAddress* local, unsigned int localItf, int flags);
+[[nodiscard]] pdns::expected<size_t, int> sendMsgWithOptions(int socketDesc, const void* buffer, size_t len, const ComboAddress* dest, const ComboAddress* local, unsigned int localItf, int flags);
 
 /* requires a non-blocking, connected TCP socket */
 bool isTCPSocketUsable(int sock);

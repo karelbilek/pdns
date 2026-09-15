@@ -439,10 +439,13 @@ public:
 #ifdef MSG_FASTOPEN
     if (d_fastOpen) {
       int socketFlags = MSG_FASTOPEN;
-      size_t sent = sendMsgWithOptions(d_socket, reinterpret_cast<const char *>(&buffer.at(pos)), toWrite - pos, &d_remote, nullptr, 0, socketFlags);
-      if (sent > 0) {
+      auto sendRet = sendMsgWithOptions(d_socket, reinterpret_cast<const char*>(&buffer.at(pos)), toWrite - pos, &d_remote, nullptr, 0, socketFlags);
+      if (!sendRet.has_value()) {
+        throw std::runtime_error("sendMsgWithOptions: " + stringerror(sendRet.error()));
+      }
+      if (sendRet.value() > 0) {
         d_fastOpen = false;
-        pos += sent;
+        pos += sendRet.value();
       }
 
       if (pos < toWrite) {
@@ -484,12 +487,15 @@ public:
 #ifdef MSG_FASTOPEN
     if (d_fastOpen) {
       int socketFlags = MSG_FASTOPEN;
-      size_t sent = sendMsgWithOptions(d_socket, reinterpret_cast<const char *>(buffer), bufferSize, &d_remote, nullptr, 0, socketFlags);
-      if (sent > 0) {
+      auto sendRet = sendMsgWithOptions(d_socket, reinterpret_cast<const char*>(buffer), bufferSize, &d_remote, nullptr, 0, socketFlags);
+      if (!sendRet.has_value()) {
+        throw std::runtime_error("sendMsgWithOptions: " + stringerror(sendRet.error()));
+      }
+      if (sendRet.value() > 0) {
         d_fastOpen = false;
       }
 
-      return sent;
+      return sendRet.value();
     }
 #endif /* MSG_FASTOPEN */
 
@@ -596,8 +602,12 @@ struct TLSContextParameters
   std::string d_provider;
   std::string d_ciphers;
   std::string d_ciphers13;
+  std::string d_ecdheCurves;
   std::string d_caStore;
   std::string d_keyLogFile;
+  std::string d_client_certificate;
+  std::string d_client_certificate_key;
+  std::string d_client_certificate_password;
   TLSFrontend::ALPN d_alpn{TLSFrontend::ALPN::Unset};
   bool d_validateCertificates{true};
   bool d_releaseBuffers{true};

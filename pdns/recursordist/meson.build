@@ -68,7 +68,6 @@ subdir('meson' / 'clock-gettime')           # Clock_gettime
 subdir('meson' / 'boost')                   # Boost
 subdir('meson' / 'boost-context')           # Boost Context Switching Library
 subdir('meson' / 'boost-test')              # Boost Testing Library
-subdir('meson' / 'boost-filesystem')        # Boost File System Library
 subdir('meson' / 'reproducible')            # Reproducible Builds
 subdir('meson' / 'libsystemd')              # Systemd notification
 subdir('meson' / 'systemd')                 # Systemd and unit file handling
@@ -132,8 +131,6 @@ common_sources += files(
   src_dir / 'libssl.cc',
   src_dir / 'logger.cc',
   src_dir / 'logging.cc',
-  src_dir / 'lua-base4.cc',
-  src_dir / 'lua-recursor4.cc',
   src_dir / 'misc.cc',
   src_dir / 'mtasker_context.cc',
   src_dir / 'negcache.cc',
@@ -444,6 +441,8 @@ tools = {
       src_dir / 'rec-snmp.cc',
       src_dir / 'rec-tcp.cc',
       src_dir / 'lwres.cc',
+      src_dir / 'lua-base4.cc',
+      src_dir / 'lua-recursor4.cc',
       mplexer_sources,
     ],
     'manpages': ['pdns_recursor.1'],
@@ -467,8 +466,13 @@ tools = {
   'rec_control': {
     'main': src_dir / 'rec_control.cc',
     'manpages': ['rec_control.1'],
+    'files-extra': [
+      src_dir / 'lua-base4.cc',
+      mplexer_sources,
+    ],
     'deps-extra': [
       dep_boost,
+      dep_lua,
       dep_recrust,
       dep_rust_recrust,
     ],
@@ -606,18 +610,18 @@ endforeach
 
 if get_option('unit-tests')
   # default timeout of 30s is too short for some ubicloud targets. Unknown *why* they are so slow.
-  test('testrunner', testrunner, timeout: 120)
+  test('testrunner', testrunner, timeout: 300)
 endif
 
 # Man-pages.
 py = import('python')
 python = py.find_installation('python3', modules: 'venv', required: false)
 
-summary('Python', python.found(), bool_yn: true, section: 'Manual Pages')
-summary('Path', python.full_path(), section: 'Manual Pages')
-summary('Version', python.version(), section: 'Manual Pages')
+summary('Python with venv', python.found(), bool_yn: true, section: 'Manual Pages')
 
-if python.found()
+if get_option('man-pages') and python.found()
+  summary('Path', python.full_path(), section: 'Manual Pages')
+  summary('Version', python.version(), section: 'Manual Pages')
   generated_man_pages = []
   foreach tool, info: tools
     if 'manpages' in info
@@ -655,6 +659,8 @@ if python.found()
   else
     summary('Generating man pages', false, section: 'Manual Pages')
   endif
+else
+  summary('Generating man pages', false, section: 'Manual Pages')
 endif
 
 if dep_systemd_prog.found()
@@ -774,6 +780,18 @@ dep_conf_distfile = custom_target(
 )
 
 if python.found()
+  json_schema = custom_target(
+    'recursor-json-schema',
+    output: 'rec-schema-generated.stamp',
+    command: [
+      python,
+      product_source_dir / docs_dir / 'generate-jsonschema.py',
+      product_source_dir / docs_dir / 'http-api' / 'authoritative-api-openapi.yaml',
+      product_source_dir / docs_dir / 'http-api' / 'recursor-generated-schema.yaml',
+      '--stampfile',
+      '@OUTPUT@'
+    ],
+  )
 
   html_docs = custom_target(
     'html-docs',
@@ -790,7 +808,7 @@ if python.found()
     output: 'sphinx.stamp',
     console: true,
     depfile: 'sphinx.d',
-    depends: [ metricfiles, recrust ], # for generated .rst files
+    depends: [ metricfiles, recrust, json_schema ], # for generated .rst files
   )
 
   docs_tarball = custom_target(

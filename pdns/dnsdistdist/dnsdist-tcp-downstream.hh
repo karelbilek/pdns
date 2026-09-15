@@ -241,16 +241,16 @@ public:
     return d_state == State::idle && d_pendingQueries.size() == 0 && d_pendingResponses.size() == 0;
   }
 
-  bool reachedMaxStreamID() const override
+  bool reachedMaxStreamID() const override;
+
+  size_t getConcurrentQueriesCount() const
   {
-    /* TCP/DoT has only 2^16 usable identifiers, DoH has 2^32 */
-    const uint32_t maximumStreamID = std::numeric_limits<uint16_t>::max() - 1;
-    return d_highestStreamID == maximumStreamID;
+    return d_pendingQueries.size() + d_pendingResponses.size() + (d_state == State::sendingQueryToBackend ? 1 : 0);
   }
 
   bool reachedMaxConcurrentQueries() const override
   {
-    const size_t concurrent = d_pendingQueries.size() + d_pendingResponses.size() + (d_state == State::sendingQueryToBackend ? 1 : 0);
+    const auto concurrent = getConcurrentQueriesCount();
     if (concurrent > 0 && concurrent >= d_ds->d_config.d_maxInFlightQueriesPerConn) {
       return true;
     }

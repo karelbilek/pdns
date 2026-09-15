@@ -70,6 +70,8 @@ AuthPacketCache PC;
 // NOLINTNEXTLINE(readability-identifier-length)
 AuthQueryCache QC;
 AuthZoneCache g_zoneCache;
+bool g_logDNSQueries{false};
+bool g_views{false};
 
 ArgvMap &arg()
 {
@@ -77,6 +79,8 @@ ArgvMap &arg()
   return theArg;
 }
 /* END Needed because of deeper dependencies */
+
+bool g_slogStructured{false};
 
 // Allows reading/writing ComboAddresses and ZoneNames in YAML-cpp
 namespace YAML {
@@ -322,13 +326,13 @@ static void communicatorReceiveNotificationAnswers(const int sock4, const int so
 
   // receive incoming notification answers on the nonblocking sockets and take them off the list
   while (waitForMultiData(fds, 0, 0, &sock) > 0) {
-    Utility::socklen_t fromlen = sizeof(from);
+    socklen_t fromlen = sizeof(from);
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
     const auto size = recvfrom(sock, buffer.data(), buffer.size(), 0, reinterpret_cast<struct sockaddr*>(&from), &fromlen);
     if (size < 0) {
       break;
     }
-    DNSPacket packet(true);
+    DNSPacket packet(nullptr, true); // no structured logging in ixfrdist yet
     packet.setRemote(&from);
 
     if (packet.parse(buffer.data(), (size_t)size) < 0) {
@@ -375,8 +379,8 @@ static void communicatorSendNotifications(const int sock4, const int sock6)
 static void communicatorThread()
 {
   setThreadName("ixfrdist/communicator");
-  auto sock4 = makeQuerySocket(pdns::getQueryLocalAddress(AF_INET, 0), true);
-  auto sock6 = makeQuerySocket(pdns::getQueryLocalAddress(AF_INET6, 0), true);
+  auto sock4 = makeQuerySocket(pdns::getQueryLocalAddress(AF_INET, 0).d_address, true);
+  auto sock6 = makeQuerySocket(pdns::getQueryLocalAddress(AF_INET6, 0).d_address, true);
 
   if (sock4 < 0) {
     throw std::runtime_error("Unable to create local query socket");
@@ -493,7 +497,7 @@ static void updateThread(const string& workdir, const uint16_t& keep, const uint
       try {
         zoneLastCheck = now;
         g_stats.incrementSOAChecks(domain);
-        auto newSerial = getSerialFromPrimary(primary, domain, sr); // TODO TSIG
+        auto newSerial = getSerialFromPrimary(nullptr /* no structured logging */, primary, domain, sr); // TODO TSIG
         if(current_soa != nullptr) {
           g_log << Logger::Info << "Got SOA Serial for " << domain << " from " << primary.toStringWithPort() << ": " << newSerial << ", had Serial: " << current_soa->d_st.serial;
           if (newSerial == current_soa->d_st.serial) {
@@ -517,7 +521,7 @@ static void updateThread(const string& workdir, const uint16_t& keep, const uint
       uint32_t soaTTL = 0;
       records_t records;
       try {
-        AXFRRetriever axfr(primary, domain, tt, &local);
+        AXFRRetriever axfr(nullptr /* no structured logging */, primary, domain, tt, &local);
         uint32_t nrecords=0;
         Resolver::res_t nop;
         vector<DNSRecord> chunk;
@@ -806,12 +810,13 @@ static bool sendPacketOverTCP(int fd, const std::vector<uint8_t>& packet)
   return true;
 }
 
-static bool addRecordToWriter(DNSPacketWriter& pw, const DNSName& zoneName, const DNSRecord& record, bool compress)
+static bool addRecordToWriter(DNSPacketWriter& pwr, const DNSName& zoneName, const DNSRecord& record, bool compress, bool ignoreLimit=false)
 {
-  pw.startRecord(record.d_name + zoneName, record.d_type, record.d_ttl, QClass::IN, DNSResourceRecord::ANSWER, compress);
-  record.getContent()->toPacket(pw);
-  if (pw.size() > 16384) {
-    pw.rollback();
+  pwr.startRecord(record.d_name + zoneName, record.d_type, record.d_ttl, QClass::IN, DNSResourceRecord::ANSWER, compress);
+  record.getContent()->toPacket(pwr);
+  uint32_t maxsize = ignoreLimit ? 65535 : 16384;
+  if (pwr.size() > maxsize) {
+    pwr.rollback();
     return false;
   }
   return true;
@@ -821,6 +826,7 @@ template <typename T> static bool sendRecordsOverTCP(int fd, const MOADNSParser&
 {
   vector<uint8_t> packet;
 
+  bool wasRolledBack = false;
   for (auto it = records.cbegin(); it != records.cend();) {
     bool recordsAdded = false;
     packet.clear();
@@ -835,14 +841,21 @@ template <typename T> static bool sendRecordsOverTCP(int fd, const MOADNSParser&
         continue;
       }
 
-      if (addRecordToWriter(pw, mdp.d_qname, *it, g_compress)) {
+      if (addRecordToWriter(pw, mdp.d_qname, *it, g_compress, wasRolledBack && !recordsAdded)) {
         recordsAdded = true;
+        wasRolledBack = false;
         it++;
       }
       else {
+        if (wasRolledBack) {
+          // We did a rollback in the previous loop, and the large single record won't
+          // fit in the new packet by itself. Should be impossible, but here we are.
+          return false;
+        }
         if (recordsAdded) {
           pw.commit();
           sendPacketOverTCP(fd, packet);
+          wasRolledBack = true;
         }
         if (it == records.cbegin()) {
           /* something is wrong */

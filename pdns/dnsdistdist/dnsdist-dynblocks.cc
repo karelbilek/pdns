@@ -111,6 +111,16 @@ void DynBlockRulesGroup::apply(const timespec& now)
         }
       }
     }
+
+    if (d_allowedRCodesRatioRule.warningRatioExceeded(counters.responses, counters.notAllowedRCodes)) {
+      handleWarning(blocks, now, requestor, d_allowedRCodesRatioRule, updated);
+      continue;
+    }
+
+    if (d_allowedRCodesRatioRule.ratioExceeded(counters.responses, counters.notAllowedRCodes)) {
+      addBlock(blocks, now, requestor, d_allowedRCodesRatioRule, updated);
+      continue;
+    }
   }
 
   if (updated && blocks) {
@@ -130,26 +140,32 @@ void DynBlockRulesGroup::applySMT(const struct timespec& now, StatNode& statNode
   StatNode::Stat node;
   std::unordered_map<DNSName, SMTBlockParameters> namesToBlock;
   statNodeRoot.visit([this, &namesToBlock](const StatNode* node_, const StatNode::Stat& self, const StatNode::Stat& children) {
-    bool block = false;
-    SMTBlockParameters blockParameters;
-    if (d_smtVisitorFFI) {
-      dnsdist_ffi_stat_node_t tmp(*node_, self, children, blockParameters);
-      block = d_smtVisitorFFI(&tmp);
-    }
-    else {
-      auto ret = d_smtVisitor(*node_, self, children);
-      block = std::get<0>(ret);
-      if (block) {
-        if (std::optional<std::string> tmp = std::get<1>(ret)) {
-          blockParameters.d_reason = std::move(*tmp);
-        }
-        if (std::optional<int> tmp = std::get<2>(ret)) {
-          blockParameters.d_action = static_cast<DNSAction::Action>(*tmp);
+    try {
+      bool block = false;
+      SMTBlockParameters blockParameters{};
+      if (d_smtVisitorFFI) {
+        dnsdist_ffi_stat_node_t tmp(*node_, self, children, blockParameters);
+        block = d_smtVisitorFFI(&tmp);
+      }
+      else {
+        auto ret = d_smtVisitor(*node_, self, children);
+        block = std::get<0>(ret);
+        if (block) {
+          if (std::optional<std::string> tmp = std::get<1>(ret)) {
+            blockParameters.d_reason = std::move(*tmp);
+          }
+          if (std::optional<int> tmp = std::get<2>(ret)) {
+            blockParameters.d_action = static_cast<DNSAction::Action>(*tmp);
+          }
         }
       }
+      if (block) {
+        namesToBlock.insert({DNSName(node_->fullname), std::move(blockParameters)});
+      }
     }
-    if (block) {
-      namesToBlock.insert({DNSName(node_->fullname), std::move(blockParameters)});
+    catch (const std::exception& exp) {
+      SLOG(warnlog("Error while executing the Dynamic Block Suffix Match policy: %s", exp.what()),
+           dnsdist::logging::getTopLogger("dynamic-rules")->error(Logr::Warning, exp.what(), "Error while executing the Dynamic Block Suffix Match policy"));
     }
   },
                      node);
@@ -401,6 +417,10 @@ void DynBlockRulesGroup::processQueryRules(counts_t& counts, const struct timesp
       bool typeRuleMatches = checkIfQueryTypeMatches(ringEntry);
 
       if (qRateMatches || typeRuleMatches) {
+        if (d_excludedSubnets.match(ringEntry.requestor)) {
+          continue;
+        }
+
         auto& entry = counts[AddressAndPortRange(ringEntry.requestor, ringEntry.requestor.isIPv4() ? d_v4Mask : d_v6Mask, d_portMask)];
         if (qRateMatches) {
           ++entry.queries;
@@ -419,7 +439,7 @@ void DynBlockRulesGroup::processResponseRules(counts_t& counts, StatNode& root, 
     return;
   }
 
-  struct timespec responseCutOff = now;
+  timespec responseCutOff{now};
 
   d_respRateRule.d_cutOff = d_respRateRule.d_minTime = now;
   d_respRateRule.d_cutOff.tv_sec -= d_respRateRule.d_seconds;
@@ -455,6 +475,12 @@ void DynBlockRulesGroup::processResponseRules(counts_t& counts, StatNode& root, 
     }
   }
 
+  d_allowedRCodesRatioRule.d_cutOff = d_allowedRCodesRatioRule.d_minTime = now;
+  d_allowedRCodesRatioRule.d_cutOff.tv_sec -= d_allowedRCodesRatioRule.d_seconds;
+  if (d_allowedRCodesRatioRule.d_cutOff < responseCutOff) {
+    responseCutOff = d_allowedRCodesRatioRule.d_cutOff;
+  }
+
   for (const auto& shard : g_rings.d_shards) {
     auto responseRing = shard->respRing.lock();
     for (const auto& ringEntry : *responseRing) {
@@ -466,13 +492,29 @@ void DynBlockRulesGroup::processResponseRules(counts_t& counts, StatNode& root, 
         continue;
       }
 
+      bool suffixMatchRuleMatches = d_suffixMatchRule.matches(ringEntry.when);
+      if (suffixMatchRuleMatches) {
+        const bool hit = ringEntry.isACacheHit();
+        try {
+          root.submit(ringEntry.name, ((ringEntry.dh.rcode == 0 && ringEntry.usec == std::numeric_limits<uint32_t>::max()) ? -1 : ringEntry.dh.rcode), ringEntry.size, hit, std::nullopt, g_rings.getSamplingRate());
+        }
+        catch (const std::exception& exp) {
+          SLOG(warnlog("Error submitting name %s to Dynamic Block Suffix Match Rule policy: %s", ringEntry.name, exp.what()),
+               dnsdist::logging::getTopLogger("dynamic-rules")->error(Logr::Warning, exp.what(), "Error submitting name to Dynamic Block Suffix Match Rule policy", "name", Logging::Loggable(ringEntry.name)));
+        }
+      }
+
+      if (d_excludedSubnets.match(ringEntry.requestor)) {
+        continue;
+      }
+
       auto& entry = counts[AddressAndPortRange(ringEntry.requestor, ringEntry.requestor.isIPv4() ? d_v4Mask : d_v6Mask, d_portMask)];
       ++entry.responses;
 
       bool respRateMatches = d_respRateRule.matches(ringEntry.when);
-      bool suffixMatchRuleMatches = d_suffixMatchRule.matches(ringEntry.when);
       bool rcodeRuleMatches = checkIfResponseCodeMatches(ringEntry);
       bool respCacheMissRatioRuleMatches = d_respCacheMissRatioRule.matches(ringEntry.when);
+      bool allowedRCodeRatioRuleMatches = d_allowedRCodesRatioRule.matches(ringEntry.when) && !d_allowedRCodesRatioRule.isRCodeAllowed(ringEntry.dh.rcode);
 
       if (respRateMatches) {
         entry.respBytes += ringEntry.size;
@@ -483,10 +525,8 @@ void DynBlockRulesGroup::processResponseRules(counts_t& counts, StatNode& root, 
       if (respCacheMissRatioRuleMatches && !ringEntry.isACacheHit()) {
         ++entry.cacheMisses;
       }
-
-      if (suffixMatchRuleMatches) {
-        const bool hit = ringEntry.isACacheHit();
-        root.submit(ringEntry.name, ((ringEntry.dh.rcode == 0 && ringEntry.usec == std::numeric_limits<uint32_t>::max()) ? -1 : ringEntry.dh.rcode), ringEntry.size, hit, std::nullopt, g_rings.getSamplingRate());
+      if (allowedRCodeRatioRuleMatches) {
+        ++entry.notAllowedRCodes;
       }
     }
   }
@@ -730,10 +770,10 @@ void DynBlockMaintenance::generateMetrics()
         auto& stat = reasonStat[entry.first];
         if (entry.second < stat.lastSeenValue) {
           /* it wrapped, or we did not have a last value */
-          stat.sum = entry.second;
+          stat.sum += entry.second;
         }
         else {
-          stat.sum = entry.second - stat.lastSeenValue;
+          stat.sum += entry.second - stat.lastSeenValue;
         }
         stat.lastSeenValue = entry.second;
       }
@@ -1000,6 +1040,37 @@ std::string DynBlockRulesGroup::DynBlockCacheMissRatioRule::toString() const
     result << "Apply the global DynBlock action ";
   }
   result << "for " << std::to_string(d_blockDuration) << " seconds when over " << std::to_string(d_ratio) << " ratio during the last " << d_seconds << " seconds, with a global cache-hit ratio of at least " << d_minimumGlobalCacheHitRatio << ", reason: '" << d_blockReason << "'";
+
+  return result.str();
+}
+
+bool DynBlockRulesGroup::DynBlockAllowedRCodesRatioRule::isRCodeAllowed(uint8_t rcode) const
+{
+  return d_allowedRCodes.count(rcode) != 0;
+}
+
+std::string DynBlockRulesGroup::DynBlockAllowedRCodesRatioRule::toString() const
+{
+  if (!isEnabled()) {
+    return "";
+  }
+
+  std::stringstream result;
+  if (d_action != DNSAction::Action::None) {
+    result << DNSAction::typeToString(d_action) << " ";
+  }
+  else {
+    result << "Apply the global DynBlock action ";
+  }
+  std::string allowed;
+  for (const auto rcode : d_allowedRCodes) {
+    if (!allowed.empty()) {
+      allowed += " ,";
+    }
+    allowed += RCode::to_s(rcode);
+  }
+
+  result << "for " << std::to_string(d_blockDuration) << " seconds when over rcodes not in [" << allowed << "] are over a " << std::to_string(d_ratio) << " ratio during the last " << d_seconds << " seconds, reason: '" << d_blockReason << "'";
 
   return result.str();
 }

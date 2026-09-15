@@ -108,6 +108,7 @@ struct RemoteLogActionConfiguration
 {
   std::vector<std::pair<std::string, ProtoBufMetaKey>> metas;
   std::optional<std::unordered_set<std::string>> tagsToExport{std::nullopt};
+  std::unordered_set<std::string> tagsPrefixesToExport;
   std::optional<ProtobufAlterFunction> alterQueryFunc;
   std::optional<ProtobufAlterResponseFunction> alterResponseFunc;
   std::shared_ptr<RemoteLoggerInterface> logger;
@@ -118,19 +119,22 @@ struct RemoteLogActionConfiguration
   bool includeCNAME{false};
   bool delay{false};
   bool useServerID{false};
+  bool tagsExportKeyOnly{false};
+  bool tagsStripPrefixes{false};
 };
-std::shared_ptr<DNSAction> getRemoteLogAction(RemoteLogActionConfiguration& config);
-std::shared_ptr<DNSResponseAction> getRemoteLogResponseAction(RemoteLogActionConfiguration& config);
+std::shared_ptr<DNSAction> getRemoteLogAction(RemoteLogActionConfiguration&& config);
+std::shared_ptr<DNSResponseAction> getRemoteLogResponseAction(RemoteLogActionConfiguration&& config);
 std::shared_ptr<DNSAction> getDnstapLogAction(const std::string& identity, std::shared_ptr<RemoteLoggerInterface> logger, std::optional<DnstapAlterFunction> alterFunc);
 std::shared_ptr<DNSResponseAction> getDnstapLogResponseAction(const std::string& identity, std::shared_ptr<RemoteLoggerInterface> logger, std::optional<DnstapAlterResponseFunction> alterFunc);
 
 struct SetTraceActionConfiguration
 {
-  bool value = false;
   std::vector<std::shared_ptr<RemoteLoggerInterface>> remote_loggers;
-  bool use_incoming_traceid = false;
-  std::uint16_t trace_edns_option = 0;
-  bool strip_incoming_traceid = false;
+  std::uint16_t traceparentOptionCode = 65500;
+  bool value = false;
+  bool useIncomingTraceparent = false;
+  bool stripIncomingTraceparent = false;
+  bool sendDownstreamTraceparent = false;
 };
 std::shared_ptr<DNSAction> getSetTraceAction(SetTraceActionConfiguration& config);
 #endif /* DISABLE_PROTOBUF */

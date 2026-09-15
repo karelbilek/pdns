@@ -23,7 +23,8 @@ void BaseLua4::loadFile(const std::string& fname, bool doPostLoad)
   if (!ifs) {
     auto ret = errno;
     auto msg = stringerror(ret);
-    g_log << Logger::Error << "Unable to read configuration file from '" << fname << "': " << msg << endl;
+    SLOG(g_log << Logger::Error << "Unable to read configuration file from '" << fname << "': " << msg << endl,
+         g_slog->withName("lua")->error(Logr::Error, msg, "Unable to read configuration file", "file", Logging::Loggable(fname)));
     throw std::runtime_error(msg);
   }
   loadStream(ifs, doPostLoad);
@@ -35,39 +36,9 @@ void BaseLua4::loadString(const std::string &script) {
 };
 
 void BaseLua4::includePath(const std::string& directory) {
-  std::vector<std::string> vec;
   const std::string& suffix = "lua";
-  auto directoryError = pdns::visit_directory(directory, [this, &directory, &suffix, &vec]([[maybe_unused]] ino_t inodeNumber, const std::string_view& name) {
-    (void)this;
-    if (boost::starts_with(name, ".")) {
-      return true; // skip any dots
-    }
-    if (boost::ends_with(name, suffix)) {
-      // build name
-      string fullName = directory + "/" + std::string(name);
-      // ensure it's readable file
-      struct stat statInfo
-      {
-      };
-      if (stat(fullName.c_str(), &statInfo) != 0 || !S_ISREG(statInfo.st_mode)) {
-        string msg = fullName + " is not a regular file";
-        g_log << Logger::Error << msg << std::endl;
-        throw PDNSException(std::move(msg));
-      }
-      vec.emplace_back(fullName);
-    }
-    return true;
-  });
-
-  if (directoryError) {
-    int err = errno;
-    string msg = directory + " is not accessible: " + stringerror(err);
-    g_log << Logger::Error << msg << std::endl;
-    throw PDNSException(std::move(msg));
-  }
-
+  std::vector<std::string> vec = pdns::list_directory(directory, suffix, g_slog->withName("lua"));
   std::sort(vec.begin(), vec.end(), CIStringComparePOSIX());
-
   for(const auto& file: vec) {
     loadFile(file, false);
   }
@@ -155,6 +126,8 @@ void BaseLua4::prepareContext() {
   d_lw->registerFunction<void(ComboAddress::*)(unsigned int)>("truncate", [](ComboAddress& addr, unsigned int bits) { addr.truncate(bits); });
   d_lw->registerFunction<string(ComboAddress::*)()>("toString", [](const ComboAddress& addr) { return addr.toString(); });
   d_lw->registerToStringFunction<string(ComboAddress::*)()>([](const ComboAddress& addr) { return addr.toString(); });
+  d_lw->registerFunction<string (ComboAddress::*)() const>("toStringNoInterface", [](const ComboAddress& addr) { return addr.toStringNoInterface(); });
+  d_lw->registerFunction<string (ComboAddress::*)() const>("toStringReversed", [](const ComboAddress& addr) { return addr.toStringReversed(); });
   d_lw->registerFunction<string(ComboAddress::*)()>("toStringWithPort", [](const ComboAddress& addr) { return addr.toStringWithPort(); });
   d_lw->registerFunction<string(ComboAddress::*)()>("getRaw", [](const ComboAddress& addr) { return addr.toByteString(); });
 
@@ -266,7 +239,17 @@ void BaseLua4::prepareContext() {
   d_lw->registerFunction<void (DNSRecord::*)(const std::string&)>("changeContent", [](DNSRecord& dr, const std::string& newContent) { dr.setContent(shared_ptr<DNSRecordContent>(DNSRecordContent::make(dr.d_type, 1, newContent))); });
 
   // pdnslog
-#ifdef RECURSOR
+#if defined(PDNS_AUTH)
+  d_lw->writeFunction("pdnslog", [](const std::string& msg, boost::optional<int> loglevel) {
+    if (g_slogStructured) {
+      auto log = g_slog->withName("lua");
+      log->info(static_cast<Logr::Priority>(loglevel.get_value_or(Logr::Warning)), msg);
+    }
+    else {
+      g_log << (Logger::Urgency)loglevel.get_value_or(Logger::Warning)<<msg<<endl;
+    }
+  });
+#elif defined(RECURSOR)
   d_lw->writeFunction("pdnslog", [](const std::string& msg, boost::optional<int> loglevel, boost::optional<std::map<std::string, std::string>> values) {
     auto log = g_slog->withName("lua");
     if (values) {
@@ -275,11 +258,12 @@ void BaseLua4::prepareContext() {
       }
     }
     log->info(static_cast<Logr::Priority>(loglevel.get_value_or(Logr::Warning)), msg);
-#else
-    d_lw->writeFunction("pdnslog", [](const std::string& msg, boost::optional<int> loglevel) {
-      g_log << (Logger::Urgency)loglevel.get_value_or(Logger::Warning) << msg<<endl;
-#endif
   });
+#else /* DNSDIST */
+  d_lw->writeFunction("pdnslog", [](const std::string& msg, boost::optional<int> loglevel) {
+    g_log << (Logger::Urgency)loglevel.get_value_or(Logger::Warning)<<msg<<endl;
+  });
+#endif
 
   d_lw->writeFunction("pdnsrandom", [](boost::optional<uint32_t> maximum) {
     return maximum ? dns_random(*maximum) : dns_random_uint32();

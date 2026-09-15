@@ -491,7 +491,7 @@ Overrides :ref:`setting-default-soa-edit`
 -  String
 -  Default: DEFAULT
 
-.. versionadded:: 5.2.0
+.. versionadded:: 5.1.0
 
 The default :ref:`metadata-soa-edit-api` metadata value for zones created via
 the API when the zone creation request does not include the ``soa_edit_api`` field.
@@ -752,16 +752,20 @@ disables caching.
 
 .. versionadded:: 4.6.0
 
--  String
+.. versionchanged:: 5.2.0
+  This setting now accepts a list
+
+-  Strings, separated by commas
 -  Default: (empty)
 
 When set, PowerDNS will respond with :rfc:`9018` EDNS Cookies to queries that have the EDNS0 Cookie option.
 PowerDNS will also respond with BADCOOKIE to clients that have sent only a client cookie, or a bad server cookie (section 5.2.3 and 5.2.4 of :rfc:`7873`).
+The first secret is used to create new Cookies, all secrets are used to validate Cookies.
 
-This setting MUST be 32 hexadecimal characters, as the siphash algorithm's key used to create the cookie requires a 128-bit key.
+Each secret MUST be 32 hexadecimal characters, as the siphash algorithm's key used to create the cookie requires a 128-bit key.
 
-Alternatively, starting with version 5.0.0, this parameter can be set to
-`random`, in which case a random cookie value will be generated upon startup.
+Alternatively, starting with version 5.0.0, the first secret can be set to
+``random``, in which case a random cookie value will be generated upon startup.
 
 .. _setting-edns-subnet-processing:
 
@@ -795,6 +799,19 @@ In addition to this setting, see :doc:`tsig`.
 Globally enable the :doc:`LUA records <lua-records/index>` feature.
 
 To use shared LUA states, set this to ``shared``, see :ref:`lua-records-shared-state`.
+
+.. _setting-enable-lua-record-updates:
+
+``enable-lua-record-updates``
+-----------------------------
+
+.. versionadded:: 5.1.0
+
+-  Boolean
+-  Default: no
+
+Allow updating :doc:`LUA records <lua-records/index>` as part of AXFR/IXFR,
+DNS Update or API operations.
 
 .. _setting-entropy-source:
 
@@ -854,7 +871,7 @@ ALIAS is not impacted by this setting.
 ---------------------
 
 -  Boolean
--  Default: no
+-  Default: yes
 
 Forward DNS updates sent to a secondary to the primary.
 
@@ -1065,6 +1082,19 @@ Disable this if the process supervisor timestamps these lines already.
 
 If set to a digit, logging is performed under this LOCAL facility. See :ref:`logging-to-syslog`.
 Do not pass names like 'local0'!
+
+.. _setting-logging-structured:
+
+``logging-structured``
+----------------------
+
+- Bool
+- Default: no
+
+.. versionadded:: 5.1.0
+
+When enabled, log messages are formatted as structured logs, to help software
+analysis.
 
 .. _setting-loglevel:
 
@@ -1353,6 +1383,18 @@ Allow this many DNS queries in a single TCP transaction. 0 means
 unlimited. Note that exchanges related to an AXFR or IXFR are not
 affected by this setting.
 
+.. _setting-member-catalog-group:
+
+``member-catalog-group``
+------------------------
+
+-  String
+-  Default: pdns-member-catalog
+
+.. versionadded:: 5.1.0
+
+Catalog group used to signal that a member zone is a catalog.
+
 .. _setting-module-dir:
 
 ``module-dir``
@@ -1362,6 +1404,18 @@ affected by this setting.
 
 Directory for modules. Default depends on ``PKGLIBDIR`` during
 compile-time.
+
+.. _setting-naptr-additional-processing:
+
+``naptr-additional-processing``
+-------------------------------
+
+-  Boolean
+-  Default: yes
+
+.. versionadded:: 5.1.4
+
+Add NAPTR `a` and `s` records to the additional answer section.
 
 .. _setting-negquery-cache-ttl:
 
@@ -1516,6 +1570,19 @@ prevent-self-notification to "no".
 -  Default: no
 
 Turn on operating as a primary. See :ref:`primary-operation`.
+
+.. _setting-protobuf-servers:
+
+``protobuf-servers``
+--------------------
+
+.. versionadded:: 5.1.0
+
+-  IP addresses with ports, separated by commas
+-  Default: empty
+
+Servers to send Protobuf logging to.
+This currently sends both questions and responses, but without answer data.
 
 .. _setting-proxy-protocol-from:
 
@@ -1688,6 +1755,21 @@ Specify which random number generator to use. Permissible choices are:
 .. note::
   Not all choices are available on all systems.
 
+.. _setting-rrsig-expiry-extend:
+
+``rrsig-expiry-extend``
+-----------------------
+
+.. versionadded:: 5.1.3
+
+- Integer (seconds)
+- Default: ``soa-edit-spread``
+- Valid range: 0..31536000 (zero seconds to one year), or special value ``soa-edit-spread``
+
+Seconds to extend RRSIG expiry by.
+This is added to the default 3 week span described in :ref:`dnssec-signatures`.
+If set to ``soa-edit-spread`` (the default), this copies the value of :ref:`setting-soa-edit-spread`, extending all RRSIG expiries by that full number.
+
 .. _setting-secondary:
 
 ``secondary``
@@ -1817,6 +1899,20 @@ This setting will make PowerDNS renotify the secondaries after an AXFR is
 signing-secondary.
 
 See :ref:`metadata-slave-renotify` to set this per-zone.
+
+.. _setting-soa-edit-spread:
+
+``soa-edit-spread``
+-------------------
+
+.. versionadded:: 5.1.3
+
+-  Integer (seconds)
+-  Default: 0
+-  Valid range: 0..604800
+
+If set to a non-zero value, SOA-EDIT will apply serial increases to different zones at different times.
+Over the configured spread time, a time will be chosen for each zone based on a hash over the zone name (including variant).
 
 .. _setting-soa-expire-default:
 
@@ -2100,6 +2196,28 @@ IP Address for webserver/API to listen on.
 Webserver/API access is only allowed from these subnets.
 Ignored if ``webserver-address`` is set to a UNIX domain socket.
 
+.. _setting-webserver-connection-timeout:
+
+``webserver-connection-timeout``
+--------------------------------
+.. versionadded:: 4.8.5
+
+-  Integer
+-  Default: 5
+
+Request/response timeout in seconds.
+
+.. _setting-webserver-cross-origin-request-header:
+
+``webserver-cross-origin-request-header``
+-----------------------------------------
+.. versionadded:: 5.1.0
+
+-  String
+-  Default: empty
+
+The value if the access-control-allow-origin HTTP header to include. This header is not included if the value is empty.
+
 .. _setting-webserver-hash-plaintext-credentials:
 
 ``webserver-hash-plaintext-credentials``
@@ -2163,16 +2281,16 @@ The value between the hooks is a UUID that is generated for each request. This c
 
 Maximum request/response body size in megabytes.
 
-.. _setting-webserver-connection-timeout:
+.. _setting-webserver-max-concurrent-connections:
 
-``webserver-connection-timeout``
---------------------------------
-.. versionadded:: 4.8.5
+``webserver-max-concurrent-connections``
+----------------------------------------
+.. versionadded:: 5.1.0
 
 -  Integer
--  Default: 5
+-  Default: 100
 
-Request/response timeout in seconds.
+Maximum number of allowed concurrent connections to the web server.
 
 .. _setting-webserver-password:
 
@@ -2184,6 +2302,9 @@ Request/response timeout in seconds.
 -  String
 
 Password required to access the webserver. Since 4.6.0 the password can be hashed and salted using ``pdnsutil hash-password`` instead of being present in the configuration in plaintext, but the plaintext version is still supported.
+
+When clients use HTTP Basic authentication, only the password is checked;
+the username is ignored (any username may be supplied).
 
 .. _setting-webserver-port:
 

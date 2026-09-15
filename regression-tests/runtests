@@ -10,6 +10,9 @@ MAKE=${MAKE:-make}
 if [ -z "$PDNS_BUILD_PATH" ]; then
   # PDNS_BUILD_PATH is unset or empty. Assume an autotools build.
   PDNS_BUILD_PATH=${PWD}/../pdns
+  PDNS_MODULE_PATH=${PDNS_MODULE_PATH:-$PWD/modules}
+else
+  PDNS_MODULE_PATH=${PDNS_MODULE_PATH:-$PDNS_BUILD_PATH/modules}
 fi
 
 export PDNS=${PDNS:-$PDNS_BUILD_PATH/pdns_server}
@@ -171,3 +174,13 @@ echo -n " ("
 res=$((echo scale=2; echo 100*$passed/\($passed+$failed\)) | bc )
 echo -n "$res%) "
 echo tests passed, $skipped were skipped
+# Display the oracle search order in case of failures
+if [ $failed -gt 0 ]; then
+        echo -n "Oracle files searched in order:"
+        for extracontext in $extracontexts
+        do
+                echo -n " expected_result.$extracontext"
+        done
+        [ -n "$context" ] && echo -n " expected_result.$context"
+        echo ""
+fi

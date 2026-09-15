@@ -555,10 +555,10 @@ BOOST_AUTO_TEST_CASE(test_nsec_expanded_wildcard_proof)
   sortedRecords_t recordContents;
   vector<shared_ptr<const RRSIGRecordContent>> signatureContents;
 
-  /* proves that a.example.com does exist, and has been generated from a wildcard (see the RRSIG below) */
+  /* proves that b.example.com does NOT exist, and the answer has been generated from a wildcard (see the RRSIG below) */
   addNSECRecordToLW(DNSName("a.example.org."), DNSName("d.example.org"), {QType::A, QType::TXT, QType::RRSIG, QType::NSEC}, 600, records);
   recordContents.insert(records.at(0).getContent());
-  addRRSIG(keys, records, DNSName("example.org."), 300, false, std::nullopt, DNSName("example.org."));
+  addRRSIG(keys, records, DNSName("example.org."), 300, false);
   signatureContents.push_back(getRR<RRSIGRecordContent>(records.at(1)));
   records.clear();
 
@@ -570,8 +570,39 @@ BOOST_AUTO_TEST_CASE(test_nsec_expanded_wildcard_proof)
 
   /* This is an expanded wildcard proof, meaning that it does prove that the exact name
      does not exist so the wildcard can apply */
-  dState denialState = getDenial(denialMap, DNSName("a.example.org."), QType(0).getCode(), false, false, std::nullopt, false, /* normally retrieved from the RRSIG's d_labels */ 2);
+  dState denialState = getDenial(denialMap, DNSName("b.example.org."), QType(0).getCode(), false, false, std::nullopt, false, /* normally retrieved from the RRSIG's d_labels */ 2);
   BOOST_CHECK_EQUAL(denialState, dState::NXDOMAIN);
+}
+
+BOOST_AUTO_TEST_CASE(test_nsec_expanded_wildcard_proof_missing_next_closer)
+{
+  initSR(true);
+
+  testkeysset_t keys;
+  generateKeyMaterial(DNSName("example.org."), DNSSEC::ECDSA256, DNSSEC::DIGEST_SHA256, keys);
+
+  vector<DNSRecord> records;
+
+  sortedRecords_t recordContents;
+  vector<shared_ptr<const RRSIGRecordContent>> signatureContents;
+
+  /* proves that a.b.example.com does not exist, and the answer has been generated from a wildcard (see the RRSIG below) */
+  addNSECRecordToLW(DNSName("b.example.org."), DNSName("c.example.org"), {QType::A, QType::TXT, QType::RRSIG, QType::NSEC}, 600, records);
+  recordContents.insert(records.at(0).getContent());
+  addRRSIG(keys, records, DNSName("example.org."), 300, false);
+  signatureContents.push_back(getRR<RRSIGRecordContent>(records.at(1)));
+  records.clear();
+
+  ContentSigPair pair;
+  pair.records = recordContents;
+  pair.signatures = signatureContents;
+  cspmap_t denialMap;
+  denialMap[std::pair(DNSName("b.example.org."), QType::NSEC)] = pair;
+
+  /* This is an expanded wildcard proof, meaning that it does prove that the exact name
+     does not exist so the wildcard might apply EXCEPT the next closer does exist! */
+  dState denialState = getDenial(denialMap, DNSName("a.b.example.org."), QType(0).getCode(), false, false, std::nullopt, false, /* normally retrieved from the RRSIG's d_labels */ 2);
+  BOOST_CHECK_EQUAL(denialState, dState::NXQTYPE);
 }
 
 BOOST_AUTO_TEST_CASE(test_nsec_wildcard_with_cname)
@@ -1178,6 +1209,73 @@ BOOST_AUTO_TEST_CASE(test_nsec3_ent_opt_out)
   BOOST_CHECK_EQUAL(denialState, dState::OPTOUT);
 }
 
+BOOST_AUTO_TEST_CASE(test_nsec3_apex_hash_label_parent_impersonation)
+{
+  initSR();
+
+  const std::string salt = "deadbeef";
+  const unsigned int nbIterations = 10;
+
+  DNSName tld("com.");
+  DNSName unrelatedDomain("unrelated-domain.com.");
+  DNSName victim("victim.com.");
+  // compute the hash of the TLD domain
+  std::string hashedTLD = hashQNameWithSalt(salt, nbIterations, tld);
+  DNSName attackDomain(DNSName(hashedTLD) + tld);
+
+  testkeysset_t keys;
+  generateKeyMaterial(tld, DNSSEC::ECDSA256, DNSSEC::DIGEST_SHA256, keys);
+  generateKeyMaterial(attackDomain, DNSSEC::ECDSA256, DNSSEC::DIGEST_SHA256, keys);
+
+  cspmap_t denialMap;
+  vector<DNSRecord> records;
+
+  {
+    sortedRecords_t recordContents;
+    vector<shared_ptr<const RRSIGRecordContent>> signatureContents;
+    addNSEC3RecordToLW(attackDomain, hashedTLD, salt, nbIterations, {QType::NS, QType::SOA, QType::RRSIG}, 600, records);
+
+    recordContents.insert(records.at(0).getContent());
+    addRRSIG(keys, records, attackDomain, 300);
+    signatureContents.push_back(getRR<RRSIGRecordContent>(records.at(1)));
+
+    ContentSigPair pair;
+    pair.records = recordContents;
+    pair.signatures = signatureContents;
+    denialMap[std::pair(records.at(0).d_name, records.at(0).d_type)] = pair;
+    records.clear();
+  }
+
+  /* also include one legit NSEC3 from the tld zone, that does not prove
+     that the victim domain does not exist but gets us past the !nsec3Seen
+     gate of our validation code, reaching the closest encloser chase
+  */
+
+  {
+    sortedRecords_t recordContents;
+    vector<shared_ptr<const RRSIGRecordContent>> signatureContents;
+    addNSEC3NarrowRecordToLW(unrelatedDomain, tld, {QType::RRSIG, QType::NSEC3}, 600, records, nbIterations);
+
+    recordContents.insert(records.at(0).getContent());
+    addRRSIG(keys, records, tld, 300);
+    signatureContents.push_back(getRR<RRSIGRecordContent>(records.at(1)));
+
+    ContentSigPair pair;
+    pair.records = recordContents;
+    pair.signatures = signatureContents;
+    denialMap[std::pair(records.at(0).d_name, records.at(0).d_type)] = pair;
+    records.clear();
+  }
+
+  OptLog log;
+  log = {std::string(__PRETTY_FUNCTION__), timeval{}, getLogger()};
+
+  pdns::validation::ValidationContext validationContext;
+  validationContext.d_nsec3IterationsRemainingQuota = 100U;
+  /* this NSEC3 is not valid to deny the existence of a sibling domain since it is from the child zone */
+  BOOST_CHECK_EQUAL(getDenial(denialMap, victim, QType::A, false, true, validationContext, log), dState::NODENIAL);
+}
+
 BOOST_AUTO_TEST_CASE(test_dnssec_rrsig_negcache_validity)
 {
   std::unique_ptr<SyncRes> sr;
@@ -1211,7 +1309,7 @@ BOOST_AUTO_TEST_CASE(test_dnssec_rrsig_negcache_validity)
       setLWResult(res, RCode::NoError, true, false, true);
       addRecordToLW(res, domain, QType::SOA, "pdns-public-ns1.powerdns.com. pieter\\.lexis.powerdns.com. 2017032301 10800 3600 604800 3600", DNSResourceRecord::AUTHORITY, 3600);
       addRRSIG(keys, res->d_records, domain, 300);
-      addNSECRecordToLW(domain, DNSName("z."), {QType::NSEC, QType::RRSIG}, 600, res->d_records);
+      addNSECRecordToLW(domain, DNSName("z") + domain, {QType::NSEC, QType::RRSIG}, 600, res->d_records);
       addRRSIG(keys, res->d_records, domain, 1, false, std::nullopt, std::nullopt, fixedNow);
       return LWResult::Result::Success;
     }

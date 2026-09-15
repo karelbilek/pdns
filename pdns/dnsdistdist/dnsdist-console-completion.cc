@@ -124,6 +124,7 @@ static std::vector<dnsdist::console::completion::ConsoleKeyword> s_consoleKeywor
   {"getQueryCounters", true, "[max=10]", "show current buffer of query counters, limited by 'max' if provided"},
   {"getResponseRing", true, "", "return the current content of the response ring"},
   {"getRespRing", true, "", "return the qname/rcode content of the response ring"},
+  {"getRingBuffersSamplingRate", true, "", "return current sampling rate of the in-memory ring buffers"},
   {"getServer", true, "id", "returns server with index 'n' or whose uuid matches if 'id' is an UUID string"},
   {"getServers", true, "", "returns a table with all defined servers"},
   {"getStatisticsCounters", true, "", "returns a map of statistic counters"},
@@ -185,6 +186,9 @@ static std::vector<dnsdist::console::completion::ConsoleKeyword> s_consoleKeywor
 #ifdef HAVE_LMDB
   {"newLMDBKVStore", true, "fname, dbName [, noLock]", "Return a new KeyValueStore object associated to the corresponding LMDB database"},
 #endif
+#ifdef HAVE_MMDB
+  {"newMMDBKVStore", true, "mmdb, queryParams", "Return a new KeyValueStore object associated to the corresponding MMDB database"},
+#endif
   {"newNMG", true, "", "Returns a NetmaskGroup"},
   {"newPacketCache", true, "maxEntries[, maxTTL=86400, minTTL=0, temporaryFailureTTL=60, staleTTL=60, dontAge=false, shuffle=false, numberOfShards=1, deferrableInsertLock=true, options={}]", "return a new Packet Cache"},
   {"newQPSLimiter", true, "rate, burst", "configure a QPS limiter with that rate and that burst capacity"},
@@ -198,6 +202,9 @@ static std::vector<dnsdist::console::completion::ConsoleKeyword> s_consoleKeywor
   {"NoneAction", true, "", "Does nothing. Subsequent rules are processed after this action"},
   {"NotRule", true, "selector", "Matches the traffic if the selector rule does not match"},
   {"OpcodeRule", true, "code", "Matches queries with opcode code. code can be directly specified as an integer, or one of the built-in DNSOpcodes"},
+#ifdef HAVE_MMDB
+  {"openMMDB", true, "name, [, options]", "Open a MMDB database and return a reference to it"},
+#endif
   {"OrRule", true, "selectors", "Matches the traffic if one or more of the selectors rules does match"},
   {"PoolAction", true, "poolname [, stop]", "set the packet into the specified pool"},
   {"PoolAvailableRule", true, "poolname", "Check whether a pool has any servers available to handle queries"},
@@ -239,6 +246,7 @@ static std::vector<dnsdist::console::completion::ConsoleKeyword> s_consoleKeywor
   {"setCacheCleaningPercentage", true, "num", "Set the percentage of the cache that the cache cleaning algorithm will try to free by removing expired entries. By default (100), all expired entries are remove"},
   {"setConsistentHashingBalancingFactor", true, "factor", "Set the balancing factor for bounded-load consistent hashing"},
   {"setConsoleACL", true, "{netmask, netmask}", "replace the console ACL set with these netmasks"},
+  {"setConsoleBindFatal", true, "enable", "whether a failure to bind the console control socket is fatal"},
   {"setConsoleConnectionsLogging", true, "enabled", "whether to log the opening and closing of console connections"},
   {"setConsoleMaximumConcurrentConnections", true, "max", "Set the maximum number of concurrent console connections"},
   {"setConsoleOutputMaxMsgSize", true, "messageSize", "set console message maximum size in bytes, default is 10 MB"},
@@ -309,6 +317,7 @@ static std::vector<dnsdist::console::completion::ConsoleKeyword> s_consoleKeywor
   {"setVerbose", true, "bool", "set whether log messages at the verbose level will be logged"},
   {"setVerboseHealthChecks", true, "bool", "set whether health check errors will be logged"},
   {"setVerboseLogDestination", true, "destination file", "Set a destination file to write the 'verbose' log messages to, instead of sending them to syslog and/or the standard output"},
+  {"setWebserverBindFatal", true, "enable", "whether a failure to bind a web server socket is fatal"},
   {"setWebserverConfig", true, "[{password=string, apiKey=string, customHeaders, statsRequireAuthentication, prometheusAddInstanceLabel=bool}]", "Updates webserver configuration"},
   {"setWeightedBalancingFactor", true, "factor", "Set the balancing factor for bounded-load weighted policies (whashed, wrandom)"},
   {"setWHashedPerturbation", true, "value", "Set the hash perturbation value to be used in the whashed policy instead of a random one, allowing to have consistent whashed results on different instance"},

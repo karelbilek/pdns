@@ -408,24 +408,27 @@ bool MemRecursorCache::entryMatches(MemRecursorCache::OrderedTagIterator_t& entr
 }
 
 // Fake a cache miss if more than refreshTTLPerc of the original TTL has passed
-time_t MemRecursorCache::fakeTTD(MemRecursorCache::OrderedTagIterator_t& entry, const DNSName& qname, QType qtype, time_t ret, time_t now, uint32_t origTTL, bool refresh)
+time_t MemRecursorCache::fakeTTD(MemRecursorCache::OrderedTagIterator_t& entry, const DNSName& qname, QType qtype, time_t ret, time_t now, uint32_t origTTL, MemRecursorCache::Flags flags)
 {
   time_t ttl = ret - now;
   // If we are checking an entry being served stale in refresh mode,
   // we always consider it stale so a real refresh attempt will be
   // kicked by SyncRes
-  if (refresh && entry->d_servedStale > 0) {
+  if (refresh(flags) && entry->d_servedStale > 0) {
     return -1;
   }
-  if (ttl > 0 && SyncRes::s_refresh_ttlperc > 0) {
-    const uint32_t deadline = origTTL * SyncRes::s_refresh_ttlperc / 100;
+  if (ttl > 0 && (forcedRefresh(flags) || SyncRes::s_refresh_ttlperc > 0)) {
+    const uint32_t deadline = forcedRefresh(flags) ? origTTL / 2 : origTTL * SyncRes::s_refresh_ttlperc / 100;
     // coverity[store_truncates_time_t]
     const bool almostExpired = static_cast<uint32_t>(ttl) <= deadline;
-    if (almostExpired && qname != g_rootdnsname) {
-      if (refresh) {
+    if (almostExpired) {
+      if (refresh(flags)) {
         return -1;
       }
-      if (!entry->d_submitted) {
+      // We do not want to refresh auth NS entries, as it could lead to ghost domains if an entry
+      // expires between submit and response coming in, as the TTL capping then does not work for
+      // lack of current TTL info.
+      if (!entry->d_submitted && (qtype != QType::NS || !entry->d_auth)) {
         pushRefreshTask(qname, qtype, entry->d_ttd, entry->d_netmask);
         entry->d_submitted = true;
       }
@@ -438,7 +441,6 @@ time_t MemRecursorCache::fakeTTD(MemRecursorCache::OrderedTagIterator_t& entry, 
 time_t MemRecursorCache::get(time_t now, const DNSName& qname, const QType qtype, Flags flags, vector<DNSRecord>* res, const ComboAddress& who, const OptTag& routingTag, SigRecs* signatures, AuthRecs* authorityRecs, bool* variable, vState* state, bool* wasAuth, DNSName* fromAuthZone, Extra* extra) // NOLINT(readability-function-cognitive-complexity)
 {
   bool requireAuth = (flags & RequireAuth) != 0;
-  bool refresh = (flags & Refresh) != 0;
   bool serveStale = (flags & ServeStale) != 0;
 
   std::optional<vState> cachedState{std::nullopt};
@@ -492,7 +494,7 @@ time_t MemRecursorCache::get(time_t now, const DNSName& qname, const QType qtype
       if (cachedState && ret > now) {
         ptrAssign(state, *cachedState);
       }
-      return fakeTTD(entry, qname, qtype, ret, now, origTTL, refresh);
+      return fakeTTD(entry, qname, qtype, ret, now, origTTL, flags);
     }
     return -1;
   }
@@ -538,7 +540,7 @@ time_t MemRecursorCache::get(time_t now, const DNSName& qname, const QType qtype
         if (cachedState && ttd > now) {
           ptrAssign(state, *cachedState);
         }
-        return fakeTTD(firstIndexIterator, qname, qtype, ttd, now, origTTL, refresh);
+        return fakeTTD(firstIndexIterator, qname, qtype, ttd, now, origTTL, flags);
       }
       return -1;
     }
@@ -584,7 +586,7 @@ time_t MemRecursorCache::get(time_t now, const DNSName& qname, const QType qtype
       if (cachedState && ttd > now) {
         ptrAssign(state, *cachedState);
       }
-      return fakeTTD(firstIndexIterator, qname, qtype, ttd, now, origTTL, refresh);
+      return fakeTTD(firstIndexIterator, qname, qtype, ttd, now, origTTL, flags);
     }
   }
   return -1;
@@ -1045,12 +1047,13 @@ void MemRecursorCache::getRecordSet(T& message, U recordSet)
     for (const auto& authRec : *recordSet->d_authorityRecs) {
       protozero::pbf_builder<PBAuthRecord> auth(message, PBCacheEntry::repeated_message_authRecord);
       auth.add_bytes(PBAuthRecord::required_bytes_name, authRec.d_name.toString());
-      auth.add_bytes(PBAuthRecord::required_bytes_rdata, authRec.getContent()->serialize(authRec.d_name, true));
       auth.add_uint32(PBAuthRecord::required_uint32_type, authRec.d_type);
       auth.add_uint32(PBAuthRecord::required_uint32_class, authRec.d_class);
       auth.add_uint32(PBAuthRecord::required_uint32_ttl, authRec.d_ttl);
       auth.add_uint32(PBAuthRecord::required_uint32_place, authRec.d_place);
       auth.add_uint32(PBAuthRecord::required_uint32_clen, authRec.d_clen);
+      /* content needs to be done last otherwise we have a problem when deserializing because we don't know the correct type! */
+      auth.add_bytes(PBAuthRecord::required_bytes_rdata, authRec.getContent()->serialize(authRec.d_name, true));
     }
   }
   message.add_bytes(PBCacheEntry::required_bytes_authZone, recordSet->d_authZone.toString());
@@ -1147,6 +1150,7 @@ static void putAuthRecord(protozero::pbf_message<PBCacheEntry>& message, const D
       authRecord.d_clen = auth.get_uint32();
       break;
     default:
+      auth.skip();
       break;
     }
   }
@@ -1218,6 +1222,7 @@ bool MemRecursorCache::putRecordSet(T& message)
       cacheEntry.d_tcp = message.get_bool();
       break;
     default:
+      message.skip();
       break;
     }
   }
@@ -1286,6 +1291,9 @@ size_t MemRecursorCache::putRecordSets(const std::string& pbuf)
         ++count;
         break;
       }
+      default:
+        full.skip();
+        break;
       }
     }
     log->info(Logr::Info, "Processed cache dump", "processed", Logging::Loggable(count), "inserted", Logging::Loggable(inserted));
@@ -1298,7 +1306,7 @@ size_t MemRecursorCache::putRecordSets(const std::string& pbuf)
     log->error(Logr::Error, e.what(), "Exception processing cache dump");
   }
   catch (...) {
-    log->error(Logr::Error, "Other exception processing cache dump");
+    log->info(Logr::Error, "Other exception processing cache dump");
   }
   return 0;
 }

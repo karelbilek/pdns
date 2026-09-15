@@ -2,6 +2,1614 @@ Changelog
 =========
 
 .. changelog::
+
+  :version: 2.1.2
+  :released: 8th of September 2026
+
+  .. change::
+    :tags: Bug Fixes, YAML
+    :pullreq: 17927
+
+    Improve exception handling when parsing our YAML configuration
+
+  .. change::
+    :tags: Bug Fixes, DNS over QUIC, DNS over HTTP3
+    :pullreq: 17928
+
+    Fix the dropping of responses for DoQ and DoH3 queries
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 17929
+
+    Gracefully handle errors in DynBlock's suffix match policy
+
+  .. change::
+    :tags: Bug Fixes, DNS over HTTPS
+    :pullreq: 17930
+
+    Properly set the "last IO blocked" flag from incoming DoH
+
+  .. change::
+    :tags: Bug Fixes, DNS over HTTPS
+    :pullreq: 17931
+
+    ``nghttp2``'s error callback is "solely for debugging purpose"
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17932
+
+    Fix a race when calling ``getPool``/``getCache`` from a Lua selector/action
+
+  .. change::
+    :tags: Bug Fixes, Metrics
+    :pullreq: 17934
+
+    Fix a regression when dots are used in the carbon host name
+
+  .. change::
+    :tags: Bug Fixes, DNS over HTTPS
+    :pullreq: 17935
+
+    Fix DNS over HTTPS in TLS asynchronous mode
+
+  .. change::
+    :tags: Bug Fixes, Webserver
+    :pullreq: 17936
+
+    Fix drops in the web dashboard (Ersin Gündem)
+
+  .. change::
+    :tags: Bug Fixes, Metrics
+    :pullreq: 17937
+
+    Add missing DoH3 latency metrics to prometheus
+
+  .. change::
+    :tags: Bug Fixes, DNS over TLS, DNS over HTTPS
+    :pullreq: 17938
+
+    Use the proper ALPN on auto-upgraded DoT/DoH backends
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 17939
+
+    Update our Rust deps
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 17940
+
+    Increase testrunner timeouts
+
+  .. change::
+    :tags: Improvements, DNS over TLS, DNS over HTTPS
+    :pullreq: 17942
+
+    Add more counters for TCP frontends
+
+  .. change::
+    :tags: Bug Fixes, Security
+    :pullreq: 17943
+
+    Update Quiche to 0.29.3 in our packages
+
+  .. change::
+    :tags: Bug Fixes, YAML
+    :pullreq: 17975
+
+    Properly handle empty local address for TeeAction via YAML
+
+  .. change::
+    :tags: Bug Fixes, DNS over HTTPS
+    :pullreq: 17976
+
+    Keep the SSL context alive until all async ops are done
+
+  .. change::
+    :tags: Bug Fixes, DNS over HTTPS, DNS over TLS
+    :pullreq: 17977
+
+    Handle having no TLS ticket keys
+
+  .. change::
+    :tags: Improvements, Metrics, Performance
+    :pullreq: 17993
+
+    Make ``getOpenFileDescriptors`` fast under Linux >= 6.1
+
+  .. change::
+    :tags: Bug Fixes, Metrics
+    :pullreq: 18017
+    :tickets: 18012
+
+    Fix TCP listen overflows metric
+
+.. changelog::
+  :version: 2.0.9
+  :released: 8th of September 2026
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17944
+
+    Prevent an exception when accessing an empty StatNode
+
+  .. change::
+    :tags: Bug Fixes, DNS over HTTPS
+    :pullreq: 17945
+
+    Don't close DoH on timeout, do on release (Karel Bilek)
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17948
+
+    Fix build error on 32 bits systems (``armhf``, ...) (Hector Cao)
+
+  .. change::
+    :tags: Bug Fixes, YAML
+    :pullreq: 17949
+
+    Fix the default value for IPv4 ECS source prefix
+
+  .. change::
+    :tags: Bug Fixes, YAML
+    :pullreq: 17950
+
+    Fix naming And, Or and Not selectors, Continue action from YAML
+
+  .. change::
+    :tags: Bug Fixes, DNS over QUIC, DNS over HTTP3
+    :pullreq: 17951
+
+    Fix the dropping of responses for DoQ and DoH3 queries
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 17952
+
+    Gracefully handle errors in DynBlock's suffix match policy
+
+  .. change::
+    :tags: Improvements, YAML
+    :pullreq: 17953
+
+    Improve exception handling when parsing our YAML configuration
+
+  .. change::
+    :tags: Bug Fixes, DNS over TLS, DNS over HTTPS
+    :pullreq: 17954
+
+    Use the proper ALPN on auto-upgraded DoT/DoH backends
+
+  .. change::
+    :tags: Bug Fixes, Security
+    :pullreq: 17979
+
+    Update Quiche to 0.29.3 in our packages
+
+  .. change::
+    :tags: Bug Fixes, DNS over HTTPS
+    :pullreq: 17981
+
+    ``nghttp2``'s error callback is "solely for debugging purpose"
+
+  .. change::
+    :tags: Bug Fixes, DNS over HTTPS
+    :pullreq: 17982
+
+    Properly set the "last IO blocked" flag from incoming DoH
+
+  .. change::
+    :tags: Bug Fixes, YAML
+    :pullreq: 17986
+
+    Properly handle empty local address for TeeAction via YAML
+
+  .. change::
+    :tags: Bug Fixes, Webserver
+    :pullreq: 17987
+
+    Fix drops in the web dashboard (Ersin Gündem)
+
+  .. change::
+    :tags: Bug Fixes, Metrics, DNS over HTTP3
+    :pullreq: 17989
+
+    Add missing DoH3 latency metrics to prometheus
+
+  .. change::
+    :tags: Improvements, DNS over TLS, DNS over HTTPS
+    :pullreq: 17990
+
+    Add more counters for TCP frontends
+
+  .. change::
+    :tags: Bug Fixes, DNS over HTTPS
+    :pullreq: 17991
+
+    QAT fixes
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 17980
+
+    Update our Rust deps
+
+.. changelog::
+  :version: 2.1.1
+  :released: 6th of August 2026
+
+  .. change::
+    :tags: Bug Fixes, Security
+    :pullreq: 17858
+    :tickets: 17797, 17790
+
+    Account for the existing content when parsing labels
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17860
+    :tickets: 17835
+
+    Do not index past the address for byte-aligned prefixes
+
+.. changelog::
+  :version: 2.0.8
+  :released: 6th of August 2026
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17861
+    :tickets: 17835
+
+    Do not index past the address for byte-aligned prefixes
+
+  .. change::
+    :tags: Bug Fixes, Security
+    :pullreq: 17859
+    :tickets: 17797, 17790
+
+    Account for the existing content when parsing labels
+
+.. changelog::
+  :version: 1.9.16
+  :released: 6th of August 2026
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17863
+    :tickets: 17835
+
+    Do not index past the address for byte-aligned prefixes
+
+  .. change::
+    :tags: Bug Fixes, Security
+    :pullreq: 17862
+    :tickets: 17797, 17790
+
+    Dnsname: Account for the existing content when parsing labels
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17803
+    :tickets: 14130
+
+    Fix TCP I/O timeout and callback being used for HTTP/2
+
+  .. change::
+    :tags: Bug Fixes, Security
+    :pullreq: 17669
+
+    Upgrade to h2o 2.2.6-pdns4 in our packages (CVE-2026-49975)
+
+.. changelog::
+  :version: 2.1.0
+  :released: 2nd of July 2026
+
+  .. change::
+    :tags: Bug Fixes, Security
+    :pullreq: 17612
+
+    Backports for Security Advisory 2026-09
+
+  .. change::
+    :tags: Improvements, DNS over TLS, DNS over HTTPS
+    :pullreq: 17641
+
+    Add OpenSSL >= 4.0.0 compatibility
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 17642
+
+    Add a Lua accessor for the ring buffers sampling rate
+
+  .. change::
+    :tags: Bug Fixes, YAML
+    :pullreq: 17643
+
+    Fix the default value for IPv4 ECS source prefix
+
+  .. change::
+    :tags: Bug Fixes, YAML
+    :pullreq: 17644
+
+    Fix build error on 32 bits systems (armhf, ...) (Hector Cao)
+
+  .. change::
+    :tags: Bug Fixes, YAML
+    :pullreq: 17645
+
+    Fix naming And, Or and Not selectors, Continue action from YAML
+
+  .. change::
+    :tags: Bug Fixes, DNS over HTTPS
+    :pullreq: 17647
+
+    Don't close DoH on timeout, do on release (Karel Bilek)
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17650
+
+    Do not let exceptions cross the FFI boundary
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17651
+
+    Catch exceptions when parsing CNAME via the Lua FFI API
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17652
+
+    ednsoptions.hh: ``#include <string>``
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17653
+
+    Prevent an exception when accessing an empty StatNode
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 17655
+
+    Set Rust LTO mode automatically, and allow setting RUSTFLAGS (Robert Edmonds)
+
+.. changelog::
+  :version: 2.0.7
+  :released: 25th of June 2026
+
+  .. change::
+    :tags: Bug Fixes, Security, Webserver
+    :pullreq: 17588
+
+    CVE-2026-42005: An attacker can send a web request that causes unlimited memory allocation in the internal web server, leading to a denial of service. The internal web server is disabled by default.
+
+  .. change::
+    :tags: Bug Fixes, Security, Metrics
+    :pullreq: 17600
+
+    CVE-2026-40011: An attacker sending a large number of crafted DNS queries might be able to trigger a dynamic block being inserted with a value causing invalid output to be produced in the prometheus endpoint. The prometheus endpoint will then be rejected by the scraper until the dynamic block expires.
+
+  .. change::
+    :tags: Bug Fixes, Security, DNS over HTTP3
+    :pullreq: 17601
+
+    CVE-2026-40211: An attacker can send crafted DNS over HTTP/3 queries, triggering an exception that prevents some buffer from being freed right away. The buffer will be freed at the end of the QUIC connection, but on some setups it might be possible to open enough concurrent DoH3 streams to trigger an out-of-memory condition, resulting in a denial of service.
+
+  .. change::
+    :tags: Bug Fixes, Security
+    :pullreq: 17603
+
+    CVE-2026-40210: An out-of-bounds read might happen when SetMacAddrAction is used, potentially resulting in uninitialized memory being sent over the network or a crash.
+
+  .. change::
+    :tags: Bug Fixes, Security
+    :pullreq: 17604
+
+    CVE-2026-40209: An attacker might be able to cause outgoing TCP connections to backend to be stuck until a timeout occurs instead of being released immediately by sending IXFR queries. This could be used to cause a denial of service if there is a limit to the number of concurrent connections to this backend, or if the process runs out of file descriptors.
+
+  .. change::
+    :tags: Bug Fixes, Security, DNS over HTTP3
+    :pullreq: 17606
+
+    CVE-2026-40208: An attacker might be able to delay the processing of DoH3 queries by sending DoH3 GET queries with an invalid DATA frame.
+
+  .. change::
+    :tags: Bug Fixes, Security
+    :pullreq: 17607
+
+    CVE-2026-42004: An attacker can send a crafted EDNS OPT record that will be ignored by DNSdist's filtering rules, but will be rewritten as a valid OPT record when EDNS Client Subnet is inserted, causing the backend to see the EDNS option(s) that DNSdist did not filter.
+
+.. changelog::
+  :version: 1.9.15
+  :released: 25th of June 2026
+
+  .. change::
+    :tags: Bug Fixes, Security, Webserver
+    :pullreq: 17588
+
+    CVE-2026-42005: An attacker can send a web request that causes unlimited memory allocation in the internal web server, leading to a denial of service. The internal web server is disabled by default.
+
+  .. change::
+    :tags: Bug Fixes, Security, Metrics
+    :pullreq: 17600
+
+    CVE-2026-40011: An attacker sending a large number of crafted DNS queries might be able to trigger a dynamic block being inserted with a value causing invalid output to be produced in the prometheus endpoint. The prometheus endpoint will then be rejected by the scraper until the dynamic block expires.
+
+  .. change::
+    :tags: Bug Fixes, Security, DNS over HTTP3
+    :pullreq: 17601
+
+    CVE-2026-40211: An attacker can send crafted DNS over HTTP/3 queries, triggering an exception that prevents some buffer from being freed right away. The buffer will be freed at the end of the QUIC connection, but on some setups it might be possible to open enough concurrent DoH3 streams to trigger an out-of-memory condition, resulting in a denial of service.
+
+  .. change::
+    :tags: Bug Fixes, Security
+    :pullreq: 17603
+
+    CVE-2026-40210: An out-of-bounds read might happen when SetMacAddrAction is used, potentially resulting in uninitialized memory being sent over the network or a crash.
+
+  .. change::
+    :tags: Bug Fixes, Security
+    :pullreq: 17604
+
+    CVE-2026-40209: An attacker might be able to cause outgoing TCP connections to backend to be stuck until a timeout occurs instead of being released immediately by sending IXFR queries. This could be used to cause a denial of service if there is a limit to the number of concurrent connections to this backend, or if the process runs out of file descriptors.
+
+  .. change::
+    :tags: Bug Fixes, Security, DNS over HTTP3
+    :pullreq: 17606
+
+    CVE-2026-40208: An attacker might be able to delay the processing of DoH3 queries by sending DoH3 GET queries with an invalid DATA frame.
+
+  .. change::
+    :tags: Bug Fixes, Security
+    :pullreq: 17607
+
+    CVE-2026-42004: An attacker can send a crafted EDNS OPT record that will be ignored by DNSdist's filtering rules, but will be rewritten as a valid OPT record when EDNS Client Subnet is inserted, causing the backend to see the EDNS option(s) that DNSdist did not filter.
+
+.. changelog::
+  :version: 2.1.0-rc1
+  :released: 2nd of June 2026
+
+  .. change::
+    :tags: Improvements, Open Telemetry, YAML
+    :pullreq: 17027
+
+    Change OT Trace YAML config to a struct
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17082
+
+    Downstream timeouts should be logged at verbose level
+
+  .. change::
+    :tags: Improvements, DNS over HTTPS
+    :pullreq: 17085
+
+    Respond 505 to DoH HTTP/1.1 reqs
+
+  .. change::
+    :tags: Improvements, Performance, Open Telemetry
+    :pullreq: 17086
+
+    Prevent copies of OT closers
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 17087
+
+    Log downstream removal
+
+  .. change::
+    :tags: Bug Fixes, YAML
+    :pullreq: 17088
+
+    Fix passing a numeric value to the YAML QType selector
+
+  .. change::
+    :tags: Bug Fixes, Open Telemetry
+    :pullreq: 17090
+
+    Don't assert on OT SpanID mismatch
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17091
+
+    Fix micro-benchmarks compilation
+
+  .. change::
+    :tags: Bug Fixes, Security, Webserver
+    :pullreq: 17092
+
+    Fix HTML injection in the Web dashboard
+
+  .. change::
+    :tags: Bug Fixes, Security, Webserver
+    :pullreq: 17093
+
+    Disable cross-origin HTTP requests by default
+
+  .. change::
+    :tags: Bug Fixes, Security
+    :pullreq: 17094
+
+    Fix out-of-bounds read when parsing DNS packets via Lua
+
+  .. change::
+    :tags: Bug Fixes, Security, DNS over HTTPS
+    :pullreq: 17095
+
+    Fix DoH ACL bypass when early ACL check is disabled
+
+  .. change::
+    :tags: Bug Fixes, Security
+    :pullreq: 17096
+
+    DNSWriter: Prevent overflow when generating (too) large DNS packets
+
+  .. change::
+    :tags: Bug Fixes, Security
+    :pullreq: 17097
+
+    Fix use-after-free in EDNS options handling
+
+  .. change::
+    :tags: Bug Fixes, Security, DNS over QUIC, DNS over HTTP3
+    :pullreq: 17098
+
+    Prevent unbounded memory allocation for DoQ/DoH3
+
+  .. change::
+    :tags: Bug Fixes, Security
+    :pullreq: 17121
+
+    Do not oversize the received buffer with ``recvmmsg``
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 17122
+
+    Do not keep the parsed EDNS options around
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17163
+
+    Give TCP thread as default for definition ``USE_SINGLE_ACCEPTOR_THREAD``
+
+  .. change::
+    :tags: Bug Fixes, DNS over QUIC
+    :pullreq: 17169
+
+    Hardened DoQ internal error handling for cross-protocol queries
+
+  .. change::
+    :tags: Bug Fixes, DNS over HTTP3
+    :pullreq: 17172
+
+    Hardened DoH3 internal error handling for cross-protocol queries
+
+  .. change::
+    :tags: Bug Fixes, DNS over HTTPS
+    :pullreq: 17175
+
+    Handle missing X-Forwarded-For on existing DoH connection
+
+  .. change::
+    :tags: Bug Fixes, DNS over HTTPS
+    :pullreq: 17177
+
+    Fix handling of long HTTP/2 Date headers, handle non-POSIX locales
+
+  .. change::
+    :tags: Bug Fixes, Security, DNSCrypt
+    :pullreq: 17219
+
+    Prevent division by zero when computing DNSCrypt padding
+
+  .. change::
+    :tags: Bug Fixes, Security, DNS over HTTPS
+    :pullreq: 17220
+
+    Cap the amount of data buffered toward a DoH server
+
+  .. change::
+    :tags: Bug Fixes, Security, DNS over QUIC
+    :pullreq: 17221
+
+    Clean QUIC stream-related data after errors
+
+  .. change::
+    :tags: Bug Fixes, Security
+    :pullreq: 17222
+
+    Prevent ID overflow in outgoing TCP connections
+
+  .. change::
+    :tags: Bug Fixes, Security
+    :pullreq: 17223
+
+    Use DNSName in StatNode to avoid encoding issues
+
+  .. change::
+    :tags: Bug Fixes, Security
+    :pullreq: 17224
+
+    Check record length before calling the visitor function
+
+  .. change::
+    :tags: Bug Fixes, Security
+    :pullreq: 17225
+
+    Handle SVCB response without any usable address
+
+  .. change::
+    :tags: Bug Fixes, Security
+    :pullreq: 17226
+
+    Fix out-of-bounds check for UDP responses from backend
+
+  .. change::
+    :tags: Bug Fixes, Security, DNS over QUIC, DNS over HTTP3
+    :pullreq: 17227
+
+    Apply TCP connections limits to DoQ/DoH3 connections
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17335
+
+    Fix invalid TCP rate limiting computation
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 17337
+
+    Bail out when a ``NULL`` pointer is passed to ``dnsdist_ffi_dnsquestion_get_proxy_protocol_values``
+
+  .. change::
+    :tags: Bug Fixes, DNS over HTTPS
+    :pullreq: 17339
+
+    Fix a crash with DoH backends in verbose health-check mode
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17341
+
+    Fix ``BPFFilter::addRangeRule``
+
+  .. change::
+    :tags: Bug Fixes, Security, Webserver
+    :pullreq: 17342
+
+    Better handling of YaHTTP chunk size, Fix two cases of lacking/wrong max size compares, use less inefficient code in web server
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 17344
+
+    Fix clang-tidy warnings
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 17347
+
+    Set default number of outstanding queries per backend to 65536
+
+  .. change::
+    :tags: Improvements, Performance
+    :pullreq: 17348
+
+    Also apply UDP socket buffer sizes to backend sockets
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 17350
+
+    Make code boost-1.91 compatible
+
+  .. change::
+    :tags: Improvements, DNS over HTTPS
+    :pullreq: 17351
+
+    Better handling of nghttp2 errors
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 17352
+
+    Clean up troubleshooting code
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 17353
+
+    Refactor access to DNS headers from Lua
+
+  .. change::
+    :tags: Bug Fixes, Open Telemetry
+    :pullreq: 17370
+
+    Fix a crash when OpenTelemetry tracing is enabled
+
+  .. change::
+    :tags: Bug Fixes, YAML
+    :pullreq: 17405
+
+    Fix XSK configuration via YAML
+
+  .. change::
+    :tags: Bug Fixes, DNS over TLS, DNS over HTTPS
+    :pullreq: 17406
+
+    Fix outgoing TLS session cache cleanup
+
+  .. change::
+    :tags: Bug Fixes, Metrics
+    :pullreq: 17408
+
+    Fix the dynamic block top suffixes counters computation
+
+  .. change::
+    :tags: Bug Fixes, Performance
+    :pullreq: 17410
+
+    Compute a less inaccurate number of DNS records to pass to ``reserve()``
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17413
+
+    Fix DownstreamState::setHealthCheckParams
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17414
+
+    Fix a data race on concurrent CDB KVS lookups
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17417
+
+    Fix a few issues in our AF_XDP/XSK code
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17418
+
+    Fixes several eBPF issues
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17421
+
+    Better handling of exceptions
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17422
+
+    Fix two small EDNS addition related bugs
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17424
+
+    snmp-agent: Fix a memory leak
+
+  .. change::
+    :tags: Bug Fixes, DNS over QUIC
+    :pullreq: 17426
+
+    Check the DoQ query size against the received size
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17428
+
+    More minor fixes
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17431
+
+    Keep concurrent connection entries for live connections
+
+  .. change::
+    :tags: Bug Fixes, YAML
+    :pullreq: 17433
+
+    Ignore invalid backend weight coming from YAML
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17435
+
+    Fix useless allocation in DNSQuestion:getProxyProtocolValues
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17436
+
+    Fix OPT rdlen computation when adding ECS
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17437
+
+    Fix TeeAction metrics on error/short datagrams
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17438
+
+    Use the correct timestamp, not now, for ISO-8601 format
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17439
+
+    libssl: Minor fixes
+
+  .. change::
+    :tags: Improvements, Performance
+    :pullreq: 17474
+
+    iputils: Return early when the tree is empty
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17475
+
+    Do not send UDP responses when the frontend is muted
+
+  .. change::
+    :tags: Improvements, Performance, Open Telemetry
+    :pullreq: 17476
+
+    Reduce the cost of disabled OpenTelemetry tracing
+
+  .. change::
+    :tags: Improvements, DNS over QUIC, DNS over HTTP3
+    :pullreq: 17480
+
+    Update Quiche to 0.29.1 in our packages
+
+.. changelog::
+  :version: 2.0.6
+  :released: 21st of May 2026
+
+ .. change::
+    :tags: Bug Fixes
+    :pullreq: 17336
+
+    Fix invalid TCP rate limiting computation
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17338
+
+    Bail out when a ``NULL`` pointer is passed to ``dnsdist_ffi_dnsquestion_get_proxy_protocol_values``
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17340
+
+    Fix ``BPFFilter::addRangeRule``
+
+  .. change::
+    :tags: Bug Fixes, Webserver
+    :pullreq: 17343
+
+    Maintain a "current size of received body" counter.
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 17345
+
+    Fix clang-tidy warnings
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 17346
+
+    Also apply UDP socket buffer sizes to backend sockets
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 17349
+
+    Make code boost-1.91 compatible
+
+  .. change::
+    :tags: Bug Fixes, YAML
+    :pullreq: 17404
+
+    Fix XSK configuration via YAML
+
+  .. change::
+    :tags: Bug Fixes, DNS over TLS, DNS over HTTPS
+    :pullreq: 17407
+
+   Fix outgoing TLS session cache cleanup
+
+  .. change::
+    :tags: Bug Fixes, Metrics
+    :pullreq: 17409
+
+    Fix the dynamic block top suffixes counters computation
+
+  .. change::
+    :tags: Bug Fixes, Performance
+    :pullreq: 17411
+
+    Compute a less inaccurate number of DNS records to pass to ``reserve()``
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17412
+
+    Fix DownstreamState::setHealthCheckParams
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17415
+
+    Fix a data race on concurrent CDB KVS lookups
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17416
+
+    Fix a few issues in our AF_XDP/XSK code
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17419
+
+    Fixes several eBPF issues
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17420
+
+    Better handling of exceptions
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17423
+
+    Fix two small EDNS addition related bugs
+
+  .. change::
+    :tags: Bug Fixes, Metrics
+    :pullreq: 17425
+
+    snmp-agent: Fix a memory leak
+
+  .. change::
+    :tags: Bug Fixes, DNS over QUIC
+    :pullreq: 17427
+
+    Check the DoQ query size against the received size
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17429
+
+    More minor fixes
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17432
+
+    Keep concurrent connection entries for live connections
+
+  .. change::
+    :tags: Bug Fixes, YAML
+    :pullreq: 17434
+
+    Ignore invalid backend weight coming from YAML
+
+.. changelog::
+  :version: 2.0.5
+  :released: 23rd of April 2026
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 17165
+
+    Do not keep the parsed EDNS options around
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17166
+
+    Do not oversize the received buffer with ``recvmmsg``
+
+  .. change::
+    :tags: Bug Fixes, DNS over QUIC, DNS over HTTP3
+    :pullreq: 17168
+    :tickets: 17109
+
+    Give TCP thread as default for definition USE_SINGLE_ACCEPTOR_THREAD
+
+  .. change::
+    :tags: Bug Fixes, DNS over QUIC
+    :pullreq: 17170
+
+    Hardened DoQ internal error handling for cross-protocol queries
+
+  .. change::
+    :tags: Bug Fixes, DNS over HTTP3
+    :pullreq: 17173
+
+    Hardened DoH3 internal error handling for cross-protocol queries
+
+  .. change::
+    :tags: Bug Fixes, DNS over HTTPS
+    :pullreq: 17176
+
+    Handle missing X-Forwarded-For on existing DoH connection
+
+  .. change::
+    :tags: Bug Fixes, DNS over HTTPS
+    :pullreq: 17178
+
+    Fix handling of long HTTP/2 Date headers, handle non-POSIX locales
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17179
+
+    meson: Add missing checks for ``TLS_client_method``, ``gnutls_transport_set_fastopen``
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17207
+
+    Fix the ``StatNode::fullname`` issue introduced in 2.0.4
+
+.. changelog::
+  :version: 1.9.14
+  :released: 23rd of April 2026
+
+  .. change::
+    :tags: Bug Fixes, DNS over QUIC, DNS over HTTP3
+    :pullreq: 17167
+    :tickets: 17109
+
+    Give TCP thread for DoQ and DoH3
+
+  .. change::
+    :tags: Bug Fixes, DNS over QUIC
+    :pullreq: 17171
+
+    Hardened DoQ internal error handling for cross-protocol queries
+
+  .. change::
+    :tags: Bug Fixes, DNS over HTTP3
+    :pullreq: 17174
+
+    Hardened DoH3 internal error handling for cross-protocol queries
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17206
+
+    Fix the ``StatNode::fullname`` issue introduced in 1.9.13
+
+.. changelog::
+  :version: 2.0.4
+  :released: 22nd of April 2026
+
+  .. change::
+    :tags: Bug Fixes, Security, DNS over HTTP3
+    :pullreq: TBD
+
+    CVE-2026-33254: An attacker can create a large number of concurrent DoQ or DoH3 connections, causing unlimited memory allocation in DNSdist and leading to a denial of service. DOQ and DoH3 are disabled by default
+
+  .. change::
+    :tags: Bug Fixes, Security
+    :pullreq: TBD
+
+    CVE-2026-33257: An attacker can send a web request that causes unlimited memory allocation in the internal web server, leading to a denial of service. The web server is disabled and restricted by an ACL by default
+
+  .. change::
+    :tags: Bug Fixes, Security
+    :pullreq: TBD
+
+    CVE-2026-33260: An attacker can send a web request that causes unlimited memory allocation in the internal web server, leading to a denial of service. The web server is disabled and restricted by an ACL by default
+
+  .. change::
+    :tags: Bug Fixes, Security, DNSCrypt
+    :pullreq: TBD
+
+    CVE-2026-33593: A client can trigger a divide by zero error leading to crash by sending a crafted DNSCrypt query
+
+  .. change::
+    :tags: Bug Fixes, Security, DNS over HTTPS
+    :pullreq: TBD
+
+    CVE-2026-33594: A client can trigger excessive memory allocation by generating a lot of queries that are routed to an overloaded DoH backend, causing queries to accumulate into a buffer that will not be released until the end of the connection. Outgoing DoH is disabled by default
+
+  .. change::
+    :tags: Bug Fixes, Security, DNS over QUIC, DNS over HTTP3
+    :pullreq: TBD
+
+    CVE-2026-33595: A client can trigger excessive memory allocation by generating a lot of errors responses over a single DoQ and DoH3 connection, as some resources were not properly released until the end of the connection. DOQ and DoH3 are disabled by default
+
+  .. change::
+    :tags: Bug Fixes, Security
+    :pullreq: TBD
+
+    CVE-2026-33596: A client might theoretically be able to cause a mismatch between queries sent to a backend and the received responses by sending a flood of perfectly timed queries that are routed to a TCP-only or DNS over TLS backend
+
+  .. change::
+    :tags: Bug Fixes, Security
+    :pullreq: TBD
+
+    CVE-2026-33597: A crafted query containing an invalid DNS label can prevent the PRSD detection algorithm executed via DynBlockRulesGroup:setSuffixMatchRule or DynBlockRulesGroup:setSuffixMatchRuleFFI from being executed
+
+  .. change::
+    :tags: Bug Fixes, Security
+    :pullreq: TBD
+
+    CVE-2026-33598: A cached crafted response can cause an out-of-bounds read if custom Lua code calls getDomainListByAddress() or getAddressListByDomain() on a packet cache
+
+  .. change::
+    :tags: Bug Fixes, Security,
+    :pullreq: TBD
+
+    CVE-2026-33599: A rogue backend can send a crafted SVCB response to a Discovery of Designated Resolvers request, when requested via either the autoUpgrade (Lua) option to newServer or auto_upgrade (YAML) settings. DDR upgrade is not enabled by default
+
+  .. change::
+    :tags: Bug Fixes, Security
+    :pullreq: TBD
+
+    CVE-2026-33602: A rogue backend can send a crafted UDP response with a query ID off by one related to the maximum configured value, triggering an out-of-bounds write leading to a denial of service
+
+  .. change::
+    :tags: Bug Fixes, YAML
+    :pullreq: 17089
+
+    Fix passing a numeric value to the YAML QType selector
+
+.. changelog::
+  :version: 1.9.13
+  :released: 22nd of April 2026
+
+  .. change::
+    :tags: Bug Fixes, Security, DNS over HTTP3
+    :pullreq: TBD
+
+    CVE-2026-33254: An attacker can create a large number of concurrent DoQ or DoH3 connections, causing unlimited memory allocation in DNSdist and leading to a denial of service. DOQ and DoH3 are disabled by default
+
+  .. change::
+    :tags: Bug Fixes, Security
+    :pullreq: TBD
+
+    CVE-2026-33257: An attacker can send a web request that causes unlimited memory allocation in the internal web server, leading to a denial of service. The web server is disabled and restricted by an ACL by default
+
+  .. change::
+    :tags: Bug Fixes, Security
+    :pullreq: TBD
+
+    CVE-2026-33260: An attacker can send a web request that causes unlimited memory allocation in the internal web server, leading to a denial of service. The web server is disabled and restricted by an ACL by default
+
+  .. change::
+    :tags: Bug Fixes, Security, DNSCrypt
+    :pullreq: TBD
+
+    CVE-2026-33593: A client can trigger a divide by zero error leading to crash by sending a crafted DNSCrypt query
+
+  .. change::
+    :tags: Bug Fixes, Security, DNS over HTTPS
+    :pullreq: TBD
+
+    CVE-2026-33594: A client can trigger excessive memory allocation by generating a lot of queries that are routed to an overloaded DoH backend, causing queries to accumulate into a buffer that will not be released until the end of the connection. Outgoing DoH is disabled by default
+
+  .. change::
+    :tags: Bug Fixes, Security, DNS over QUIC, DNS over HTTP3
+    :pullreq: TBD
+
+    CVE-2026-33595: A client can trigger excessive memory allocation by generating a lot of errors responses over a single DoQ and DoH3 connection, as some resources were not properly released until the end of the connection. DOQ and DoH3 are disabled by default
+
+  .. change::
+    :tags: Bug Fixes, Security
+    :pullreq: TBD
+
+    CVE-2026-33596: A client might theoretically be able to cause a mismatch between queries sent to a backend and the received responses by sending a flood of perfectly timed queries that are routed to a TCP-only or DNS over TLS backend
+
+  .. change::
+    :tags: Bug Fixes, Security
+    :pullreq: TBD
+
+    CVE-2026-33597: A crafted query containing an invalid DNS label can prevent the PRSD detection algorithm executed via DynBlockRulesGroup:setSuffixMatchRule or DynBlockRulesGroup:setSuffixMatchRuleFFI from being executed
+
+  .. change::
+    :tags: Bug Fixes, Security
+    :pullreq: TBD
+
+    CVE-2026-33598: A cached crafted response can cause an out-of-bounds read if custom Lua code calls getDomainListByAddress() or getAddressListByDomain() on a packet cache
+
+  .. change::
+    :tags: Bug Fixes, Security,
+    :pullreq: TBD
+
+    CVE-2026-33599: A rogue backend can send a crafted SVCB response to a Discovery of Designated Resolvers request, when requested via either the autoUpgrade (Lua) option to newServer or auto_upgrade (YAML) settings. DDR upgrade is not enabled by default
+
+  .. change::
+    :tags: Bug Fixes, Security
+    :pullreq: TBD
+
+    CVE-2026-33602: A rogue backend can send a crafted UDP response with a query ID off by one related to the maximum configured value, triggering an out-of-bounds write leading to a denial of service
+
+  .. change::
+    :tags: Bug Fixes, Security, DNS over HTTP3
+    :pullreq: TBD
+
+    CVE-2026-33254: An attacker can create a large number of concurrent DoQ or DoH3 connections, causing unlimited memory allocation in DNSdist and leading to a denial of service. DOQ and DoH3 are disabled by default
+
+.. changelog::
+  :version: 1.9.12
+  :released: 31st of March 2026
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 16311
+
+    luawrapper: don't segfault on failure in traceback handler
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 16312
+
+    Fix handling of large XSK frames
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 16313
+
+    ComboAddress: Fix "unspecified address" test when the port is set
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16347
+
+    Refactor the FFI "alternate name" interface
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 16433
+
+    Fix a memory leak with OCSP and OpenSSL 3.6.0
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16847
+
+    Raise the maximum number of descriptors to 1M
+
+  .. change::
+    :tags: Bug Fixes, DNS over QUIC, DNS over HTTP3
+    :pullreq: 16848
+
+    Work around Quiche not dealing well with removed congestion algorithms
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 16901
+
+    Don't start the NetworkListener thread in config check mode
+
+  .. change::
+    :tags: Bug Fixes, Security
+    :pullreq: 17065
+
+    CVE-2026-0396: An attacker might be able to inject HTML content into the internal web dashboard by sending crafted DNS queries to a DNSdist instance where domain-based dynamic rules have been enabled via either "DynBlockRulesGroup:setSuffixMatchRule" or "DynBlockRulesGroup:setSuffixMatchRuleFFI"
+
+  .. change::
+    :tags: Bug Fixes, Security
+    :pullreq: 17066
+
+    CVE-2026-0397: When the internal webserver is enabled (default is disabled), an attacker might be able to trick an administrator logged into the dashboard into visiting a malicious website and extract information about the running configuration from the dashboard
+
+  .. change::
+    :tags: Bug Fixes, Security
+    :pullreq: 17067
+
+    CVE-2026-24028: An attacker might be able to trigger an out-of-bounds read by sending a crafted DNS response packet, when custom Lua code uses "newDNSPacketOverlay" to parse DNS packets
+
+  .. change::
+    :tags: Bug Fixes, Security
+    :pullreq: 17068
+
+    CVE-2026-24029: When the "early_acl_drop" ("earlyACLDrop" in Lua) option is disabled (default is enabled) on a DNS over HTTPs frontend using the "nghttp2" provider, the ACL check is skipped, allowing all clients to send DoH queries regardless of the configured ACL
+
+  .. change::
+    :tags: Bug Fixes, Security
+    :pullreq: 17069
+
+    CVE-2026-24030: An attacker might be able to trick DNSdist into allocating too much memory while processing DNS over QUIC or DNS over HTTP/3 payloads, resulting in denial of service
+
+  .. change::
+    :tags: Bug Fixes, Security
+    :pullreq: 17071
+
+    CVE-2026-27853: An attacker might be able to trigger an out-of-bounds write by sending crafted DNS responses to a DNSdist using the "DNSQuestion:changeName" or "DNSResponse:changeName" methods in custom Lua code. In some cases the rewritten packet might become larger than the initial response and even exceed 65535 bytes, potentially leading to a crash resulting in denial of service
+
+  .. change::
+    :tags: Bug Fixes, Security
+    :pullreq: 17070
+
+    CVE-2026-27854: Denial of service when using "DNSQuestion:getEDNSOptions" method in custom Lua code
+
+.. changelog::
+  :version: 2.0.3
+  :released: 31st of March 2026
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 16584
+
+    Fix build error when only protobuf is enabled
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 16592
+
+    Add missing ``#if`` statements to ``dnsdist-lua.cc``
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 16850
+
+    Do not keep stale cache entries around for empty pools
+
+  .. change::
+    :tags: Bug Fixes, DNS over QUIC, DNS over HTTP3
+    :pullreq: 16851
+
+    Fix wrong address being inserted in the rings for responses
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 16860
+
+    Fix handling of IP-only TLS certificates
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16863
+
+    Add a metric for the latency of the latest health-check
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16865
+
+    Export DNS flags via ProtoBuf
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 16866
+
+    Handle escaped values in YAML SpoofRaw parameters
+
+  .. change::
+    :tags: Bug Fixes, DNS over QUIC, DNS over HTTP3
+    :pullreq: 16867
+
+    Work around Quiche not dealing well with removed congestion algorithms
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16883
+
+    Add a histogram of health-check latencies for backends
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 16900
+
+    Don't start the NetworkListener thread in config check mode
+
+  .. change::
+    :tags: Bug Fixes, Security
+    :pullreq: 17065
+
+    CVE-2026-0396: An attacker might be able to inject HTML content into the internal web dashboard by sending crafted DNS queries to a DNSdist instance where domain-based dynamic rules have been enabled via either "DynBlockRulesGroup:setSuffixMatchRule" or "DynBlockRulesGroup:setSuffixMatchRuleFFI"
+
+  .. change::
+    :tags: Bug Fixes, Security
+    :pullreq: 17066
+
+    CVE-2026-0397: When the internal webserver is enabled (default is disabled), an attacker might be able to trick an administrator logged into the dashboard into visiting a malicious website and extract information about the running configuration from the dashboard
+
+  .. change::
+    :tags: Bug Fixes, Security
+    :pullreq: 17067
+
+    CVE-2026-24028: An attacker might be able to trigger an out-of-bounds read by sending a crafted DNS response packet, when custom Lua code uses "newDNSPacketOverlay" to parse DNS packets
+
+  .. change::
+    :tags: Bug Fixes, Security
+    :pullreq: 17068
+
+    CVE-2026-24029: When the "early_acl_drop" ("earlyACLDrop" in Lua) option is disabled (default is enabled) on a DNS over HTTPs frontend using the "nghttp2" provider, the ACL check is skipped, allowing all clients to send DoH queries regardless of the configured ACL
+
+  .. change::
+    :tags: Bug Fixes, Security
+    :pullreq: 17069
+
+    CVE-2026-24030: An attacker might be able to trick DNSdist into allocating too much memory while processing DNS over QUIC or DNS over HTTP/3 payloads, resulting in denial of service
+
+  .. change::
+    :tags: Bug Fixes, Security
+    :pullreq: 17071
+
+    CVE-2026-27853: An attacker might be able to trigger an out-of-bounds write by sending crafted DNS responses to a DNSdist using the "DNSQuestion:changeName" or "DNSResponse:changeName" methods in custom Lua code. In some cases the rewritten packet might become larger than the initial response and even exceed 65535 bytes, potentially leading to a crash resulting in denial of service
+
+  .. change::
+    :tags: Bug Fixes, Security
+    :pullreq: 17070
+
+    CVE-2026-27854: Denial of service when using "DNSQuestion:getEDNSOptions" method in custom Lua code
+
+.. changelog::
+  :version: 2.1.0-beta2
+  :released: 12th of March 2026
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 16964
+    :tickets: 16934
+
+    Fix Lua configuration of Dynamic Block AllowedRCodeRatio
+
+.. changelog::
+  :version: 2.1.0-beta1
+  :released: 23rd of February 2026
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16786
+
+    Opentelemetry: add flags field in TRACEPARENT EDNS option
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 16793
+
+    Do not create ``dnsdist.yml`` in RPM system configuration directory
+
+  .. change::
+    :tags: New Features
+    :pullreq: 16796
+
+    Add ``prepend`` and ``append`` methods to Lua DNSName
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 16798
+
+    Only install ``dnsdist.yml-dist`` if ``yaml`` support was enabled (Holger Hoffstätte)
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16799
+
+    Update ``ipcrypt2`` to 1.1.10 + 1 commit
+
+  .. change::
+    :tags: Improvements, DNS over QUIC, DNS over HTTP3
+    :pullreq: 16802
+
+    Work around Quiche not dealing well with removed congestion algorithms
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16805
+
+    Better handling of invalid ``Base64`` content
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 16806
+
+    Fix build issues with ``ipcrypt2``
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16822
+
+    Add missing ``noexcept`` on move ctors/assignment operators
+
+  .. change::
+    :tags: Improvements, Protobuf
+    :pullreq: 16823
+
+    Export DNS flags via ProtoBuf
+
+  .. change::
+    :tags: Improvements, DNS over QUIC, DNS over HTTP3
+    :pullreq: 16849
+
+    Update Quiche to 0.24.9 in our packages
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16856
+
+    Update rustc and cargo to 1.93
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 16870
+
+    Correctly set Span ID to downstreams
+
+  .. change::
+    :tags: New Features
+    :pullreq: 16879
+
+    Add actions, methods and FFI functions to unset a tag
+
+  .. change::
+    :tags: New Features
+    :pullreq: 16880
+
+    Implement "allowed rcodes/total" ratio dynamic rule
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16881
+
+    Subnets excluded from dynamic rules should not count towards thresholds
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 16887
+
+    Fix invalid ``substr()`` use in the DNS overlay parser
+
+  .. change::
+    :tags: New Features
+    :pullreq: 16889
+
+    Add a Lua callback to validate health-check responses
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 16890
+
+    Clean up the type mess around latency metrics (again)
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 16898
+
+    Don't start the NetworkListener thread in config check mode
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 16907
+
+    Meson: Add missing checks for ``TLS_client_method``, ``gnutls_transport_set_fastopen``
+
+.. changelog::
   :version: 2.1.0-alpha1
   :released: 29th of January 2026
 
@@ -7591,7 +9199,7 @@ Changelog
     :pullreq: 6400
     :tickets: 6098
 
-    Allow adding :meth:`EDNS Client Subnet information <ServerPool:setECS>` to a query before looking in the cache.
+    Allow adding :meth:`EDNS Client Subnet information <ServerPool.setECS>` to a query before looking in the cache.
     This allows serving ECS enabled answers from the cache when all servers in a pool are down.
 
   .. change::
@@ -7943,7 +9551,7 @@ Changelog
     :tags: New Features
     :pullreq: 5159
 
-    Add a ``suffixMatch`` parameter to :meth:`PacketCache:expungeByName` (Robin Geuze).
+    Add a ``suffixMatch`` parameter to :meth:`PacketCache.expungeByName` (Robin Geuze).
 
   .. change::
     :tags: Improvements
@@ -7980,7 +9588,7 @@ Changelog
     :tags: Improvements, Performance
     :pullreq: 5185
 
-    Add the possibility to fill a :class:`NetmaskGroup` (using :meth:`NetmaskGroup:addMask`) from `exceeds*` results.
+    Add the possibility to fill a :class:`NetmaskGroup` (using :meth:`NetmaskGroup.addMask`) from `exceeds*` results.
 
   .. change::
     :tags: Improvements
@@ -8048,7 +9656,7 @@ Changelog
     :tags: New Features
     :pullreq: 5336
 
-    Implement a runtime changeable rule that matches IP address for a certain time called :func:`TimedIPSetRule`.
+    Implement a runtime changeable rule that matches IP address for a certain time called :class:`TimedIPSetRule`.
 
   .. change::
     :tags: Bug Fixes

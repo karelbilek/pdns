@@ -42,6 +42,7 @@
 #include "misc.hh"
 #include "utility.hh"
 #include "logger.hh"
+#include "logging.hh"
 #include "pdnsexception.hh"
 #include "dnsrecords.hh"
 
@@ -50,9 +51,9 @@
 class DNSPacket
 {
 public:
-  DNSPacket(bool isQuery);
+  DNSPacket(Logr::log_t slog, bool isQuery);
   DNSPacket(const DNSPacket &orig) = default;
-  DNSPacket & operator=(const DNSPacket &) = default;
+  DNSPacket & operator=(const DNSPacket &) = delete;
 
   int noparse(const char *mesg, size_t len); //!< just suck the data inward
   int parse(const char *mesg, size_t len); //!< parse a raw UDP or TCP packet and suck the data inward
@@ -78,11 +79,11 @@ public:
 
   boost::optional<ComboAddress> d_anyLocal;
 
-  Utility::sock_t getSocket() const
+  [[nodiscard]] int getSocket() const
   {
     return d_socket;
   }
-  void setSocket(Utility::sock_t sock);
+  void setSocket(int sock);
 
   // these manipulate 'd'
   void setA(bool); //!< make this packet authoritative - manipulates 'd'
@@ -109,8 +110,6 @@ public:
   unsigned int getMinTTL(); //!< returns lowest TTL of any record in the packet
   bool isEmpty(); //!< returns true if there are no rrs in the packet
 
-  vector<DNSZoneRecord*> getAPRecords(); //!< get a vector with DNSZoneRecords that need additional processing
-  vector<DNSZoneRecord*> getAnswerRecords(); //!< get a vector with DNSZoneRecords that are answers
   vector<DNSZoneRecord*> getServiceRecords(); //!< Get a vector with all Service-style (SVCB) records
   void setCompress(bool compress);
 
@@ -172,6 +171,7 @@ public:
   static bool s_doEDNSSubnetProcessing;
   static bool s_doEDNSCookieProcessing;
   static string s_EDNSCookieKey;
+  static std::vector<std::string> s_OldEDNSCookieKeys;
   EDNSSubnetOpts d_eso;
 
 #ifdef ENABLE_GSS_TSIG
@@ -209,4 +209,6 @@ private:
   bool d_ednscookievalid{false};
   bool d_haveednssection{false};
   bool d_isQuery;
+
+  Logr::log_t d_slog;
 };

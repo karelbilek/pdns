@@ -15,9 +15,7 @@ fi
 
 if [ -z "${CARGO}" ]; then
     echo PATH=$PATH
-    ls -l /usr/bin/cargo
     export CARGO=/usr/bin/cargo
-    #exit 1
 fi
 
 cd "$MESON_PROJECT_DIST_ROOT"
@@ -32,14 +30,6 @@ cmp "$MESON_SOURCE_ROOT"/../../builder-support/gen-version "$MESON_PROJECT_DIST_
 # Get the dereffed symbolic links (the actual files being pointed to) from the source dir
 # Extract them over the existing symbolic links
 tar -C "$MESON_SOURCE_ROOT" -hcf - $symlinks | tar -xf - -C "$MESON_PROJECT_DIST_ROOT"
-
-# Run autoconf for people using autotools to build, this creates a configure script with VERSION set
-# set the proper version in configure.ac
-"$MESON_SOURCE_ROOT"/../../builder/helpers/set-configure-ac-version.sh
-echo Running autoreconf -vi so distfile is still usable for autotools building
-# Run autoconf for people using autotools to build, this creates a configure sc
-autoreconf -vi
-rm -rf "$MESON_PROJECT_DIST_ROOT"/autom4te.cache
 
 cd "$MESON_PROJECT_BUILD_ROOT"
 
@@ -62,7 +52,7 @@ echo Updating the version of the Rust library to ${BUILDER_VERSION}
 # Unfortunately we cannot use --offline because for some reason cargo-update wants
 # to check all dependencies even though we are telling it exactly what to update
 cd "$MESON_PROJECT_DIST_ROOT"/rec-rust-lib/rust/
-ls -l /usr/bin/cargo
+
 echo $CARGO update --verbose --precise ${BUILDER_VERSION} recrust
 $CARGO update --verbose --precise ${BUILDER_VERSION} recrust
 cd "$MESON_PROJECT_BUILD_ROOT"

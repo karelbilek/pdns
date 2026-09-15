@@ -43,7 +43,6 @@
 #include "dnsdist-doh-common.hh"
 #include "doq.hh"
 #include "doh3.hh"
-#include "ednsoptions.hh"
 #include "iputils.hh"
 #include "misc.hh"
 #include "mplexer.hh"
@@ -85,26 +84,26 @@ struct DNSQuestion
 
   const dnsheader_aligned getHeader() const
   {
-    if (data.size() < sizeof(dnsheader)) {
-      throw std::runtime_error("Trying to access the dnsheader of a too small (" + std::to_string(data.size()) + ") DNSQuestion buffer");
+    if (getData().size() < sizeof(dnsheader)) {
+      throw std::runtime_error("Trying to access the dnsheader of a too small (" + std::to_string(getData().size()) + ") DNSQuestion buffer");
     }
-    return dnsheader_aligned(data.data());
+    return dnsheader_aligned(getData().data());
   }
 
   /* this function is not safe against unaligned access, you should
-     use editHeader() instead, but we need it for the Lua bindings */
-  dnsheader* getMutableHeader() const
+     use editHeader() instead, but we need it for the deprecated Lua bindings */
+  dnsheader* getMutableHeader()
   {
-    if (data.size() < sizeof(dnsheader)) {
-      throw std::runtime_error("Trying to access the dnsheader of a too small (" + std::to_string(data.size()) + ") DNSQuestion buffer");
+    if (getData().size() < sizeof(dnsheader)) {
+      throw std::runtime_error("Trying to access the dnsheader of a too small (" + std::to_string(getData().size()) + ") DNSQuestion buffer");
     }
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
-    return reinterpret_cast<dnsheader*>(data.data());
+    return reinterpret_cast<dnsheader*>(getMutableData().data());
   }
 
   bool hasRoomFor(size_t more) const
   {
-    return data.size() <= getMaximumSize() && (getMaximumSize() - data.size()) >= more;
+    return getData().size() <= getMaximumSize() && (getMaximumSize() - getData().size()) >= more;
   }
 
   size_t getMaximumSize() const
@@ -149,6 +148,24 @@ struct DNSQuestion
     ids.qTag->insert_or_assign(key, std::move(value));
   }
 
+  void unsetTag(const std::string& key)
+  {
+    if (ids.qTag) {
+      ids.qTag->erase(key);
+    }
+  }
+
+  std::optional<std::string> getTag(const std::string& key) const
+  {
+    if (ids.qTag) {
+      const auto tagIt = ids.qTag->find(key);
+      if (tagIt != ids.qTag->cend()) {
+        return tagIt->second;
+      }
+    }
+    return std::nullopt;
+  }
+
   const struct timespec& getQueryRealTime() const
   {
     return ids.queryRealTime.d_start;
@@ -175,6 +192,7 @@ struct DNSQuestion
 protected:
   virtual std::shared_ptr<const Logr::Logger> getThisLogger(std::shared_ptr<const Logr::Logger> parent) const;
 
+  /* do not access the data field directly: use getData() or getMutableData() */
   PacketBuffer& data;
   std::shared_ptr<const Logr::Logger> d_logger;
 
@@ -182,7 +200,6 @@ public:
   InternalQueryState& ids;
   std::unique_ptr<Netmask> ecs{nullptr};
   std::string sni; /* Server Name Indication, if any (DoT or DoH) */
-  mutable std::unique_ptr<EDNSOptionViewMap> ednsOptions; /* this needs to be mutable because it is parsed just in time, when DNSQuestion is read-only */
   std::shared_ptr<IncomingTCPConnectionState> d_incomingTCPState{nullptr};
   std::unique_ptr<std::vector<ProxyProtocolValue>> proxyProtocolValues{nullptr};
   uint16_t ecsPrefixLength;
@@ -322,8 +339,8 @@ class DNSCryptContext;
 
 struct ClientState
 {
-  ClientState(const ComboAddress& local_, bool isTCP_, bool doReusePort, int fastOpenQueue, const std::string& itfName, const std::set<int>& cpus_, bool enableProxyProtocol) :
-    cpus(cpus_), interface(itfName), local(local_), fastOpenQueueSize(fastOpenQueue), tcp(isTCP_), reuseport(doReusePort), d_enableProxyProtocol(enableProxyProtocol)
+  ClientState(const ComboAddress& local_, bool isTCP_, bool doReusePort, int fastOpenQueue, const std::string& itfName, const std::set<int>& cpus_, bool enableProxyProtocol, bool padResponses) :
+    cpus(cpus_), interface(itfName), local(local_), fastOpenQueueSize(fastOpenQueue), tcp(isTCP_), reuseport(doReusePort), d_enableProxyProtocol(enableProxyProtocol), d_padResponses(padResponses)
   {
   }
 
@@ -332,6 +349,10 @@ struct ClientState
   mutable stat_t responses{0};
   mutable stat_t tcpDiedReadingQuery{0};
   mutable stat_t tcpDiedSendingResponse{0};
+  mutable stat_t tcpDiedDuringProcessing{0};
+  mutable stat_t tcpBadALPN{0};
+  mutable stat_t tcpMaxDurationReached{0};
+  mutable stat_t tcpBadProxyProtocol{0};
   mutable stat_t tcpGaveUp{0};
   mutable stat_t tcpClientTimeouts{0};
   mutable stat_t tcpDownstreamTimeouts{0};
@@ -374,6 +395,7 @@ struct ClientState
   bool tcp;
   bool reuseport;
   bool d_enableProxyProtocol{true}; // the global proxy protocol ACL still applies
+  bool d_padResponses{false};
   bool ready{false};
 
   int getSocket() const
@@ -531,7 +553,9 @@ struct DownstreamState : public std::enable_shared_from_this<DownstreamState>
   DownstreamState& operator=(const DownstreamState&) = delete;
   DownstreamState& operator=(DownstreamState&&) = delete;
 
-  typedef std::function<std::tuple<DNSName, uint16_t, uint16_t>(const DNSName&, uint16_t, uint16_t, dnsheader*)> checkfunc_t;
+  using HealthCheckQueryGenerator = std::function<std::tuple<DNSName, uint16_t, uint16_t>(const DNSName&, uint16_t, uint16_t, dnsheader*)>;
+  using HealthCheckResponseValidator = std::function<bool(const DNSResponse*)>;
+
   enum class Availability : uint8_t
   {
     Up,
@@ -562,7 +586,8 @@ struct DownstreamState : public std::enable_shared_from_this<DownstreamState>
     TLSContextParameters d_tlsParams;
     set<string> pools;
     std::set<int> d_cpus;
-    checkfunc_t checkFunction;
+    HealthCheckQueryGenerator d_healthCheckGenerationFunction;
+    HealthCheckResponseValidator d_healthCheckResponseValidationCallback;
     std::optional<boost::uuids::uuid> id;
     DNSName checkName{"a.root-servers.net."};
     ComboAddress remote;
@@ -578,7 +603,9 @@ struct DownstreamState : public std::enable_shared_from_this<DownstreamState>
 #endif /* HAVE_XSK */
     size_t d_numberOfSockets{1};
     size_t d_maxInFlightQueriesPerConn{1};
+    size_t d_maxUDPOutstanding{0};
     size_t d_tcpConcurrentConnectionsLimit{0};
+    size_t d_maxOutstandingQueries{0};
     int order{1};
     int d_weight{1};
     int tcpConnectTimeout{5};
@@ -791,6 +818,13 @@ public:
     return upStatus.load(std::memory_order_relaxed);
   }
 
+  /* whether this backend can accept new queries, for that it needs:
+     - to be in the Up state
+     - below the outstanding queries limit, if any
+     - if enforceQPS is true, below the QPS threshold
+  */
+  bool canAcceptNewQueries(bool enforceQPS) const;
+
   void setUp()
   {
     d_config.d_availability = Availability::Up;
@@ -877,9 +911,9 @@ public:
     tcpAvgConnectionDuration = (99.0 * tcpAvgConnectionDuration / 100.0) + (durationMs / 100.0);
   }
 
-  void updateTCPLatency(double udiff)
+  void updateTCPLatency(double latencyUs)
   {
-    latencyUsecTCP = (127.0 * latencyUsecTCP / 128.0) + udiff / 128.0;
+    latencyUsecTCP = (127.0 * latencyUsecTCP / 128.0) + latencyUs / 128.0;
   }
 
   void incQueriesCount()
@@ -951,8 +985,6 @@ public:
   [[nodiscard]] std::shared_ptr<const Logr::Logger> getLogger() const;
 };
 
-void responderThread(std::shared_ptr<DownstreamState> dss);
-
 enum ednsHeaderFlags
 {
   EDNS_HEADER_FLAG_NONE = 0,
@@ -974,9 +1006,6 @@ bool checkQueryHeaders(const struct dnsheader& dnsHeader, ClientState& clientSta
 
 class DNSCryptQuery;
 
-bool handleDNSCryptQuery(PacketBuffer& packet, DNSCryptQuery& query, bool tcp, time_t now, PacketBuffer& response);
-bool checkDNSCryptQuery(const ClientState& clientState, PacketBuffer& query, std::unique_ptr<DNSCryptQuery>& dnsCryptQuery, time_t now, bool tcp);
-
 enum class ProcessQueryResult : uint8_t
 {
   Drop,
@@ -990,8 +1019,18 @@ enum class ProcessQueryResult : uint8_t
 
 ProcessQueryResult processQuery(DNSQuestion& dnsQuestion, std::shared_ptr<DownstreamState>& selectedBackend);
 ProcessQueryResult processQueryAfterRules(DNSQuestion& dnsQuestion, std::shared_ptr<DownstreamState>& outgoingBackend);
+/* Process a response received from a backend. The return value indicates whether
+   the response processing should continue (true) or if it should be dropped right away (false).
+*/
 bool processResponse(PacketBuffer& response, DNSResponse& dnsResponse, bool muted);
+/* Apply the decision (result) of a single rule to this query. If the decision implies to drop the query
+   `drop` will be set to `true`. The return value indicates whether subsequent rules should be evaluated (true)
+   or not (false).
+*/
 bool processRulesResult(const DNSAction::Action& action, DNSQuestion& dnsQuestion, std::string& ruleresult, bool& drop);
+/* Handle the processing of a response once the rules have been applied. The return value indicates whether
+   the response processing should continue (true) or if it should be dropped right away (false).
+*/
 bool processResponseAfterRules(PacketBuffer& response, DNSResponse& dnsResponse, bool muted);
 bool processResponderPacket(std::shared_ptr<DownstreamState>& dss, PacketBuffer& response, InternalQueryState&& ids);
 bool applyRulesToResponse(const std::vector<dnsdist::rules::ResponseRuleAction>& respRuleActions, DNSResponse& dnsResponse);
@@ -1000,7 +1039,7 @@ bool assignOutgoingUDPQueryToBackend(std::shared_ptr<DownstreamState>& downstrea
 
 ssize_t udpClientSendRequestToBackend(const std::shared_ptr<DownstreamState>& backend, const int socketDesc, const PacketBuffer& request, bool healthCheck = false);
 bool sendUDPResponse(int origFD, const PacketBuffer& response, const int delayMsec, const ComboAddress& origDest, const ComboAddress& origRemote);
-void handleResponseSent(const DNSName& qname, const QType& qtype, int udiff, const ComboAddress& client, const ComboAddress& backend, unsigned int size, const dnsheader& cleartextDH, dnsdist::Protocol outgoingProtocol, dnsdist::Protocol incomingProtocol, bool fromBackend);
-void handleResponseSent(const InternalQueryState& ids, int udiff, const ComboAddress& client, const ComboAddress& backend, unsigned int size, const dnsheader& cleartextDH, dnsdist::Protocol outgoingProtocol, bool fromBackend);
+void handleResponseSent(DNSName&& qname, const QType& qtype, double latencyUs, const ComboAddress& client, const ComboAddress& backend, unsigned int size, const dnsheader& cleartextDH, dnsdist::Protocol outgoingProtocol, dnsdist::Protocol incomingProtocol, bool fromBackend);
+void handleResponseSent(InternalQueryState& ids, double latencyUs, const ComboAddress& client, const ComboAddress& backend, unsigned int size, const dnsheader& cleartextDH, dnsdist::Protocol outgoingProtocol, bool fromBackend);
 bool handleTimeoutResponseRules(const std::vector<dnsdist::rules::ResponseRuleAction>& rules, InternalQueryState& ids, const std::shared_ptr<DownstreamState>& ds, const std::shared_ptr<TCPQuerySender>& sender);
 void handleServerStateChange(const std::string& nameWithAddr, bool newResult);

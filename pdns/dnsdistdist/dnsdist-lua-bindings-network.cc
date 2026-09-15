@@ -26,7 +26,7 @@
 #include "dnsdist-lua-network.hh"
 #include "dolog.hh"
 
-void setupLuaBindingsNetwork(LuaContext& luaCtx, bool client)
+void setupLuaBindingsNetwork(LuaContext& luaCtx, bool client, bool configCheck)
 {
   luaCtx.writeFunction("newNetworkEndpoint", [client](const std::string& path) {
     if (client) {
@@ -83,7 +83,7 @@ void setupLuaBindingsNetwork(LuaContext& luaCtx, bool client)
       return false;
     }
 
-    return listener->addUnixListeningEndpoint(path, endpointID, [cb](dnsdist::NetworkListener::EndpointID endpoint, std::string&& dgram, const std::string& from) {
+    return listener->addUnixListeningEndpoint(path, endpointID, [cb = std::move(cb)](dnsdist::NetworkListener::EndpointID endpoint, std::string&& dgram, const std::string& from) {
       {
         auto lock = g_lua.lock();
         dnsdist_ffi_network_message_t msg(dgram, from, endpoint);
@@ -93,8 +93,8 @@ void setupLuaBindingsNetwork(LuaContext& luaCtx, bool client)
     });
   });
 
-  luaCtx.registerFunction<void (std::shared_ptr<dnsdist::NetworkListener>::*)()>("start", [client](std::shared_ptr<dnsdist::NetworkListener>& listener) {
-    if (client) {
+  luaCtx.registerFunction<void (std::shared_ptr<dnsdist::NetworkListener>::*)()>("start", [client, configCheck](std::shared_ptr<dnsdist::NetworkListener>& listener) {
+    if (client || configCheck) {
       return;
     }
 

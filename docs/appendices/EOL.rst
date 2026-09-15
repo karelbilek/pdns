@@ -1,23 +1,30 @@
 End of life statements
 ======================
 
-We aim to have a release every six months.
-The latest release receives correctness, stability and security updates.
-The two releases before that get critical updates only.
+We aim to have a major release every six months.
+The latest major release train receives correctness, stability and security updates by the way of minor releases.
+PowerDNS Authoritative Server 4.9 and 5.0 continue to follow the existing release lifecycle described in the table below.
+Starting with PowerDNS Authoritative Server 5.1, release trains will receive critical updates for one year after the subsequent major release.
+
 Older releases are marked end of life and receive no updates at all.
 Pre-releases do not receive immediate security updates.
 
-The currently supported release train of PowerDNS Authoritative Server is 5.0.
+The currently supported release train of PowerDNS Authoritative Server is 5.1.
+
+PowerDNS Authoritative Server 5.0 will only receive critical updates; it will be end of life after PowerDNS Authoritative Server 5.3 is released.
 
 PowerDNS Authoritative Server 4.9 will only receive critical updates; it will be end of life after PowerDNS Authoritative Server 5.2 is released.
 
-PowerDNS Authoritative Server 4.8 will only receive critical updates; it will be end of life after PowerDNS Authoritative Server 5.1 is released.
+PowerDNS Authoritative Server 4.0 through 4.8, 3.x, and 2.x are End of Life.
 
-PowerDNS Authoritative Server 4.0 through 4.7, 3.x, and 2.x are End of Life.
+Please refer to the support `commitment <https://www.powerdns.com/support-commitment>`_ for details on which versions are supported.
 
 Note: Users with a commercial agreement with PowerDNS.com B.V. or Open-Xchange
 can receive support for releases which are End Of Life. If you are
 such a user, these EOL statements do not apply to you.
+
+Note that for the Open Source support channels, we only support the latest minor release of a release train.
+That means that we ask you to reproduce potential issues on the latest minor release first.
 
 .. list-table:: PowerDNS Authoritative Server Release Life Cycle
    :header-rows: 1
@@ -26,9 +33,13 @@ such a user, these EOL statements do not apply to you.
      - Release date
      - Critical-Only updates
      - End of Life
+   * - 5.1
+     - 3rd of June 2026
+     - ~ January 2027
+     - ~ January 2028
    * - 5.0
      - 22nd of August 2025
-     - ~ March 2026
+     - 3rd of June 2026
      - ~ March 2027
    * - 4.9
      - 15th of March 2024
@@ -37,7 +48,7 @@ such a user, these EOL statements do not apply to you.
    * - 4.8
      - 1st of June 2023
      - 15th of March 2024
-     - ~ March 2026
+     - EOL June 2026
    * - 4.7
      - 20th of October 2022
      - 1st of June 2023

@@ -183,6 +183,19 @@ BOOST_AUTO_TEST_CASE(test_ComboAddressTruncate) {
   ca6.truncate(8);
   BOOST_CHECK_EQUAL(ca6.toString(), "2000::");
 
+  /* truncating to 0 bits leaves no partial byte, so nothing before the address
+     may be touched */
+  ca4 = ComboAddress("130.161.252.29", 53);
+  ca4.truncate(0);
+  BOOST_CHECK_EQUAL(ca4.toString(), "0.0.0.0");
+  BOOST_CHECK_EQUAL(ca4.sin4.sin_port, htons(53));
+
+  ca6 = ComboAddress("2001:888:2000:1d::2", 53);
+  ca6.sin6.sin6_flowinfo = htonl(0x0badcafe);
+  ca6.truncate(0);
+  BOOST_CHECK_EQUAL(ca6.toString(), "::");
+  BOOST_CHECK_EQUAL(ca6.sin6.sin6_flowinfo, htonl(0x0badcafe));
+
 
   orig=ca6=ComboAddress("2001:888:2000:1d::2");
   for(int n=128; n; --n) {
@@ -256,6 +269,16 @@ BOOST_AUTO_TEST_CASE(test_Netmask) {
   Netmask nmp6("fe80::92fb:a6ff:fe4a:51da/128");
   BOOST_CHECK(nmp6.match("fe80::92fb:a6ff:fe4a:51da"));
   BOOST_CHECK(!nmp6.match("fe81::92fb:a6ff:fe4a:51db"));
+
+  /* a /128 leaves no partial byte to compare, so the scope id sitting right
+     after the address must not be taken into account */
+  ComboAddress scoped("fe80::92fb:a6ff:fe4a:51da");
+  scoped.sin6.sin6_scope_id = 1;
+  Netmask nmscoped(scoped);
+  BOOST_CHECK_EQUAL(nmscoped.getBits(), 128);
+  BOOST_CHECK(nmscoped.match(scoped));
+  BOOST_CHECK(nmscoped.match("fe80::92fb:a6ff:fe4a:51da"));
+  BOOST_CHECK(!nmscoped.match("fe80::92fb:a6ff:fe4a:51db"));
 
   Netmask all("0.0.0.0/0");
   BOOST_CHECK(all.match(local) && all.match(remote));
@@ -966,6 +989,30 @@ BOOST_AUTO_TEST_CASE(test_unspecified)
     const ComboAddress address(test.str);
     BOOST_CHECK_EQUAL(address.isUnspecified(), test.unspecified);
   }
+}
+
+// Check the tricky case: two somewhat compatible types
+BOOST_AUTO_TEST_CASE(test_expected)
+{
+  pdns::expected<size_t, int> test(0);
+
+  test = static_cast<size_t>(1);
+  BOOST_ASSERT(test.has_value());
+  BOOST_CHECK_EQUAL(test.value(), 1U);
+
+  test = 2;
+  BOOST_ASSERT(test.has_value());
+  BOOST_CHECK_EQUAL(test.value(), 2U);
+
+  test = pdns::unexpected(3);
+  BOOST_ASSERT(!test.has_value());
+  BOOST_CHECK_EQUAL(test.error(), 3);
+
+  std::string str("foo");
+  pdns::expected<std::string, int> test1(str);
+  BOOST_ASSERT(!str.empty());
+
+  pdns::expected<std::string, int> test2("bar");
 }
 
 BOOST_AUTO_TEST_SUITE_END()

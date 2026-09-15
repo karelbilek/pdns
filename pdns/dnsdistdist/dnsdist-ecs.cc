@@ -19,6 +19,8 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
+#include "dns.hh"
+#include "dnsname.hh"
 #include "dolog.hh"
 #include "dnsdist.hh"
 #include "dnsdist-dnsparser.hh"
@@ -27,6 +29,7 @@
 #include "dnswriter.hh"
 #include "ednsoptions.hh"
 #include "ednssubnet.hh"
+#include "qtype.hh"
 
 int rewriteResponseWithoutEDNS(const PacketBuffer& initialPacket, PacketBuffer& newContent)
 {
@@ -104,7 +107,7 @@ int rewriteResponseWithoutEDNS(const PacketBuffer& initialPacket, PacketBuffer& 
     rrname = packetReader.getName();
     packetReader.getDnsrecordheader(recordHeader);
 
-    if (recordHeader.d_type != QType::OPT) {
+    if (!rrname.isRoot() || recordHeader.d_type != QType::OPT) {
       packetWriter.startRecord(rrname, recordHeader.d_type, recordHeader.d_ttl, recordHeader.d_class, DNSResourceRecord::ADDITIONAL, true);
       packetReader.xfrBlob(blob);
       packetWriter.xfrBlob(blob);
@@ -136,6 +139,11 @@ static bool addOrReplaceEDNSOption(std::vector<std::pair<uint16_t, std::string>>
         ++it;
       }
     }
+  }
+
+  if (newOptionContent.size() == EDNS_OPTION_CODE_SIZE + EDNS_OPTION_LENGTH_SIZE) {
+    options.emplace_back(optionCode, "");
+    return true;
   }
 
   options.emplace_back(optionCode, std::string(&newOptionContent.at(EDNS_OPTION_CODE_SIZE + EDNS_OPTION_LENGTH_SIZE), newOptionContent.size() - (EDNS_OPTION_CODE_SIZE + EDNS_OPTION_LENGTH_SIZE)));
@@ -222,7 +230,7 @@ bool slowRewriteEDNSOptionInQueryWithRecords(const PacketBuffer& initialPacket, 
     rrname = packetReader.getName();
     packetReader.getDnsrecordheader(recordHeader);
 
-    if (recordHeader.d_type != QType::OPT) {
+    if (!rrname.isRoot() || recordHeader.d_type != QType::OPT) {
       packetWriter.startRecord(rrname, recordHeader.d_type, recordHeader.d_ttl, recordHeader.d_class, DNSResourceRecord::ADDITIONAL, true);
       packetReader.xfrBlob(blob);
       packetWriter.xfrBlob(blob);
@@ -249,7 +257,12 @@ bool slowRewriteEDNSOptionInQueryWithRecords(const PacketBuffer& initialPacket, 
   }
 
   if (ednsAdded) {
-    packetWriter.addOpt(dnsdist::configuration::s_EdnsUDPPayloadSize, 0, 0, {{optionToReplace, std::string(&newOptionContent.at(EDNS_OPTION_CODE_SIZE + EDNS_OPTION_LENGTH_SIZE), newOptionContent.size() - (EDNS_OPTION_CODE_SIZE + EDNS_OPTION_LENGTH_SIZE))}}, 0);
+    if (newOptionContent.size() == EDNS_OPTION_CODE_SIZE + EDNS_OPTION_LENGTH_SIZE) {
+      packetWriter.addOpt(dnsdist::configuration::s_EdnsUDPPayloadSize, 0, 0, {{optionToReplace, std::string()}}, 0);
+    }
+    else {
+      packetWriter.addOpt(dnsdist::configuration::s_EdnsUDPPayloadSize, 0, 0, {{optionToReplace, std::string(&newOptionContent.at(EDNS_OPTION_CODE_SIZE + EDNS_OPTION_LENGTH_SIZE), newOptionContent.size() - (EDNS_OPTION_CODE_SIZE + EDNS_OPTION_LENGTH_SIZE))}}, 0);
+    }
     optionAdded = true;
   }
 
@@ -258,78 +271,12 @@ bool slowRewriteEDNSOptionInQueryWithRecords(const PacketBuffer& initialPacket, 
   return true;
 }
 
-int locateEDNSOptRR(const PacketBuffer& packet, uint16_t* optStart, size_t* optLen, bool* last)
-{
-  if (optStart == nullptr || optLen == nullptr || last == nullptr) {
-    throw std::runtime_error("Invalid values passed to locateEDNSOptRR");
-  }
-
-  const dnsheader_aligned dnsHeader(packet.data());
-
-  if (ntohs(dnsHeader->arcount) == 0) {
-    return ENOENT;
-  }
-
-  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
-  PacketReader packetReader(std::string_view(reinterpret_cast<const char*>(packet.data()), packet.size()));
-
-  size_t idx = 0;
-  DNSName rrname;
-  uint16_t qdcount = ntohs(dnsHeader->qdcount);
-  uint16_t ancount = ntohs(dnsHeader->ancount);
-  uint16_t nscount = ntohs(dnsHeader->nscount);
-  uint16_t arcount = ntohs(dnsHeader->arcount);
-  uint16_t rrtype{};
-  uint16_t rrclass{};
-  dnsrecordheader recordHeader{};
-
-  /* consume qd */
-  for (idx = 0; idx < qdcount; idx++) {
-    rrname = packetReader.getName();
-    rrtype = packetReader.get16BitInt();
-    rrclass = packetReader.get16BitInt();
-    (void)rrtype;
-    (void)rrclass;
-  }
-
-  /* consume AN and NS */
-  for (idx = 0; idx < ancount + nscount; idx++) {
-    rrname = packetReader.getName();
-    packetReader.getDnsrecordheader(recordHeader);
-    packetReader.skip(recordHeader.d_clen);
-  }
-
-  /* consume AR, looking for OPT */
-  for (idx = 0; idx < arcount; idx++) {
-    uint16_t start = packetReader.getPosition();
-    rrname = packetReader.getName();
-    packetReader.getDnsrecordheader(recordHeader);
-
-    if (recordHeader.d_type == QType::OPT) {
-      *optStart = start;
-      *optLen = (packetReader.getPosition() - start) + recordHeader.d_clen;
-
-      if (packet.size() < (*optStart + *optLen)) {
-        throw std::range_error("Opt record overflow");
-      }
-
-      if (idx == ((size_t)arcount - 1)) {
-        *last = true;
-      }
-      else {
-        *last = false;
-      }
-      return 0;
-    }
-    packetReader.skip(recordHeader.d_clen);
-  }
-
-  return ENOENT;
-}
-
 namespace dnsdist
 {
-/* extract the start of the OPT RR in a QUERY packet if any */
+/* extract the start of the OPT RR in a QUERY packet if any
+ * optRDPosition points to the first byte of the RDLEN field
+ * remaining contains the number of bytes in the packet after optRDPosition (i.e. packet.size() - optRDPosition)
+ */
 int getEDNSOptionsStart(const PacketBuffer& packet, const size_t qnameWireLength, uint16_t* optRDPosition, size_t* remaining)
 {
   if (optRDPosition == nullptr || remaining == nullptr) {
@@ -460,23 +407,20 @@ static bool replaceEDNSClientSubnetOption(PacketBuffer& packet, size_t maximumSi
 
 /* This function looks for an OPT RR, return true if a valid one was found (even if there was no options)
    and false otherwise. */
-bool parseEDNSOptions(const DNSQuestion& dnsQuestion)
+std::optional<EDNSOptionViewMap> parseEDNSOptions(const DNSQuestion& dnsQuestion)
 {
+  EDNSOptionViewMap ednsOptions{};
   const auto dnsHeader = dnsQuestion.getHeader();
-  if (dnsQuestion.ednsOptions != nullptr) {
-    return true;
-  }
-
-  // dnsQuestion.ednsOptions is mutable
-  dnsQuestion.ednsOptions = std::make_unique<EDNSOptionViewMap>();
-
   if (ntohs(dnsHeader->arcount) == 0) {
     /* nothing in additional so no EDNS */
-    return false;
+    return std::nullopt;
   }
 
   if (ntohs(dnsHeader->ancount) != 0 || ntohs(dnsHeader->nscount) != 0 || ntohs(dnsHeader->arcount) > 1) {
-    return slowParseEDNSOptions(dnsQuestion.getData(), *dnsQuestion.ednsOptions);
+    if (slowParseEDNSOptions(dnsQuestion.getData(), ednsOptions)) {
+      return ednsOptions;
+    }
+    return std::nullopt;
   }
 
   size_t remaining = 0;
@@ -485,11 +429,14 @@ bool parseEDNSOptions(const DNSQuestion& dnsQuestion)
 
   if (res == 0) {
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
-    res = getEDNSOptions(reinterpret_cast<const char*>(&dnsQuestion.getData().at(optRDPosition)), remaining, *dnsQuestion.ednsOptions);
-    return (res == 0);
+    res = getEDNSOptions(reinterpret_cast<const char*>(&dnsQuestion.getData().at(optRDPosition)), remaining, ednsOptions);
+    if (res != 0) {
+      return std::nullopt;
+    }
+    return ednsOptions;
   }
 
-  return false;
+  return std::nullopt;
 }
 
 static bool addECSToExistingOPT(PacketBuffer& packet, size_t maximumSize, const string& newECSOption, size_t optRDLenPosition, bool& ecsAdded)
@@ -509,7 +456,11 @@ static bool addECSToExistingOPT(PacketBuffer& packet, size_t maximumSize, const 
     return false;
   }
 
-  uint16_t newRDLen = oldRDLen + newECSOption.size();
+  const uint32_t computedRDLen = static_cast<uint32_t>(oldRDLen) + newECSOption.size();
+  if (computedRDLen > std::numeric_limits<uint16_t>::max()) {
+    return false;
+  }
+  const auto newRDLen = static_cast<uint16_t>(computedRDLen);
   packet.at(optRDLenPosition) = newRDLen / 256;
   packet.at(optRDLenPosition + 1) = newRDLen % 256;
 
@@ -599,6 +550,11 @@ bool handleEDNSClientSubnet(PacketBuffer& packet, const size_t maximumSize, cons
     }
 
     return replaceEDNSClientSubnetOption(packet, maximumSize, optRDPosition + ecsOptionStartPosition, ecsOptionSize, optRDPosition, newECSOption);
+  }
+
+  if (res != ENOENT) {
+    /* something is wrong */
+    return false;
   }
 
   /* we have an EDNS OPT RR but no existing ECS option */
@@ -789,7 +745,7 @@ int rewriteResponseWithoutEDNSOption(const PacketBuffer& initialPacket, const ui
     rrname = packetReader.getName();
     packetReader.getDnsrecordheader(recordHeader);
 
-    if (recordHeader.d_type != QType::OPT) {
+    if (!rrname.isRoot() || recordHeader.d_type != QType::OPT) {
       packetWriter.startRecord(rrname, recordHeader.d_type, recordHeader.d_ttl, recordHeader.d_class, DNSResourceRecord::ADDITIONAL, true);
       packetReader.xfrBlob(blob);
       packetWriter.xfrBlob(blob);
@@ -1110,44 +1066,57 @@ bool getEDNS0Record(const PacketBuffer& packet, EDNS0Record& edns0)
   return true;
 }
 
-bool setEDNSOption(DNSQuestion& dnsQuestion, uint16_t ednsCode, const std::string& ednsData, bool isQuery)
+bool setEDNSOption(PacketBuffer& buf, uint16_t ednsCode, const std::string& ednsData, size_t maximumSize, bool& ednsAdded, bool& optionAdded)
 {
+  if (buf.size() < sizeof(dnsheader)) {
+    return false;
+  }
   std::string optRData;
   generateEDNSOption(ednsCode, ednsData, optRData);
 
-  if (dnsQuestion.getHeader()->arcount != 0) {
-    bool ednsAdded = false;
-    bool optionAdded = false;
+  const dnsheader_aligned dnsHeader(buf.data());
+  if (dnsHeader->arcount != 0) {
+    ednsAdded = false;
+    optionAdded = false;
     PacketBuffer newContent;
-    newContent.reserve(dnsQuestion.getData().size());
+    newContent.reserve(buf.size());
 
-    if (!slowRewriteEDNSOptionInQueryWithRecords(dnsQuestion.getData(), newContent, ednsAdded, ednsCode, optionAdded, true, false, optRData)) {
+    if (!slowRewriteEDNSOptionInQueryWithRecords(buf, newContent, ednsAdded, ednsCode, optionAdded, true, false, optRData)) {
       return false;
     }
 
-    if (newContent.size() > dnsQuestion.getMaximumSize()) {
+    if (newContent.size() > maximumSize) {
       return false;
     }
 
-    dnsQuestion.getMutableData() = std::move(newContent);
-    if (isQuery && !dnsQuestion.ids.ednsAdded && ednsAdded) {
-      dnsQuestion.ids.ednsAdded = true;
-    }
-
+    buf = std::move(newContent);
     return true;
   }
 
-  auto& data = dnsQuestion.getMutableData();
-  if (generateOptRR(optRData, data, dnsQuestion.getMaximumSize(), dnsdist::configuration::s_EdnsUDPPayloadSize, 0, false)) {
-    dnsdist::PacketMangling::editDNSHeaderFromPacket(dnsQuestion.getMutableData(), [](dnsheader& header) {
-      header.arcount = htons(1);
-      return true;
-    });
+  if (!generateOptRR(optRData, buf, maximumSize, dnsdist::configuration::s_EdnsUDPPayloadSize, 0, false)) {
+    return false;
+  }
 
-    if (isQuery) {
-      // make sure that any EDNS sent by the backend is removed before forwarding the response to the client
-      dnsQuestion.ids.ednsAdded = true;
-    }
+  dnsdist::PacketMangling::editDNSHeaderFromPacket(buf, [](dnsheader& header) {
+    header.arcount = htons(1);
+    return true;
+  });
+  ednsAdded = true;
+
+  return true;
+}
+
+bool setEDNSOption(DNSQuestion& dnsQuestion, uint16_t ednsCode, const std::string& ednsData, bool isQuery)
+{
+  bool ednsAdded = false;
+  bool optionAdded = false;
+  auto ret = setEDNSOption(dnsQuestion.getMutableData(), ednsCode, ednsData, dnsQuestion.getMaximumSize(), ednsAdded, optionAdded);
+  if (!ret) {
+    return ret;
+  }
+
+  if (isQuery && !dnsQuestion.ids.ednsAdded && ednsAdded) {
+    dnsQuestion.ids.ednsAdded = true;
   }
 
   return true;

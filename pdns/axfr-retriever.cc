@@ -29,13 +29,14 @@
 
 using pdns::resolver::parseResult;
 
-AXFRRetriever::AXFRRetriever(const ComboAddress& remote,
+AXFRRetriever::AXFRRetriever(Logr::log_t slog,
+                             const ComboAddress& remote,
                              const ZoneName& domain,
                              const TSIGTriplet& tsigConf,
                              const ComboAddress* laddr,
                              size_t maxReceivedBytes,
                              uint16_t timeout) :
-  d_buf(65536), d_tsigVerifier(tsigConf, remote, d_trc), d_maxReceivedBytes(maxReceivedBytes)
+  d_slog(slog), d_tsigVerifier(slog, tsigConf, remote, d_trc), d_buf(65536), d_maxReceivedBytes(maxReceivedBytes)
 {
   ComboAddress local;
   if (laddr != nullptr) {
@@ -44,7 +45,7 @@ AXFRRetriever::AXFRRetriever(const ComboAddress& remote,
     if (!pdns::isQueryLocalAddressFamilyEnabled(remote.sin4.sin_family)) {
       throw ResolverException("Unable to determine source address for AXFR request to " + remote.toStringWithPort() + " for " + domain.toLogString() + ". Address family is not configured for outgoing queries");
     }
-    local = pdns::getQueryLocalAddress(remote.sin4.sin_family, 0);
+    local = pdns::getQueryLocalAddress(remote.sin4.sin_family, 0).d_address;
   }
   d_sock = -1;
   try {
@@ -71,17 +72,17 @@ AXFRRetriever::AXFRRetriever(const ComboAddress& remote,
       d_trc.d_fudge = 300;
       d_trc.d_origID=ntohs(pwriter.getHeader()->id);
       d_trc.d_eRcode=0;
-      addTSIG(pwriter, d_trc, tsigConf.name, tsigConf.secret, "", false);
+      addTSIG(d_slog, pwriter, d_trc, tsigConf.name, tsigConf.secret, "", false);
     }
   
     uint16_t replen=htons(packet.size());
-    Utility::iovec iov[2];
-    iov[0].iov_base=reinterpret_cast<char*>(&replen);
-    iov[0].iov_len=2;
-    iov[1].iov_base=packet.data();
-    iov[1].iov_len=packet.size();
+    std::array<iovec, 2> iov{};
+    iov[0].iov_base = &replen;
+    iov[0].iov_len = iov.size();
+    iov[1].iov_base = packet.data();
+    iov[1].iov_len = packet.size();
   
-    int ret=Utility::writev(d_sock, iov, 2);
+    auto ret = writev(d_sock, iov.data(), iov.size());
     if(ret < 0)
       throw ResolverException("Error sending question to "+d_remote.toStringWithPort()+": "+stringerror());
     if(ret != (int)(2+packet.size())) {
@@ -127,47 +128,45 @@ int AXFRRetriever::getChunk(Resolver::res_t &res, vector<DNSRecord>* records, ui
 
   d_receivedBytes += (uint16_t) len;
 
-  MOADNSParser mdp(false, d_buf.data(), len);
-
-  int err = mdp.d_header.rcode;
-
-  if(err) {
-    throw ResolverException("AXFR chunk error: " + RCode::to_s(err));
-  }
-
-  if(mdp.d_header.tc) {
-    throw ResolverException("AXFR chunk had TC bit set");
-  }
-
   try {
+    MOADNSParser mdp(false, d_buf.data(), len);
+
+    int err = mdp.d_header.rcode;
+    if (err != 0) {
+      throw ResolverException("AXFR chunk error: " + RCode::to_s(err));
+    }
+
+    if(mdp.d_header.tc) {
+      throw ResolverException("AXFR chunk had TC bit set");
+    }
+
     d_tsigVerifier.check(std::string(d_buf.data(), len), mdp);
-  }
-  catch(const std::runtime_error& re) {
-    throw ResolverException(re.what());
-  }
 
-  if(!records) {
-    err = parseResult(mdp, DNSName(), 0, 0, &res);
-
-    if (!err) {
-      for(const auto& answer :  mdp.d_answers) {
-        if (answer.d_type == QType::SOA) {
-          d_soacount++;
+    if (records == nullptr) {
+      err = parseResult(mdp, DNSName(), 0, 0, &res);
+      if (err == 0) {
+        for(const auto& answer : mdp.d_answers) {
+          if (answer.d_type == QType::SOA) {
+            d_soacount++;
+          }
         }
       }
     }
-  }
-  else {
-    records->clear();
-    records->reserve(mdp.d_answers.size());
+    else {
+      records->clear();
+      records->reserve(mdp.d_answers.size());
 
-    for(auto& r: mdp.d_answers) {
-      if (r.d_type == QType::SOA) {
-        d_soacount++;
+      for(auto& r: mdp.d_answers) {
+        if (r.d_type == QType::SOA) {
+          d_soacount++;
+        }
+
+        records->push_back(std::move(r));
       }
-
-      records->push_back(std::move(r));
     }
+  }
+  catch(const std::runtime_error& re) {
+    throw ResolverException(re.what());
   }
 
   return true;
@@ -244,7 +243,7 @@ void AXFRRetriever::connect(uint16_t timeout)
     throw ResolverException("Error connecting: "+stringerror());
   }
   else {
-    Utility::socklen_t len=sizeof(err);
+    socklen_t len=sizeof(err);
     if(getsockopt(d_sock, SOL_SOCKET,SO_ERROR,(char *)&err,&len)<0)
       throw ResolverException("Error connecting: "+stringerror()); // Solaris
 

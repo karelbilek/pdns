@@ -32,22 +32,28 @@ DNSPacketOverlay::DNSPacketOverlay(const std::string_view& packet)
   }
 
   memcpy(&d_header, packet.data(), sizeof(dnsheader));
-  uint64_t numRecords = ntohs(d_header.ancount) + ntohs(d_header.nscount) + ntohs(d_header.arcount);
-  d_records.reserve(numRecords);
+  uint64_t supposedRecordCount = ntohs(d_header.ancount) + ntohs(d_header.nscount) + ntohs(d_header.arcount);
+  // No need to reserve more memory for more records than the request can
+  // contain. We could try to be smarter and actually count the records
+  // by doing getDnsrecordheader and skip the payload in a loop, but all
+  // we really want here is to avoid reserving too much memory in case of
+  // maliciously high record counts.
+  auto reserveRecordCount = std::min(1 + ((packet.size() - sizeof(dnsheader)) / sizeof(dnsrecordheader)), static_cast<size_t>(supposedRecordCount));
+  d_records.reserve(reserveRecordCount);
 
   try {
     PacketReader reader(std::string_view(reinterpret_cast<const char*>(packet.data()), packet.size()));
 
-    for (uint16_t n = 0; n < ntohs(d_header.qdcount); ++n) {
+    for (uint16_t idx = 0; idx < ntohs(d_header.qdcount); ++idx) {
       reader.xfrName(d_qname);
       reader.xfrType(d_qtype);
       reader.xfrType(d_qclass);
     }
 
-    for (uint64_t n = 0; n < numRecords; ++n) {
+    for (uint64_t idx = 0; idx < supposedRecordCount; ++idx) {
       Record rec;
       reader.xfrName(rec.d_name);
-      rec.d_place = n < ntohs(d_header.ancount) ? DNSResourceRecord::ANSWER : (n < (ntohs(d_header.ancount) + ntohs(d_header.nscount)) ? DNSResourceRecord::AUTHORITY : DNSResourceRecord::ADDITIONAL);
+      rec.d_place = idx < ntohs(d_header.ancount) ? DNSResourceRecord::ANSWER : (idx < (ntohs(d_header.ancount) + ntohs(d_header.nscount)) ? DNSResourceRecord::AUTHORITY : DNSResourceRecord::ADDITIONAL);
       reader.xfrType(rec.d_type);
       reader.xfrType(rec.d_class);
       reader.xfr32BitInt(rec.d_ttl);
@@ -132,7 +138,8 @@ bool changeNameInDNSPacket(PacketBuffer& initialPacket, const DNSName& from, con
     pw.startRecord(rrname, ah.d_type, ah.d_ttl, ah.d_class, place, true);
     if (nameOnlyTypes.count(ah.d_type)) {
       rrname = pr.getName();
-      pw.xfrName(rrname);
+      // compression is not allowed for DNAME target per rfc6672 section 2.5
+      pw.xfrName(rrname, ah.d_type != QType::DNAME);
     }
     else if (noNameTypes.count(ah.d_type)) {
       pr.xfrBlob(blob);
@@ -147,13 +154,13 @@ bool changeNameInDNSPacket(PacketBuffer& initialPacket, const DNSName& from, con
       auto prio = pr.get16BitInt();
       rrname = pr.getName();
       pw.xfr16BitInt(prio);
-      pw.xfrName(rrname);
+      pw.xfrName(rrname, true);
     }
     else if (ah.d_type == QType::SOA) {
       auto mname = pr.getName();
-      pw.xfrName(mname);
+      pw.xfrName(mname, true);
       auto rname = pr.getName();
-      pw.xfrName(rname);
+      pw.xfrName(rname, true);
       /* serial */
       pw.xfr32BitInt(pr.get32BitInt());
       /* refresh */
@@ -173,7 +180,11 @@ bool changeNameInDNSPacket(PacketBuffer& initialPacket, const DNSName& from, con
       /* port */
       pw.xfr16BitInt(pr.get16BitInt());
       auto target = pr.getName();
-      pw.xfrName(target);
+      /* Compression is not allowed per rfc2782:
+         "Unless and until permitted by future standards action,
+         name compression is not to be used for this field."
+      */
+      pw.xfrName(target, false);
     }
     else {
       /* sorry, unsafe type */
@@ -237,6 +248,19 @@ namespace PacketMangling
     editDNSPacketTTL(reinterpret_cast<char*>(packet.data()), packet.size(), visitor);
   }
 
+  void restoreFlags(struct dnsheader* dnsHeader, uint16_t origFlags)
+  {
+    static const uint16_t rdMask = 1 << FLAGS_RD_OFFSET;
+    static const uint16_t cdMask = 1 << FLAGS_CD_OFFSET;
+    static const uint16_t restoreFlagsMask = UINT16_MAX & ~(rdMask | cdMask);
+    uint16_t* flags = getFlagsFromDNSHeader(dnsHeader);
+    /* clear the flags we are about to restore */
+    *flags &= restoreFlagsMask;
+    /* only keep the flags we want to restore */
+    origFlags &= ~restoreFlagsMask;
+    /* set the saved flags as they were */
+    *flags |= origFlags;
+  }
 }
 
 namespace RecordParsers
@@ -248,7 +272,7 @@ namespace RecordParsers
     }
 
     // NOLINTNEXTLINE(bugprone-suspicious-stringview-data-usage): length is passed in and used to read data
-    return makeComboAddressFromRaw(4, packet.substr(record.d_contentOffset, record.d_contentOffset + 4).data(), record.d_contentLength);
+    return makeComboAddressFromRaw(4, packet.substr(record.d_contentOffset, record.d_contentLength).data(), record.d_contentLength);
   }
 
   std::optional<ComboAddress> parseAAAARecord(const std::string_view& packet, const DNSPacketOverlay::Record& record)
@@ -258,19 +282,19 @@ namespace RecordParsers
     }
 
     // NOLINTNEXTLINE(bugprone-suspicious-stringview-data-usage): length is passed in and used to read data
-    return makeComboAddressFromRaw(6, packet.substr(record.d_contentOffset, record.d_contentOffset + 16).data(), record.d_contentLength);
+    return makeComboAddressFromRaw(6, packet.substr(record.d_contentOffset, record.d_contentLength).data(), record.d_contentLength);
   }
 
   std::optional<ComboAddress> parseAddressRecord(const std::string_view& packet, const DNSPacketOverlay::Record& record)
   {
     if (record.d_type == QType::A && record.d_contentLength == 4) {
       // NOLINTNEXTLINE(bugprone-suspicious-stringview-data-usage): length is passed in and used to read data
-      return makeComboAddressFromRaw(4, packet.substr(record.d_contentOffset, record.d_contentOffset + 4).data(), record.d_contentLength);
+      return makeComboAddressFromRaw(4, packet.substr(record.d_contentOffset, record.d_contentLength).data(), record.d_contentLength);
     }
 
     if (record.d_type == QType::AAAA && record.d_contentLength == 16) {
       // NOLINTNEXTLINE(bugprone-suspicious-stringview-data-usage): length is passed in and used to read data
-      return makeComboAddressFromRaw(6, packet.substr(record.d_contentOffset, record.d_contentOffset + 16).data(), record.d_contentLength);
+      return makeComboAddressFromRaw(6, packet.substr(record.d_contentOffset, record.d_contentLength).data(), record.d_contentLength);
     }
 
     return {};

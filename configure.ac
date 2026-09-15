@@ -63,8 +63,6 @@ AS_IF([test "x$enable_hardening" != "xno"], [
   AC_LD_RELRO
 ])
 
-PDNS_ENABLE_KISS
-
 PDNS_CHECK_NETWORK_LIBS
 
 
@@ -97,6 +95,7 @@ PDNS_CHECK_LIBCRYPTO([
 )
 PDNS_CHECK_LIBCRYPTO_ECDSA
 PDNS_CHECK_LIBCRYPTO_EDDSA
+PDNS_CHECK_LIBCRYPTO_MLDSA
 
 AM_CONDITIONAL([HAVE_GNUTLS], [false])
 AM_CONDITIONAL([HAVE_LIBSSL], [false])
@@ -131,8 +130,8 @@ PDNS_WITH_SQLITE3
 
 PDNS_CHECK_PYTHON_VENV
 
-AM_CONDITIONAL([HAVE_API_SWAGGER_JSON], [test -e "$srcdir/pdns/api-swagger.json"])
-AM_COND_IF([HAVE_API_SWAGGER_JSON],[],[
+AM_CONDITIONAL([HAVE_API_OPENAPI_JSON], [test -e "$srcdir/pdns/api-openapi.json"])
+AM_COND_IF([HAVE_API_OPENAPI_JSON],[],[
   AM_COND_IF([HAVE_VENV],[],[
     AC_MSG_ERROR([Python 3 and/or venv module are not available, Authoritative Server cannot be built.])
   ])
@@ -425,6 +424,10 @@ AS_IF([test "x$LIBSODIUM_LIBS" != "x" || test "x$libcrypto_ed25519" = "xyes"],
 AS_IF([test "x$libcrypto_ed448" = "xyes"],
   [AC_MSG_NOTICE([ed448: yes])],
   [AC_MSG_NOTICE([ed448: no])]
+)
+AS_IF([test "x$libcrypto_mldsa" = "xyes"],
+  [AC_MSG_NOTICE([mldsa: yes])],
+  [AC_MSG_NOTICE([mldsa: no])]
 )
 AS_IF([test "x$needsqlite3" != "x"],
   [AC_MSG_NOTICE([SQLite3: yes])],

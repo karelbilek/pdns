@@ -16,9 +16,6 @@ To use FrameStream transport, :program:`dnsdist` must have been built with `libf
   .. versionchanged:: 2.0.0
     Added ``connectionCount`` option.
 
-  .. versionchanged:: 1.5.0
-    Added the optional parameter ``options``.
-
   Create a Frame Stream Logger object, to use with :func:`DnstapLogAction` and :func:`DnstapLogResponseAction`.
   This version will log to a local AF_UNIX socket.
 
@@ -44,9 +41,6 @@ To use FrameStream transport, :program:`dnsdist` must have been built with `libf
   .. versionchanged:: 2.0.0
     Added ``connectionCount`` option.
 
-  .. versionchanged:: 1.5.0
-    Added the optional parameter ``options``.
-
   Create a Frame Stream Logger object, to use with :func:`DnstapLogAction` and :func:`DnstapLogResponseAction`.
   This version will log to a possibly remote TCP socket.
   Needs tcp_writer support in libfstrm.
@@ -68,16 +62,16 @@ To use FrameStream transport, :program:`dnsdist` must have been built with `libf
   * ``reopenInterval=0``: unsigned
   * ``connectionCount=1``: unsigned
 
-.. class:: DnstapMessage
+.. lua:class:: DnstapMessage
 
   This object represents a single dnstap message as emitted by :program:`dnsdist`.
 
-.. classmethod:: DnstapMessage:setExtra(extraData)
+  .. classmethod:: DnstapMessage:setExtra(extraData)
 
-  Sets the dnstap "extra" field.
+    Sets the dnstap "extra" field.
 
-  :param string extraData: Extra data stuffed into the dnstap "extra" field.
+    :param string extraData: Extra data stuffed into the dnstap "extra" field.
 
-.. classmethod:: DnstapMessage:toDebugString() -> string
+  .. classmethod:: DnstapMessage:toDebugString() -> string
 
-  Return a string containing the content of the message
+    Return a string containing the content of the message

@@ -50,6 +50,8 @@
 
 using namespace json11;
 
+bool g_slogStructured{false};
+
 StatBag S;
 static int g_numRecords;
 
@@ -171,8 +173,8 @@ try
             Json::object obj;
             Json::array recs;
             ZoneParserTNG zpt(i->filename, i->name, BP.getDirectory());
-            zpt.setMaxGenerateSteps(::arg().asNum("max-generate-steps"));
-            zpt.setMaxIncludes(::arg().asNum("max-include-depth"));
+            zpt.setMaxGenerateSteps(::arg().asNum<size_t>("max-generate-steps"));
+            zpt.setMaxIncludes(::arg().asNum<size_t>("max-include-depth"));
             DNSResourceRecord rr;
             obj["name"] = i->name.toString();
 
@@ -204,7 +206,7 @@ try
     }
     else {
       ZoneParserTNG zpt(zonefile, ZoneName(::arg()["zone-name"]));
-      zpt.setMaxGenerateSteps(::arg().asNum("max-generate-steps"));
+      zpt.setMaxGenerateSteps(::arg().asNum<size_t>("max-generate-steps"));
       DNSResourceRecord rr;
       string zname;
       Json::object obj;

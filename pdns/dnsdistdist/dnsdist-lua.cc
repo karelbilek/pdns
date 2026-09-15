@@ -20,18 +20,22 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 
+#include <boost/variant/variant.hpp>
 #include <cstdint>
 #include <cstdio>
 #include <dirent.h>
 #include <fstream>
 #include <cinttypes>
 
+#include <memory>
+#include <optional>
 #include <regex>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <thread>
 #include <vector>
 
+#include "dnsdist-opentelemetry.hh"
 #include "dnsdist.hh"
 #include "dnsdist-backend.hh"
 #include "dnsdist-cache.hh"
@@ -39,6 +43,7 @@
 #include "dnsdist-concurrent-connections.hh"
 #include "dnsdist-configuration.hh"
 #include "dnsdist-configuration-yaml.hh"
+#include "dnsdist-lua-bindings-opentelemetry.hh"
 #include "dnsdist-console.hh"
 #include "dnsdist-console-completion.hh"
 #include "dnsdist-crypto.hh"
@@ -51,6 +56,8 @@
 #include "dnsdist-logging.hh"
 #include "dnsdist-lua.hh"
 #include "dnsdist-lua-hooks.hh"
+#include "logging.hh"
+#include "logr.hh"
 #include "xsk.hh"
 #ifdef LUAJIT_VERSION
 #include "dnsdist-lua-ffi.hh"
@@ -86,6 +93,7 @@ using std::thread;
 
 using update_metric_opts_t = LuaAssociativeTable<boost::variant<uint64_t, LuaAssociativeTable<std::string>>>;
 using declare_metric_opts_t = LuaAssociativeTable<boost::variant<bool, std::string>>;
+using opentelemetry_opts_t = LuaAssociativeTable<boost::variant<size_t, LuaArray<std::shared_ptr<RemoteLoggerInterface>>>>;
 
 static boost::tribool s_noLuaSideEffect;
 
@@ -209,6 +217,7 @@ static void parseTLSConfig(TLSConfig& config, const std::string& context, std::o
 {
   getOptionalValue<std::string>(vars, "ciphers", config.d_ciphers);
   getOptionalValue<std::string>(vars, "ciphersTLS13", config.d_ciphers13);
+  getOptionalValue<std::string>(vars, "ecdheCurves", config.d_ecdheCurves);
 
 #ifdef HAVE_LIBSSL
   std::string minVersion;
@@ -272,7 +281,7 @@ void checkParameterBound(const std::string& parameter, uint64_t value, uint64_t 
   }
 }
 
-static void LuaThread(const std::string& code)
+static void LuaThread(const std::string& code, const size_t openTelemetryTraceInterval = 0, const std::vector<std::shared_ptr<RemoteLoggerInterface>>& remoteloggers = {})
 {
   setThreadName("dnsdist/lua-bg");
   LuaContext context;
@@ -302,10 +311,26 @@ static void LuaThread(const std::string& code)
 
   // function threadmessage(cmd, data) print("got thread data:", cmd) for k,v in pairs(data) do print(k,v) end end
 
+  size_t otCounter = 0;
   for (;;) {
     try {
-      dnsdist::configuration::refreshLocalRuntimeConfiguration();
-      context.executeCode(code);
+      auto config = dnsdist::configuration::refreshLocalRuntimeConfiguration();
+      std::shared_ptr<pdns::trace::dnsdist::Tracer> tracer = config.d_openTelemetryTracing && openTelemetryTraceInterval != 0 && otCounter % openTelemetryTraceInterval == 0 ? pdns::trace::dnsdist::Tracer::getTracer() : nullptr;
+
+      context.writeFunction("sendOpenTelemetryTrace", [&tracer, &otCounter, &config, &remoteloggers, openTelemetryTraceInterval]() {
+        pdns::trace::dnsdist::sendTracesToRemoteLoggers(tracer, remoteloggers);
+
+        otCounter++;
+        config = dnsdist::configuration::refreshLocalRuntimeConfiguration();
+        auto newTracer = config.d_openTelemetryTracing && openTelemetryTraceInterval != 0 && otCounter % openTelemetryTraceInterval == 0 ? pdns::trace::dnsdist::Tracer::getTracer() : nullptr;
+        tracer.swap(newTracer);
+      });
+
+      pdns::trace::dnsdist::runWithLuaTracing(context, tracer, [&context, tracer, code, remoteloggers]() {
+        // Why no root-closer? Because people probably want to do some setup before going into a main loop.
+        context.executeCode(code);
+      });
+      pdns::trace::dnsdist::sendTracesToRemoteLoggers(tracer, remoteloggers);
       SLOG(errlog("Lua thread exited, restarting in 5 seconds"),
            getLogger("LuaThread")->info(Logr::Error, "Lua thread exited, restarting in 5 seconds"));
     }
@@ -332,7 +357,7 @@ static bool checkConfigurationTime(const std::string& name)
   return false;
 }
 
-using newserver_t = LuaAssociativeTable<boost::variant<bool, std::string, LuaArray<std::string>, LuaArray<std::shared_ptr<XskSocket>>, DownstreamState::checkfunc_t>>;
+using newserver_t = LuaAssociativeTable<boost::variant<bool, std::string, LuaArray<std::string>, LuaArray<std::shared_ptr<XskSocket>>, DownstreamState::HealthCheckQueryGenerator>>;
 
 static void handleNewServerHealthCheckParameters(std::optional<newserver_t>& vars, DownstreamState::Config& config)
 {
@@ -356,7 +381,7 @@ static void handleNewServerHealthCheckParameters(std::optional<newserver_t>& var
 
   getOptionalValue<std::string>(vars, "checkType", config.checkType);
   getOptionalIntegerValue("newServer", vars, "checkClass", config.checkClass);
-  getOptionalValue<DownstreamState::checkfunc_t>(vars, "checkFunction", config.checkFunction);
+  getOptionalValue<DownstreamState::HealthCheckQueryGenerator>(vars, "checkFunction", config.d_healthCheckGenerationFunction);
   getOptionalIntegerValue("newServer", vars, "checkTimeout", config.checkTimeout);
   getOptionalValue<bool>(vars, "checkTCP", config.d_tcpCheck);
   getOptionalValue<bool>(vars, "setCD", config.setCD);
@@ -490,6 +515,7 @@ static void setupLuaConfig(LuaContext& luaCtx, bool client, bool configCheck)
                          }
 
                          getOptionalIntegerValue("newServer", vars, "maxInFlight", config.d_maxInFlightQueriesPerConn);
+                         getOptionalIntegerValue("newServer", vars, "maxOutstandingQueries", config.d_maxOutstandingQueries);
                          getOptionalIntegerValue("newServer", vars, "maxConcurrentTCPConnections", config.d_tcpConcurrentConnectionsLimit);
 
                          getOptionalValue<std::string>(vars, "name", config.name);
@@ -518,6 +544,7 @@ static void setupLuaConfig(LuaContext& luaCtx, bool client, bool configCheck)
                          std::shared_ptr<TLSCtx> tlsCtx;
                          getOptionalValue<std::string>(vars, "ciphers", config.d_tlsParams.d_ciphers);
                          getOptionalValue<std::string>(vars, "ciphers13", config.d_tlsParams.d_ciphers13);
+                         getOptionalValue<std::string>(vars, "ecdheCurves", config.d_tlsParams.d_ecdheCurves);
                          getOptionalValue<std::string>(vars, "caStore", config.d_tlsParams.d_caStore);
                          getOptionalValue<bool>(vars, "validateCertificates", config.d_tlsParams.d_validateCertificates);
                          getOptionalValue<bool>(vars, "releaseBuffers", config.d_tlsParams.d_releaseBuffers);
@@ -714,7 +741,7 @@ static void setupLuaConfig(LuaContext& luaCtx, bool client, bool configCheck)
                        });
 
   luaCtx.writeFunction("rmServer",
-                       [](boost::variant<std::shared_ptr<DownstreamState>, int, std::string> var) {
+                       [client, configCheck](boost::variant<std::shared_ptr<DownstreamState>, int, std::string> var) {
                          setLuaSideEffect();
                          shared_ptr<DownstreamState> server = nullptr;
                          if (auto* rem = boost::get<shared_ptr<DownstreamState>>(&var)) {
@@ -750,6 +777,11 @@ static void setupLuaConfig(LuaContext& luaCtx, bool client, bool configCheck)
                          dnsdist::configuration::updateRuntimeConfiguration([&server](dnsdist::configuration::RuntimeConfiguration& config) {
                            config.d_backends.erase(std::remove(config.d_backends.begin(), config.d_backends.end(), server), config.d_backends.end());
                          });
+
+                         if (!(client || configCheck)) {
+                           SLOG(infolog("Removed downstream server %s", server->d_config.remote.toStringWithPort()),
+                                getLogger("rmServer")->info(Logr::Info, "Removed downstream server", "backend.address", Logging::Loggable(server->d_config.remote)));
+                         }
 
                          server->stop();
                        });
@@ -805,8 +837,8 @@ static void setupLuaConfig(LuaContext& luaCtx, bool client, bool configCheck)
       }
 
       // only works pre-startup, so no sync necessary
-      auto udpCS = std::make_shared<ClientState>(loc, false, reusePort, tcpFastOpenQueueSize, interface, cpus, enableProxyProtocol);
-      auto tcpCS = std::make_shared<ClientState>(loc, true, reusePort, tcpFastOpenQueueSize, interface, cpus, enableProxyProtocol);
+      auto udpCS = std::make_shared<ClientState>(loc, false, reusePort, tcpFastOpenQueueSize, interface, cpus, enableProxyProtocol, false);
+      auto tcpCS = std::make_shared<ClientState>(loc, true, reusePort, tcpFastOpenQueueSize, interface, cpus, enableProxyProtocol, false);
       if (tcpListenQueueSize > 0) {
         tcpCS->tcpListenQueueSize = tcpListenQueueSize;
       }
@@ -866,8 +898,8 @@ static void setupLuaConfig(LuaContext& luaCtx, bool client, bool configCheck)
     try {
       ComboAddress loc(addr, 53);
       // only works pre-startup, so no sync necessary
-      auto udpCS = std::make_shared<ClientState>(loc, false, reusePort, tcpFastOpenQueueSize, interface, cpus, enableProxyProtocol);
-      auto tcpCS = std::make_shared<ClientState>(loc, true, reusePort, tcpFastOpenQueueSize, interface, cpus, enableProxyProtocol);
+      auto udpCS = std::make_shared<ClientState>(loc, false, reusePort, tcpFastOpenQueueSize, interface, cpus, enableProxyProtocol, false);
+      auto tcpCS = std::make_shared<ClientState>(loc, true, reusePort, tcpFastOpenQueueSize, interface, cpus, enableProxyProtocol, false);
       if (tcpListenQueueSize > 0) {
         tcpCS->tcpListenQueueSize = tcpListenQueueSize;
       }
@@ -1118,6 +1150,9 @@ static void setupLuaConfig(LuaContext& luaCtx, bool client, bool configCheck)
         g_outputBuffer = "Unable to bind to webserver socket on " + local.toStringWithPort() + ": " + e.what();
         SLOG(errlog("Unable to bind to webserver socket on %s: %s", local.toStringWithPort(), e.what()),
              getLogger("webserver")->error(Logr::Error, e.what(), "Error while trying to bind the web server socket", "network.local.address", Logging::Loggable(local)));
+        if (dnsdist::configuration::getCurrentRuntimeConfiguration().d_webserverBindFatal) {
+          _exit(EXIT_FAILURE);
+        }
       }
     }
   });
@@ -1141,6 +1176,7 @@ static void setupLuaConfig(LuaContext& luaCtx, bool client, bool configCheck)
       bool prometheusAddInstance{false};
       bool dashboardRequiresAuthentication{true};
       bool hashPlaintextCredentials = false;
+      bool allowCrossOriginRequests = false;
       getOptionalValue<bool>(vars, "hashPlaintextCredentials", hashPlaintextCredentials);
 
       if (getOptionalValue<std::string>(vars, "password", password) > 0) {
@@ -1185,6 +1221,10 @@ static void setupLuaConfig(LuaContext& luaCtx, bool client, bool configCheck)
 
       if (getOptionalValue<bool>(vars, "dashboardRequiresAuthentication", dashboardRequiresAuthentication) > 0) {
         config.d_dashboardRequiresAuthentication = dashboardRequiresAuthentication;
+      }
+
+      if (getOptionalValue<bool>(vars, "allowCrossOriginRequests", allowCrossOriginRequests) > 0) {
+        config.d_webServerAllowCrossOriginRequests = allowCrossOriginRequests;
       }
     });
 
@@ -1238,6 +1278,9 @@ static void setupLuaConfig(LuaContext& luaCtx, bool client, bool configCheck)
         g_outputBuffer = "Unable to bind to control socket on " + local.toStringWithPort() + ": " + exp.what();
         SLOG(errlog("Unable to bind to control socket on %s: %s", local.toStringWithPort(), exp.what()),
              getLogger("controlSocket")->error(Logr::Error, exp.what(), "Unable to bind to console's control socket", "network.local.address", Logging::Loggable(local)));
+        if (dnsdist::configuration::getCurrentRuntimeConfiguration().d_consoleBindFatal) {
+          _exit(EXIT_FAILURE);
+        }
       }
     }
   });
@@ -1599,7 +1642,7 @@ static void setupLuaConfig(LuaContext& luaCtx, bool client, bool configCheck)
       auto ctx = std::make_shared<DNSCryptContext>(providerName, certKeys);
 
       /* UDP */
-      auto clientState = std::make_shared<ClientState>(ComboAddress(addr, 443), false, reusePort, tcpFastOpenQueueSize, interface, cpus, enableProxyProtocol);
+      auto clientState = std::make_shared<ClientState>(ComboAddress(addr, 443), false, reusePort, tcpFastOpenQueueSize, interface, cpus, enableProxyProtocol, false);
       clientState->dnscryptCtx = ctx;
 
       dnsdist::configuration::updateImmutableConfiguration([&clientState](dnsdist::configuration::ImmutableConfiguration& config) {
@@ -1607,7 +1650,7 @@ static void setupLuaConfig(LuaContext& luaCtx, bool client, bool configCheck)
       });
 
       /* TCP */
-      clientState = std::make_shared<ClientState>(ComboAddress(addr, 443), true, reusePort, tcpFastOpenQueueSize, interface, cpus, enableProxyProtocol);
+      clientState = std::make_shared<ClientState>(ComboAddress(addr, 443), true, reusePort, tcpFastOpenQueueSize, interface, cpus, enableProxyProtocol, false);
       clientState->dnscryptCtx = std::move(ctx);
       if (tcpListenQueueSize > 0) {
         clientState->tcpListenQueueSize = tcpListenQueueSize;
@@ -1734,6 +1777,16 @@ static void setupLuaConfig(LuaContext& luaCtx, bool client, bool configCheck)
     if (client) {
       return std::make_shared<dnsdist::lua::LuaServerPoolObject>(poolName);
     }
+
+    {
+      const auto& config = dnsdist::configuration::getCurrentRuntimeConfiguration();
+      auto poolIt = config.d_pools.find(poolName);
+      if (poolIt != config.d_pools.end()) {
+        return std::make_shared<dnsdist::lua::LuaServerPoolObject>(poolName);
+      }
+    }
+
+    /* yes, we just checked, but there is room for a race where a different thread created it */
     bool created = false;
     dnsdist::configuration::updateRuntimeConfiguration([&poolName, &created](dnsdist::configuration::RuntimeConfiguration& config) {
       auto [_, inserted] = config.d_pools.emplace(poolName, ServerPool());
@@ -2299,6 +2352,7 @@ static void setupLuaConfig(LuaContext& luaCtx, bool client, bool configCheck)
     std::set<int> cpus;
     std::vector<std::pair<ComboAddress, int>> additionalAddresses;
     bool enableProxyProtocol = true;
+    bool padResponses = false;
 
     if (vars) {
       parseLocalBindVars(vars, reusePort, tcpFastOpenQueueSize, interface, cpus, tcpListenQueueSize, maxInFlightQueriesPerConn, tcpMaxConcurrentConnections, enableProxyProtocol);
@@ -2307,6 +2361,7 @@ static void setupLuaConfig(LuaContext& luaCtx, bool client, bool configCheck)
       getOptionalValue<std::string>(vars, "provider", frontend->d_tlsContext->d_provider);
       boost::algorithm::to_lower(frontend->d_tlsContext->d_provider);
       getOptionalValue<bool>(vars, "proxyProtocolOutsideTLS", frontend->d_tlsContext->d_proxyProtocolOutsideTLS);
+      getOptionalValue<bool>(vars, "padResponses", padResponses);
 
       LuaAssociativeTable<std::string> customResponseHeaders;
       if (getOptionalValue<decltype(customResponseHeaders)>(vars, "customResponseHeaders", customResponseHeaders) > 0) {
@@ -2375,7 +2430,7 @@ static void setupLuaConfig(LuaContext& luaCtx, bool client, bool configCheck)
       }
     }
 
-    auto clientState = std::make_shared<ClientState>(frontend->d_tlsContext->d_addr, true, reusePort, tcpFastOpenQueueSize, interface, cpus, enableProxyProtocol);
+    auto clientState = std::make_shared<ClientState>(frontend->d_tlsContext->d_addr, true, reusePort, tcpFastOpenQueueSize, interface, cpus, enableProxyProtocol, padResponses);
     clientState->dohFrontend = std::move(frontend);
     clientState->d_additionalAddresses = std::move(additionalAddresses);
 
@@ -2420,6 +2475,7 @@ static void setupLuaConfig(LuaContext& luaCtx, bool client, bool configCheck)
     std::set<int> cpus;
     std::vector<std::pair<ComboAddress, int>> additionalAddresses;
     bool enableProxyProtocol = true;
+    bool padResponses = false;
 
     if (vars) {
       parseLocalBindVars(vars, reusePort, tcpFastOpenQueueSize, interface, cpus, tcpListenQueueSize, maxInFlightQueriesPerConn, tcpMaxConcurrentConnections, enableProxyProtocol);
@@ -2429,6 +2485,8 @@ static void setupLuaConfig(LuaContext& luaCtx, bool client, bool configCheck)
       getOptionalValue<int>(vars, "internalPipeBufferSize", frontend->d_internalPipeBufferSize);
       getOptionalValue<int>(vars, "idleTimeout", frontend->d_quicheParams.d_idleTimeout);
       getOptionalValue<std::string>(vars, "keyLogFile", frontend->d_quicheParams.d_keyLogFile);
+      getOptionalValue<std::string>(vars, "qLogDir", frontend->d_quicheParams.d_qLogDir);
+      getOptionalValue<bool>(vars, "padResponses", padResponses);
       {
         std::string valueStr;
         if (getOptionalValue<std::string>(vars, "congestionControlAlgo", valueStr) > 0) {
@@ -2456,7 +2514,7 @@ static void setupLuaConfig(LuaContext& luaCtx, bool client, bool configCheck)
       checkAllParametersConsumed("addDOH3Local", vars);
     }
 
-    auto clientState = std::make_shared<ClientState>(frontend->d_local, false, reusePort, tcpFastOpenQueueSize, interface, cpus, enableProxyProtocol);
+    auto clientState = std::make_shared<ClientState>(frontend->d_local, false, reusePort, tcpFastOpenQueueSize, interface, cpus, enableProxyProtocol, padResponses);
     clientState->doh3Frontend = std::move(frontend);
     clientState->d_additionalAddresses = std::move(additionalAddresses);
 
@@ -2494,6 +2552,7 @@ static void setupLuaConfig(LuaContext& luaCtx, bool client, bool configCheck)
     std::set<int> cpus;
     std::vector<std::pair<ComboAddress, int>> additionalAddresses;
     bool enableProxyProtocol = true;
+    bool padResponses = false;
 
     if (vars) {
       parseLocalBindVars(vars, reusePort, tcpFastOpenQueueSize, interface, cpus, tcpListenQueueSize, maxInFlightQueriesPerConn, tcpMaxConcurrentConnections, enableProxyProtocol);
@@ -2503,6 +2562,8 @@ static void setupLuaConfig(LuaContext& luaCtx, bool client, bool configCheck)
       getOptionalValue<int>(vars, "internalPipeBufferSize", frontend->d_internalPipeBufferSize);
       getOptionalValue<int>(vars, "idleTimeout", frontend->d_quicheParams.d_idleTimeout);
       getOptionalValue<std::string>(vars, "keyLogFile", frontend->d_quicheParams.d_keyLogFile);
+      getOptionalValue<std::string>(vars, "qLogDir", frontend->d_quicheParams.d_qLogDir);
+      getOptionalValue<bool>(vars, "padResponses", padResponses);
       {
         std::string valueStr;
         if (getOptionalValue<std::string>(vars, "congestionControlAlgo", valueStr) > 0) {
@@ -2530,7 +2591,7 @@ static void setupLuaConfig(LuaContext& luaCtx, bool client, bool configCheck)
       checkAllParametersConsumed("addDOQLocal", vars);
     }
 
-    auto clientState = std::make_shared<ClientState>(frontend->d_local, false, reusePort, tcpFastOpenQueueSize, interface, cpus, enableProxyProtocol);
+    auto clientState = std::make_shared<ClientState>(frontend->d_local, false, reusePort, tcpFastOpenQueueSize, interface, cpus, enableProxyProtocol, padResponses);
     clientState->doqFrontend = std::move(frontend);
     clientState->d_additionalAddresses = std::move(additionalAddresses);
 
@@ -2683,6 +2744,19 @@ static void setupLuaConfig(LuaContext& luaCtx, bool client, bool configCheck)
   luaCtx.registerFunction<void (std::shared_ptr<DOH3Frontend>::*)()>("reloadCertificates", [](const std::shared_ptr<DOH3Frontend>& frontend) {
     if (frontend != nullptr) {
       frontend->reloadCertificates();
+    }
+  });
+
+  luaCtx.registerFunction<void (std::shared_ptr<DOH3Frontend>::*)(const LuaArray<std::shared_ptr<DOHResponseMapEntry>>&)>("setResponsesMap", [](const std::shared_ptr<DOH3Frontend>& frontend, const LuaArray<std::shared_ptr<DOHResponseMapEntry>>& map) {
+    if (frontend != nullptr) {
+      auto newMap = std::make_shared<std::vector<std::shared_ptr<DOHResponseMapEntry>>>();
+      newMap->reserve(map.size());
+
+      for (const auto& entry : map) {
+        newMap->push_back(entry.second);
+      }
+
+      frontend->d_responsesMap = std::move(newMap);
     }
   });
 #endif
@@ -2849,6 +2923,7 @@ static void setupLuaConfig(LuaContext& luaCtx, bool client, bool configCheck)
     std::set<int> cpus;
     std::vector<std::pair<ComboAddress, int>> additionalAddresses;
     bool enableProxyProtocol = true;
+    bool padResponses = false;
 
     if (vars) {
       parseLocalBindVars(vars, reusePort, tcpFastOpenQueueSize, interface, cpus, tcpListenQueueSize, maxInFlightQueriesPerConn, tcpMaxConcurrentConns, enableProxyProtocol);
@@ -2856,6 +2931,7 @@ static void setupLuaConfig(LuaContext& luaCtx, bool client, bool configCheck)
       getOptionalValue<std::string>(vars, "provider", frontend->d_provider);
       boost::algorithm::to_lower(frontend->d_provider);
       getOptionalValue<bool>(vars, "proxyProtocolOutsideTLS", frontend->d_proxyProtocolOutsideTLS);
+      getOptionalValue<bool>(vars, "padResponses", padResponses);
 
       LuaArray<std::string> addresses;
       if (getOptionalValue<decltype(addresses)>(vars, "additionalAddresses", addresses) > 0) {
@@ -2909,7 +2985,7 @@ static void setupLuaConfig(LuaContext& luaCtx, bool client, bool configCheck)
                     getLogger("addTLSLocal")->info(Logr::Info, "Loading default TLS provider for DoT frontend", "frontend.address", Logging::Loggable(addr), "tls.provider", Logging::Loggable(provider)));
       }
       // only works pre-startup, so no sync necessary
-      auto clientState = std::make_shared<ClientState>(frontend->d_addr, true, reusePort, tcpFastOpenQueueSize, interface, cpus, enableProxyProtocol);
+      auto clientState = std::make_shared<ClientState>(frontend->d_addr, true, reusePort, tcpFastOpenQueueSize, interface, cpus, enableProxyProtocol, padResponses);
       clientState->tlsFrontend = std::move(frontend);
       clientState->d_additionalAddresses = std::move(additionalAddresses);
       if (tcpListenQueueSize > 0) {
@@ -3083,7 +3159,7 @@ static void setupLuaConfig(LuaContext& luaCtx, bool client, bool configCheck)
     }
   });
 
-#if defined(HAVE_LIBSSL) && defined(HAVE_OCSP_BASIC_SIGN) && !defined(DISABLE_OCSP_STAPLING)
+#if defined(HAVE_LIBSSL) && !defined(DISABLE_OCSP_STAPLING)
   luaCtx.writeFunction("generateOCSPResponse", [client](const std::string& certFile, const std::string& caCert, const std::string& caKey, const std::string& outFile, int ndays, int nmin) {
     if (client) {
       return;
@@ -3091,7 +3167,7 @@ static void setupLuaConfig(LuaContext& luaCtx, bool client, bool configCheck)
 
     libssl_generate_ocsp_response(certFile, caCert, caKey, outFile, ndays, nmin);
   });
-#endif /* HAVE_LIBSSL && HAVE_OCSP_BASIC_SIGN && !DISABLE_OCSP_STAPLING */
+#endif /* HAVE_LIBSSL && !DISABLE_OCSP_STAPLING */
 
   luaCtx.writeFunction("addCapabilitiesToRetain", [](LuaTypeOrArrayOf<std::string> caps) {
     try {
@@ -3165,12 +3241,30 @@ static void setupLuaConfig(LuaContext& luaCtx, bool client, bool configCheck)
   });
 #endif /* HAVE_LIBSSL && OPENSSL_VERSION_MAJOR >= 3 && HAVE_TLS_PROVIDERS */
 
-  luaCtx.writeFunction("newThread", [client, configCheck](const std::string& code) {
+  luaCtx.writeFunction("newThread", [client, configCheck](const std::string& code, std::optional<opentelemetry_opts_t> otOpts) {
+    size_t openTelemetryTraceInterval{0};
+    LuaArray<std::shared_ptr<RemoteLoggerInterface>> remoteloggers;
+
+    getOptionalValue<size_t>(otOpts, "interval", openTelemetryTraceInterval);
+    getOptionalValue<LuaArray<std::shared_ptr<RemoteLoggerInterface>>>(otOpts, "remoteloggers", remoteloggers);
+    checkAllParametersConsumed("newThread", otOpts);
+
+    if (openTelemetryTraceInterval != 0 && remoteloggers.empty()) {
+      SLOG(warnlog("newThread called with an OpenTelemetry trace interval (%i), but no RemoteLoggers. No OpenTelemetry Traces can be sent", openTelemetryTraceInterval),
+           getLogger("declareMetric")->info(Logr::Warning, "newThread called with an OpenTelemetry trace interval, but no RemoteLoggers. No OpenTelemetry Traces can be sent", "interval", Logging::Loggable(openTelemetryTraceInterval)));
+    }
+
     if (client || configCheck) {
       return;
     }
-    std::thread newThread(LuaThread, code);
 
+    std::vector<std::shared_ptr<RemoteLoggerInterface>> loggers;
+    loggers.reserve(remoteloggers.size());
+    for (const auto& logger : remoteloggers) {
+      loggers.emplace_back(logger.second);
+    }
+
+    std::thread newThread(LuaThread, code, openTelemetryTraceInterval, loggers);
     newThread.detach();
   });
 
@@ -3183,7 +3277,7 @@ static void setupLuaConfig(LuaContext& luaCtx, bool client, bool configCheck)
         customName = std::optional(*optCustomName);
       }
       if (!customName) {
-        std::optional<declare_metric_opts_t> vars = {boost::get<declare_metric_opts_t>(opts.value())};
+        std::optional<declare_metric_opts_t> vars{boost::get<declare_metric_opts_t>(opts.value())};
         getOptionalValue<std::string>(vars, "customName", customName);
         getOptionalValue<bool>(vars, "withLabels", withLabels);
         checkAllParametersConsumed("declareMetric", vars);
@@ -3207,7 +3301,7 @@ static void setupLuaConfig(LuaContext& luaCtx, bool client, bool configCheck)
       step = *custom_step;
     }
     else {
-      std::optional<update_metric_opts_t> vars = {boost::get<update_metric_opts_t>(incOpts)};
+      std::optional<update_metric_opts_t> vars{boost::get<update_metric_opts_t>(incOpts)};
       getOptionalValue<uint64_t>(vars, "step", step);
       getOptionalValue<LuaAssociativeTable<std::string>>(vars, "labels", labels);
       checkAllParametersConsumed("incMetric", vars);
@@ -3230,7 +3324,7 @@ static void setupLuaConfig(LuaContext& luaCtx, bool client, bool configCheck)
       step = *custom_step;
     }
     else {
-      std::optional<update_metric_opts_t> vars = {boost::get<update_metric_opts_t>(decOpts)};
+      std::optional<update_metric_opts_t> vars{boost::get<update_metric_opts_t>(decOpts)};
       getOptionalValue<uint64_t>(vars, "step", step);
       getOptionalValue<LuaAssociativeTable<std::string>>(vars, "labels", labels);
       checkAllParametersConsumed("decMetric", vars);
@@ -3298,7 +3392,8 @@ void setupLuaBindingsOnly(LuaContext& luaCtx, bool client, bool configCheck)
   setupLuaBindingsDNSQuestion(luaCtx);
   setupLuaBindingsKVS(luaCtx, client);
   setupLuaBindingsLogging(luaCtx);
-  setupLuaBindingsNetwork(luaCtx, client);
+  setupLuaBindingsNetwork(luaCtx, client, configCheck);
+  setupLuaBindingsMMDB(luaCtx);
   setupLuaBindingsPacketCache(luaCtx, client);
   setupLuaBindingsProtoBuf(luaCtx, client, configCheck);
   setupLuaBindingsRings(luaCtx, client);
@@ -3306,6 +3401,7 @@ void setupLuaBindingsOnly(LuaContext& luaCtx, bool client, bool configCheck)
   setupLuaVars(luaCtx);
   setupLuaWeb(luaCtx);
   dnsdist::configuration::yaml::addLuaBindingsForYAMLObjects(luaCtx);
+  pdns::trace::dnsdist::emptyLuaTracing(luaCtx); // This sets up the withTraceSpan and setSpanAttribute functions as empty
 
 #ifdef LUAJIT_VERSION
   luaCtx.executeCode(getLuaFFIWrappers());

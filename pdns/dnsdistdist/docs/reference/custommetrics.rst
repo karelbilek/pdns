@@ -7,20 +7,15 @@ The first step is to declare a new metric using :func:`declareMetric`. In 1.8.0 
 
 Then you can update those at runtime using the following functions, depending on the metric type:
 
- * manipulate counters using :func:`incMetric` and  :func:`decMetric`
- * update a gauge using :func:`setMetric`
+* manipulate counters using :func:`incMetric` and  :func:`decMetric`
+* update a gauge using :func:`setMetric`
 
 .. function:: declareMetric(name, type, description [, prometheusName|options]) -> bool
-
-  .. versionadded:: 1.8.0
-
-  .. versionchanged:: 1.8.1
-    This function can now be used at runtime, instead of only at configuration time.
 
   .. versionchanged:: 2.0.0
     This function now takes options, with ``withLabels`` option added. ``prometheusName`` can now be provided in options.
 
- .. note::
+  .. note::
     Labels are only available for prometheus. Metrics with labels are otherwise ignored.
 
   Re-declaring an existing metric with the same name and type will not reset it.
@@ -41,15 +36,10 @@ Then you can update those at runtime using the following functions, depending on
 
 .. function:: incMetric(name [, step|options]) -> int
 
-  .. versionadded:: 1.8.0
-
-  .. versionchanged:: 1.8.1
-    Optional ``step`` parameter added.
-
   .. versionchanged:: 2.0.0
     This function now takes options, with ``labels`` option added. ``step`` can now be provided in options.
 
- .. note::
+  .. note::
     Labels are only available for prometheus. Metrics with labels are otherwise ignored.
 
   Increment counter by one (or more, see the ``step`` parameter), will issue an error if the metric is not declared or not a ``counter``.
@@ -67,15 +57,10 @@ Then you can update those at runtime using the following functions, depending on
 
 .. function:: decMetric(name [, step|options]) -> int
 
-  .. versionadded:: 1.8.0
-
-  .. versionchanged:: 1.8.1
-    Optional ``step`` parameter added.
-
   .. versionchanged:: 2.0.0
     This function now takes options, with ``labels`` option added. ``step`` can now be provided in options.
 
- .. note::
+  .. note::
     Labels are only available for prometheus. Metrics with labels are otherwise ignored.
 
   Decrement counter by one (or more, see the ``step`` parameter), will issue an error if the metric is not declared or not a ``counter``.
@@ -93,12 +78,7 @@ Then you can update those at runtime using the following functions, depending on
 
 .. function:: getMetric(name [, options]) -> double
 
-  .. versionadded:: 1.8.0
-
-  .. versionchanged:: 2.0.0
-    This function now takes options, with ``labels`` option added.
-
- .. note::
+  .. note::
     Labels are only available for prometheus. Metrics with labels are otherwise ignored.
 
   Get metric value.
@@ -112,12 +92,10 @@ Then you can update those at runtime using the following functions, depending on
 
 .. function:: setMetric(name, value [, options]) -> double
 
-  .. versionadded:: 1.8.0
-
   .. versionchanged:: 2.0.0
     This function now takes options, with ``labels`` option added.
 
- .. note::
+  .. note::
     Labels are only available for prometheus. Metrics with labels are otherwise ignored.
 
   Set the new value, will issue an error if the metric is not declared or not a ``gauge``.

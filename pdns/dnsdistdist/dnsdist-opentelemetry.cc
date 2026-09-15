@@ -21,20 +21,21 @@
  */
 
 #include "dnsdist-opentelemetry.hh"
-#include "misc.hh"
+#include "dnsdist-ecs.hh"
+#include "sanitizer.hh"
 
+#include <any>
+#include <memory>
 #include <vector>
 
 #ifndef DISABLE_PROTOBUF
+#include "protozero.hh"
 #include "protozero-trace.hh"
+#include "otlp_logger.hh"
 #endif
 
 namespace pdns::trace::dnsdist
 {
-
-#ifndef DISABLE_PROTOBUF
-static const KeyValue hostnameAttr{.key = "hostname", .value = {getHostname().value_or("")}};
-#endif
 
 TracesData Tracer::getTracesData()
 {
@@ -51,13 +52,11 @@ TracesData Tracer::getTracesData()
              {"service.name", {"dnsdist"}},
            }},
          .scope_spans = {{.scope = {
-                            .name = "dnsdist/queryFromFrontend",
+                            .name = data->scope_span_name,
                             .version = PACKAGE_VERSION,
                             .attributes = {data->d_attributes.cbegin(), data->d_attributes.cend()},
                           },
                           .spans = {}}}}}};
-
-    otTrace.resource_spans.at(0).scope_spans.at(0).scope.attributes.push_back(hostnameAttr);
 
     for (auto const& span : data->d_spans) {
       otTrace.resource_spans.at(0).scope_spans.at(0).spans.push_back(
@@ -66,7 +65,7 @@ TracesData Tracer::getTracesData()
           .span_id = span.span_id == data->d_oldAndNewRootSpanID.oldID ? data->d_oldAndNewRootSpanID.newID : span.span_id,
           .parent_span_id = span.parent_span_id == data->d_oldAndNewRootSpanID.oldID ? data->d_oldAndNewRootSpanID.newID : span.parent_span_id,
           .name = span.name,
-          .kind = pdns::trace::Span::SpanKind::SPAN_KIND_SERVER,
+          .kind = span.span_kind == Span::SpanKind::SPAN_KIND_UNSPECIFIED ? Span::SpanKind::SPAN_KIND_SERVER : span.span_kind,
           .start_time_unix_nano = span.start_time_unix_nano,
           .end_time_unix_nano = span.end_time_unix_nano,
           .attributes = span.attributes,
@@ -108,6 +107,7 @@ SpanID Tracer::addSpan([[maybe_unused]] const std::string& name, [[maybe_unused]
       .name = name,
       .span_id = spanID,
       .parent_span_id = parentSpanID,
+      .span_kind = Span::SpanKind::SPAN_KIND_UNSPECIFIED,
       .start_time_unix_nano = pdns::trace::timestamp(),
       .end_time_unix_nano = 0,
       .attributes = {},
@@ -152,6 +152,13 @@ void Tracer::setRootSpanID([[maybe_unused]] const SpanID& spanID)
 #endif
 }
 
+void Tracer::setScopeSpanName([[maybe_unused]] const std::string& name)
+{
+#ifndef DISABLE_PROTOBUF
+  d_data.lock()->scope_span_name = name;
+#endif
+}
+
 // TODO: Figure out what to do with duplicate keys
 bool Tracer::setTraceAttribute([[maybe_unused]] const std::string& key, [[maybe_unused]] const AnyValue& value)
 {
@@ -178,8 +185,15 @@ void Tracer::closeSpan([[maybe_unused]] const SpanID& spanID)
 
     // Only closers are allowed, so this can never happen
     assert(!data->d_spanIDStack.empty());
-    assert(data->d_spanIDStack.back() == spanID);
-    data->d_spanIDStack.pop_back();
+
+    // Preferably, we'd use d_spanIDStack.pop() after verifing that that back() is the correct spanID.
+    // It turns out that due to dnsdist's multi-threaded nature some backend receivers can create new
+    // spans when receiving backend responses before the closer in the frontend thread is destructed.
+    // So we find the SpanID in the stack and remove it.
+    auto stackIt = std::find(data->d_spanIDStack.begin(), data->d_spanIDStack.end(), spanID);
+    if (stackIt != data->d_spanIDStack.end()) {
+      data->d_spanIDStack.erase(stackIt);
+    }
   }
 #endif
 }
@@ -206,6 +220,20 @@ void Tracer::setSpanAttribute([[maybe_unused]] const SpanID& spanid, [[maybe_unu
 #endif
 }
 
+void Tracer::setSpanKind([[maybe_unused]] const SpanID& spanid, [[maybe_unused]] const SpanKind spankind)
+{
+#ifndef DISABLE_PROTOBUF
+  auto data = d_data.lock();
+  auto& spans = data->d_spans;
+  if (auto iter = std::find_if(spans.rbegin(),
+                               spans.rend(),
+                               [&spanid](const auto& span) { return span.span_id == spanid; });
+      iter != spans.rend()) {
+    iter->span_kind = spankind;
+  }
+#endif
+}
+
 SpanID Tracer::getRootSpanID()
 {
 #ifdef DISABLE_PROTOBUF
@@ -216,7 +244,7 @@ SpanID Tracer::getRootSpanID()
     return data->d_oldAndNewRootSpanID.newID;
   }
 
-  if (auto& spans = data->d_spans; !spans.empty()) {
+  if (const auto& spans = data->d_spans; !spans.empty()) {
     auto iter = std::find_if(spans.cbegin(), spans.cend(), [](const auto& span) { return span.parent_span_id == pdns::trace::s_emptySpanID; });
     if (iter != spans.cend()) {
       return iter->span_id;
@@ -248,7 +276,7 @@ SpanID Tracer::getLastSpanIDForName([[maybe_unused]] const std::string& name)
   return 0;
 #else
   auto data = d_data.read_only_lock();
-  if (auto& spans = data->d_spans; !spans.empty()) {
+  if (const auto& spans = data->d_spans; !spans.empty()) {
     if (auto iter = std::find_if(spans.rbegin(),
                                  spans.rend(),
                                  [name](const miniSpan& span) { return span.name == name; });
@@ -317,8 +345,123 @@ void Tracer::Closer::setAttribute([[maybe_unused]] const std::string& key, [[may
 #ifdef DISABLE_PROTOBUF
   return;
 #else
-  return d_tracer->setSpanAttribute(d_spanID, key, value);
+  d_tracer->setSpanAttribute(d_spanID, key, value);
 #endif
 }
 
+void Tracer::Closer::setKind([[maybe_unused]] const SpanKind spankind)
+{
+#ifdef DISABLE_PROTOBUF
+  return;
+#else
+  d_tracer->setSpanKind(d_spanID, spankind);
+#endif
+}
+
+std::vector<uint8_t> makeEDNSTraceParentOption([[maybe_unused]] const std::shared_ptr<Tracer>& tracer)
+{
+  std::vector<uint8_t> ret;
+#ifndef DISABLE_PROTOBUF
+  if (tracer == nullptr) {
+    return ret;
+  }
+  ret.reserve(27);
+  ret.push_back(0); // Version
+  ret.push_back(0); // Reserved
+  auto traceId = tracer->getTraceID();
+  ret.insert(ret.end(), traceId.begin(), traceId.end());
+  auto spanId = tracer->getLastSpanID();
+  ret.insert(ret.end(), spanId.begin(), spanId.end());
+  ret.push_back(0); // Flags
+#endif
+  return ret;
+}
+
+bool addTraceparentEdnsOptionToPacketBuffer([[maybe_unused]] PacketBuffer& origBuf, [[maybe_unused]] const std::shared_ptr<Tracer>& tracer, [[maybe_unused]] const size_t qnameWireLength, [[maybe_unused]] const size_t proxyProtocolPayloadSize, [[maybe_unused]] const uint16_t traceparentOptionCode, [[maybe_unused]] const bool isTCP)
+{
+#ifndef DISABLE_PROTOBUF
+  if (tracer == nullptr) {
+    return false;
+  }
+  // buf contains the whole DNS query without PROXY protocol and TCP length header
+  PacketBuffer buf{origBuf.begin() + proxyProtocolPayloadSize + (isTCP ? 2 : 0), origBuf.end()};
+
+  uint16_t optRDPosition{};
+  size_t remaining{};
+  bool queryHadEdns = ::dnsdist::getEDNSOptionsStart(buf, qnameWireLength, &optRDPosition, &remaining) == 0;
+  if (queryHadEdns) {
+    size_t optLen = buf.size() - optRDPosition - remaining;
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+    removeEDNSOptionFromOPT(reinterpret_cast<char*>(buf.data() + optRDPosition), &optLen, traceparentOptionCode);
+  }
+
+  auto opt = pdns::trace::dnsdist::makeEDNSTraceParentOption(tracer);
+  bool ednsAdded{false};
+  bool optionAdded{false};
+  uint16_t maxEdnsSize = queryHadEdns ? static_cast<uint16_t>(buf.at(optRDPosition - 6) << 8) + buf.at(optRDPosition - 5) : 512;
+  setEDNSOption(buf, traceparentOptionCode, std::string(opt.begin(), opt.end()), isTCP ? std::numeric_limits<uint16_t>::max() : maxEdnsSize, ednsAdded, optionAdded);
+
+  if (isTCP) {
+    const std::array<uint8_t, 2> sizeBytes{static_cast<uint8_t>(buf.size() / 256), static_cast<uint8_t>(buf.size() % 256)};
+    buf.insert(buf.begin(), sizeBytes.begin(), sizeBytes.end());
+  }
+
+  // Resize the buffer to remove the existing packet, but keep any PROXYv2 data
+  origBuf.resize(proxyProtocolPayloadSize);
+  // Insert the new query into the buffer
+  origBuf.insert(origBuf.end(), buf.begin(), buf.end());
+
+  return ednsAdded;
+#else
+  return false;
+#endif
+}
+
+std::optional<pdns::trace::dnsdist::Tracer::Closer> getCloserForInternalSpan([[maybe_unused]] std::shared_ptr<pdns::trace::dnsdist::Tracer>& tracer, [[maybe_unused]] const std::string& spanName)
+{
+#ifndef DISABLE_PROTOBUF
+  if (tracer != nullptr) {
+    auto ret = std::make_optional(tracer->openSpan(spanName));
+    ret->setKind(SpanKind::SPAN_KIND_INTERNAL);
+    return ret;
+  }
+#endif
+  return std::nullopt;
+}
+
+void sendTracesToRemoteLoggers(const std::shared_ptr<Tracer>& tracer, [[maybe_unused]] const std::vector<std::shared_ptr<RemoteLoggerInterface>>& remoteloggers)
+{
+  if (tracer == nullptr || remoteloggers.empty()) {
+    return;
+  }
+
+#ifndef DISABLE_PROTOBUF
+  static thread_local string pbBuf;
+  pbBuf.clear();
+
+  bool haveNonOTLPLogger = false;
+  for (const auto& remotelogger : remoteloggers) {
+    haveNonOTLPLogger = haveNonOTLPLogger || std::dynamic_pointer_cast<OTLPLogger>(remotelogger) == nullptr;
+    if (haveNonOTLPLogger) {
+      break;
+    }
+  }
+
+  pdns::ProtoZero::Message minimalMsg{pbBuf};
+  if (haveNonOTLPLogger) {
+    minimalMsg.setType(pdns::ProtoZero::Message::MessageType::InternalType);
+    minimalMsg.setOpenTelemetryTraceID(tracer->getTraceID());
+    minimalMsg.setOpenTelemetryData(tracer->getOTProtobuf());
+  }
+
+  for (const auto& remotelogger : remoteloggers) {
+    if (std::dynamic_pointer_cast<OTLPLogger>(remotelogger) != nullptr) {
+      std::dynamic_pointer_cast<OTLPLogger>(remotelogger)->queueData(tracer->getTracesData());
+    }
+    else {
+      remotelogger->queueData(pbBuf);
+    }
+  }
+#endif // DISABLE_PROTOBUF
+}
 } // namespace pdns::trace::dnsdist

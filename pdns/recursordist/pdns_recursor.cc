@@ -32,6 +32,7 @@
 #include "validate-recursor.hh"
 #include "ratelimitedlog.hh"
 #include "ednsoptions.hh"
+#include "sanitizer.hh"
 
 #ifdef HAVE_SYSTEMD
 #include <systemd/sd-daemon.h>
@@ -48,7 +49,7 @@ thread_local FDWrapper t_tracefd = -1;
 thread_local ProtobufServersInfo t_protobufServers;
 thread_local ProtobufServersInfo t_outgoingProtobufServers;
 
-thread_local std::unique_ptr<MT_t> g_multiTasker; // the big MTasker
+thread_local std::unique_ptr<MT_t> t_multiTasker; // the big MTasker
 std::unique_ptr<MemRecursorCache> g_recCache;
 std::unique_ptr<NegCache> g_negCache;
 std::unique_ptr<RecursorPacketCache> g_packetCache;
@@ -99,9 +100,9 @@ GlobalStateHolder<NetmaskGroup> g_dontThrottleNetmasks;
 GlobalStateHolder<SuffixMatchNode> g_DoTToAuthNames;
 uint64_t g_latencyStatSize;
 
-LWResult::Result UDPClientSocks::getSocket(const ComboAddress& toaddr, const std::optional<ComboAddress>& localAddress, int* fileDesc)
+LWResult::Result UDPClientSocks::getSocket(const ComboAddress& toaddr, const std::optional<pdns::AddressAndInterface>& localAddress, std::optional<pdns::Interface>& interface, int* fileDesc)
 {
-  *fileDesc = makeClientSocket(toaddr.sin4.sin_family, localAddress);
+  *fileDesc = makeClientSocket(toaddr.sin4.sin_family, localAddress, interface);
   if (*fileDesc < 0) { // temporary error - receive exception otherwise
     return LWResult::Result::OSLimitError;
   }
@@ -147,7 +148,7 @@ void UDPClientSocks::returnSocket(int fileDesc)
 }
 
 // returns -1 for errors which might go away, throws for ones that won't
-int UDPClientSocks::makeClientSocket(int family, const std::optional<ComboAddress>& localAddress)
+int UDPClientSocks::makeClientSocket(int family, const std::optional<pdns::AddressAndInterface>& localAddress, std::optional<pdns::Interface>& interface)
 {
   int ret = socket(family, SOCK_DGRAM, 0); // turns out that setting CLO_EXEC and NONBLOCK from here is not a performance win on Linux (oddly enough)
 
@@ -166,7 +167,7 @@ int UDPClientSocks::makeClientSocket(int family, const std::optional<ComboAddres
 #else
   int tries = 2; // hit the reliable kernel random case for OpenBSD immediately (because it will match tries==1 below), using sysctl net.inet.udp.baddynamic to exclude ports
 #endif
-  ComboAddress sin;
+  pdns::AddressAndInterface sin;
   while (--tries != 0) {
     in_port_t port = 0;
 
@@ -183,12 +184,23 @@ int UDPClientSocks::makeClientSocket(int family, const std::optional<ComboAddres
     // associated with (RFC 9018 section 3 last paragraph)
     if (localAddress) {
       sin = *localAddress;
-      sin.setPort(port);
+      sin.d_address.setPort(port);
     }
     else {
       sin = pdns::getQueryLocalAddress(family, port); // does htons for us
     }
-    if (::bind(ret, reinterpret_cast<struct sockaddr*>(&sin), sin.getSocklen()) >= 0) { // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+    if (::bind(ret, reinterpret_cast<struct sockaddr*>(&sin.d_address), sin.d_address.getSocklen()) >= 0) { // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast
+      if (sin.d_interface) {
+#ifdef SO_BINDTODEVICE
+        const auto& name = sin.d_interface->d_name;
+        int res = setsockopt(ret, SOL_SOCKET, SO_BINDTODEVICE, name.data(), name.length());
+        if (res != 0) {
+          int err = errno;
+          throw PDNSException("Resolver binding to interface " + name + ": " + stringerror(err));
+        }
+#endif
+        interface = sin.d_interface;
+      }
       break;
     }
   }
@@ -197,7 +209,7 @@ int UDPClientSocks::makeClientSocket(int family, const std::optional<ComboAddres
 
   if (tries == 0) {
     closesocket(ret);
-    throw PDNSException("Resolver binding to local query client socket on " + sin.toString() + ": " + stringerror(err));
+    throw PDNSException("Resolver binding to local query client socket on " + sin.d_address.toString() + ": " + stringerror(err));
   }
 
   try {
@@ -227,11 +239,11 @@ static void handleGenUDPQueryResponse(int fileDesc, FDMultiplexer::funcparam_t& 
   t_fdm->removeReadFD(fileDesc);
   if (ret >= 0) {
     resp.resize(ret);
-    g_multiTasker->sendEvent(pident, &resp);
+    t_multiTasker->sendEvent(pident, &resp);
   }
   else {
     PacketBuffer empty;
-    g_multiTasker->sendEvent(pident, &empty);
+    t_multiTasker->sendEvent(pident, &empty);
   }
 }
 
@@ -239,7 +251,7 @@ PacketBuffer GenUDPQueryResponse(const ComboAddress& dest, const string& query)
 {
   Socket socket(dest.sin4.sin_family, SOCK_DGRAM);
   socket.setNonBlocking();
-  ComboAddress local = pdns::getQueryLocalAddress(dest.sin4.sin_family, 0);
+  ComboAddress local = pdns::getQueryLocalAddress(dest.sin4.sin_family, 0).d_address;
 
   socket.bind(local);
   socket.connect(dest);
@@ -252,7 +264,7 @@ PacketBuffer GenUDPQueryResponse(const ComboAddress& dest, const string& query)
   t_fdm->addReadFD(socket.getHandle(), handleGenUDPQueryResponse, pident);
 
   PacketBuffer data;
-  int ret = g_multiTasker->waitEvent(pident, &data, authWaitTimeMSec(g_multiTasker));
+  int ret = t_multiTasker->waitEvent(pident, &data, authWaitTimeMSec(t_multiTasker));
 
   if (ret == 0 || ret == -1) { // timeout
     t_fdm->removeReadFD(socket.getHandle());
@@ -284,7 +296,7 @@ unsigned int authWaitTimeMSec(const std::unique_ptr<MT_t>& mtasker)
 
 /* these two functions are used by LWRes */
 LWResult::Result asendto(const void* data, size_t len,
-                         const ComboAddress& toAddress, std::optional<ComboAddress>& localAddress, uint16_t qid, const DNSName& domain, uint16_t qtype, const std::optional<EDNSSubnetOpts>& ecs, int* fileDesc, timeval& now)
+                         const ComboAddress& toAddress, std::optional<pdns::AddressAndInterface>& localAddress, uint16_t qid, const DNSName& domain, uint16_t qtype, const std::optional<EDNSSubnetOpts>& ecs, int* fileDesc, timeval& now)
 {
 
   auto pident = std::make_shared<PacketID>();
@@ -298,7 +310,7 @@ LWResult::Result asendto(const void* data, size_t len,
   // See if there is an existing outstanding request we can chain on to, using partial equivalence
   // function looking for the same query (qname, qtype and ecs if applicable) to the same host, but
   // with a different message ID.
-  auto chain = g_multiTasker->getWaiters().equal_range(pident, PacketIDBirthdayCompare());
+  auto chain = t_multiTasker->getWaiters().equal_range(pident, PacketIDBirthdayCompare());
 
   for (; chain.first != chain.second; chain.first++) {
     // Line below detected an issue with the two ways of ordering PacketIDs (birthday and non-birthday)
@@ -312,7 +324,7 @@ LWResult::Result asendto(const void* data, size_t len,
       }
       assert(uSec(chain.first->key->creationTime) != 0); // NOLINT
       auto age = now - chain.first->key->creationTime;
-      if (uSec(age) > static_cast<uint64_t>(1000) * authWaitTimeMSec(g_multiTasker) * 2 / 3) {
+      if (uSec(age) > static_cast<uint64_t>(1000) * authWaitTimeMSec(t_multiTasker) * 2 / 3) {
         return LWResult::Result::ChainLimitError;
       }
       chain.first->key->authReqChain.emplace(*fileDesc, qid); // we can chain
@@ -324,7 +336,8 @@ LWResult::Result asendto(const void* data, size_t len,
     }
   }
 
-  auto ret = t_udpclientsocks->getSocket(toAddress, localAddress, fileDesc);
+  std::optional<pdns::Interface> interface;
+  auto ret = t_udpclientsocks->getSocket(toAddress, localAddress, interface, fileDesc);
   if (ret != LWResult::Result::Success) {
     return ret;
   }
@@ -333,12 +346,30 @@ LWResult::Result asendto(const void* data, size_t len,
   pident->id = qid;
 
   t_fdm->addReadFD(*fileDesc, handleUDPServerResponse, pident);
-  ssize_t sent = send(*fileDesc, data, len, 0);
-  if (sent < 0) {
-    int tmp = errno;
-    t_udpclientsocks->returnSocket(*fileDesc);
-    errno = tmp; // this is for logging purposes only
-    return LWResult::Result::PermanentError;
+  if (!interface) {
+    auto sent = send(*fileDesc, data, len, 0);
+    if (sent < 0) {
+      int tmp = errno;
+      t_udpclientsocks->returnSocket(*fileDesc);
+      errno = tmp; // this is for logging purposes only
+      return LWResult::Result::PermanentError;
+    }
+  }
+  else {
+    ComboAddress local;
+    if (localAddress) {
+      local = localAddress->d_address;
+    }
+    else {
+      local.sin4.sin_family = toAddress.sin4.sin_family;
+    }
+
+    auto sendRet = sendMsgWithOptions(*fileDesc, data, len, nullptr, &local, interface->d_index, 0);
+    if (!sendRet.has_value()) {
+      t_udpclientsocks->returnSocket(*fileDesc);
+      errno = sendRet.error(); // this is for logging purposes only
+      return LWResult::Result::PermanentError;
+    }
   }
 
   return LWResult::Result::Success;
@@ -349,7 +380,7 @@ static bool checkIncomingECSSource(const PacketBuffer& packet, const Netmask& su
 LWResult::Result arecvfrom(PacketBuffer& packet, const ComboAddress& fromAddr, size_t& len,
                            uint16_t qid, const DNSName& domain, uint16_t qtype, int fileDesc, const std::optional<EDNSSubnetOpts>& ecs, const struct timeval& now)
 {
-  static const unsigned int nearMissLimit = ::arg().asNum("spoof-nearmiss-max");
+  static const auto nearMissLimit = ::arg().asNum<unsigned int>("spoof-nearmiss-max");
 
   auto pident = std::make_shared<PacketID>();
   pident->fd = fileDesc;
@@ -365,7 +396,7 @@ LWResult::Result arecvfrom(PacketBuffer& packet, const ComboAddress& fromAddr, s
     // We fill in the search key with the ecs we sent out, so both cases are covered and accepted here.
     pident->ecsSubnet = ecs->getSource();
   }
-  int ret = g_multiTasker->waitEvent(pident, &packet, authWaitTimeMSec(g_multiTasker), &now);
+  int ret = t_multiTasker->waitEvent(pident, &packet, authWaitTimeMSec(t_multiTasker), &now);
   len = 0;
 
   /* -1 means error, 0 means timeout, 1 means a result from handleUDPServerResponse() which might still be an error */
@@ -701,6 +732,9 @@ int followCNAMERecords(vector<DNSRecord>& ret, const QType qtype, int rcode)
 {
   vector<DNSRecord> resolved;
   DNSName target;
+  // Docs do not specify *which* CNAME is picked. We take the first
+  // and do not mind the section. Maybe the last in the answer section
+  // would be what users expect?
   for (const DNSRecord& record : ret) {
     if (record.d_type == QType::CNAME) {
       auto rec = getRR<CNAMERecordContent>(record);
@@ -796,6 +830,24 @@ int getFakeAAAARecords(const DNSName& qname, ComboAddress prefix, vector<DNSReco
   return rcode;
 }
 
+static std::pair<uint8_t, bool> parseNibble(const std::string& label)
+{
+  if (label.size() != 1) {
+    return {0, false};
+  }
+  auto digit = label[0];
+  if (digit >= '0' && digit <= '9') {
+    return {digit - '0', true};
+  }
+  if (digit >= 'a' && digit <= 'f') {
+    return {digit - 'a' + 10, true};
+  }
+  if (digit >= 'A' && digit <= 'F') {
+    return {digit - 'A' + 10, true};
+  }
+  return {0, false};
+}
+
 int getFakePTRRecords(const DNSName& qname, vector<DNSRecord>& ret)
 {
   /* qname has a reverse ordered IPv6 address, need to extract the underlying IPv4 address from it
@@ -809,8 +861,16 @@ int getFakePTRRecords(const DNSName& qname, vector<DNSRecord>& ret)
 
   string newquery;
   for (size_t octet = 0; octet < 4; ++octet) {
-    newquery += std::to_string(stoll(parts[octet * 2], nullptr, 16) + 16 * stoll(parts[octet * 2 + 1], nullptr, 16));
-    newquery.append(1, '.');
+    auto [value1, valid1] = parseNibble(parts[octet * 2]);
+    if (!valid1) {
+      return RCode::ServFail;
+    }
+    auto [value2, valid2] = parseNibble(parts[(octet * 2) + 1]);
+    if (!valid2) {
+      return RCode::ServFail;
+    }
+    newquery += std::to_string(value1 + (value2 * 16));
+    newquery += '.';
   }
   newquery += "in-addr.arpa.";
 
@@ -902,7 +962,7 @@ static void dumpTrace(const string& trace, const timeval& timev)
     return;
   }
   timeval now{};
-  Utility::gettimeofday(&now);
+  gettimeofday(&now, nullptr);
   int traceFd = dup(t_tracefd);
   if (traceFd == -1) {
     int err = errno;
@@ -961,6 +1021,64 @@ static void addPolicyTagsToPBMessageIfNeeded(DNSComboWriter& comboWriter, pdns::
   if (!comboWriter.d_policyTags.empty()) {
     pbMessage.addPolicyTags(comboWriter.d_policyTags);
   }
+}
+
+static RecursorPacketCache::ECSInfo findScopeZero(const std::vector<uint8_t>& response)
+{
+  uint16_t optRR{};
+  size_t optLen{};
+  bool last{};
+  auto ret = locateEDNSOptRR(response, &optRR, &optLen, &last);
+  if (ret != 0) {
+    return {0, 0};
+  }
+
+  // Root + EDNS record fixed part + ttl
+  optRR += 1 + sizeof(EDNS0Record) + DNS_TTL_SIZE;
+
+  if (optRR >= response.size()) {
+    return {0, 0};
+  }
+  size_t pos{};
+  size_t size{};
+  ret = getEDNSOption(reinterpret_cast<const char*>(&response.at(optRR)), response.size(), EDNSOptionCode::ECS, &pos, &size);
+  if (ret != 0) {
+    return {0, 0};
+  }
+  // pos is relative to optRR
+  pos += optRR;
+  // skip option code;
+  pos += 2;
+
+  //cerr << "Found " << size << ' ' << makeHexDump(string(&response.at(pos), size)) << endl;
+  // Size includes optioncode and length, total 4 bytes
+  if (size < 4) {
+    return {0, 0};
+  }
+  size_t ecsLen = size - 4;
+
+  return {pos, ecsLen};
+}
+
+static void substituteScopeZero(std::string& response, RecursorPacketCache::ECSInfo ecsInfo, const std::string& ecsPayload)
+{
+  auto [pos, ecsLen] = ecsInfo;
+  // We only do the case where the substitute is exactly the same size as the original stored in the PC
+  if (ecsLen != ecsPayload.size()) {
+    return;
+  }
+  // Skip option length
+  pos += 2;
+  // Belt plus suspenders
+  if (pos + ecsLen > response.size()) {
+    //cerr << "Y " << pos << ' ' << ecsLen << ' ' << response.size() << endl;
+    return;
+  }
+  // XXX Do we need to check family?
+  //cerr << "Foun2 " << ecsLen << ' ' << makeHexDump(string(&response.at(pos), ecsLen)) << endl;
+  //cerr << "Paylo " << ecsPayload.size() << ' ' << makeHexDump(ecsPayload) << endl;
+  response.replace(pos, ecsLen, ecsPayload);
+  //cerr << "After " << ecsLen << ' ' << makeHexDump(string(&response.at(pos), ecsLen)) << endl;
 }
 
 void startDoResolve(void* arg) // NOLINT(readability-function-cognitive-complexity): https://github.com/PowerDNS/pdns/issues/12791
@@ -1077,7 +1195,7 @@ void startDoResolve(void* arg) // NOLINT(readability-function-cognitive-complexi
 
     resolver.d_eventTrace = std::move(comboWriter->d_eventTrace);
     resolver.d_otTrace = std::move(comboWriter->d_otTrace);
-    resolver.setId(g_multiTasker->getTid());
+    resolver.setId(t_multiTasker->getTid());
 
     bool DNSSECOK = false;
     if (comboWriter->d_luaContext) {
@@ -1169,10 +1287,11 @@ void startDoResolve(void* arg) // NOLINT(readability-function-cognitive-complexi
 
     resolver.d_slog = resolver.d_slog->withValues("qname", Logging::Loggable(comboWriter->d_mdp.d_qname),
                                                   "qtype", Logging::Loggable(QType(comboWriter->d_mdp.d_qtype)),
-                                                  "remote", Logging::Loggable(comboWriter->getRemote()),
+                                                  "remote", Logging::Loggable(comboWriter->d_remote),
+                                                  "source", Logging::Loggable(comboWriter->d_source),
                                                   "proto", Logging::Loggable(comboWriter->d_tcp ? "tcp" : "udp"),
                                                   "ecs", Logging::Loggable(comboWriter->d_ednssubnet.getSource().empty() ? "" : comboWriter->d_ednssubnet.getSource().toString()),
-                                                  "mtid", Logging::Loggable(g_multiTasker->getTid()));
+                                                  "mtid", Logging::Loggable(t_multiTasker->getTid()));
     RunningResolveGuard tcpGuard(comboWriter);
 
     if (ednsExtRCode != 0 || comboWriter->d_mdp.d_header.opcode == static_cast<unsigned>(Opcode::Notify)) {
@@ -1215,6 +1334,7 @@ void startDoResolve(void* arg) // NOLINT(readability-function-cognitive-complexi
 
       if (luaconfsLocal->dfe.getClientPolicy(comboWriter->d_source, resolver.d_discardedPolicies, appliedPolicy)) {
         mergePolicyTags(comboWriter->d_policyTags, appliedPolicy.getTags());
+        variableAnswer = true;
       }
     }
 
@@ -1536,11 +1656,12 @@ void startDoResolve(void* arg) // NOLINT(readability-function-cognitive-complexi
 #endif /* NOD ENABLED */
 
         if (t_protobufServers.servers) {
-          // Max size is 64k, but we're conservative here, as other fields are added after the answers have been added
-          // If a single answer causes a too big protobuf message, it will be dropped by queueData()
-          // But note addRR has code to prevent that
-          if (pbMessage.size() < std::numeric_limits<uint16_t>::max() / 2) {
-            pbMessage.addRR(record, luaconfsLocal->protobufExportConfig.exportTypes, udr);
+          // Max size is 64k for 2 bytes frames, but we're conservative here, as other fields are
+          // added after the answers have been added. If a single answer causes a too big protobuf
+          // message, it will be dropped by queueData(), but note addRR has code to prevent that.
+          const auto limit = (t_protobufServers.servers->size() > 0 ? t_protobufServers.servers->at(0)->maxSize() : std::numeric_limits<uint16_t>::max()) / 2;
+          if (pbMessage.size() < limit) {
+            pbMessage.addRR(record, luaconfsLocal->protobufExportConfig.exportTypes, udr, limit);
           }
         }
       }
@@ -1574,6 +1695,9 @@ void startDoResolve(void* arg) // NOLINT(readability-function-cognitive-complexi
   sendit:;
 
     if (g_useIncomingECS && comboWriter->d_ecsFound && !resolver.wasVariable() && !variableAnswer) {
+      // Later we remember the offset and size of the ECS option added in the packet cache, so we
+      // can more easily subsititute the then current client specific ECS data after retrieval from
+      // the packet cache.
       EDNSSubnetOpts ednsOptions;
       ednsOptions.setSource(comboWriter->d_ednssubnet.getSource());
       ComboAddress sourceAddr;
@@ -1589,30 +1713,6 @@ void startDoResolve(void* arg) // NOLINT(readability-function-cognitive-complexi
         maxanswersize -= EDNSOptionCodeSize + EDNSOptionLengthSize + ecsPayload.size();
 
         returnedEdnsOptions.emplace_back(EDNSOptionCode::ECS, std::move(ecsPayload));
-      }
-    }
-
-    if (haveEDNS && addPaddingToResponse) {
-      size_t currentSize = packetWriter.getSizeWithOpts(returnedEdnsOptions);
-      /* we don't use maxawnswersize because it accounts for some EDNS options, but
-         not all of them (for example ECS) */
-      size_t maxSize = min(static_cast<uint16_t>(edo.d_packetsize >= 512 ? edo.d_packetsize : 512), g_udpTruncationThreshold);
-
-      if (currentSize < (maxSize - 4)) {
-        size_t remaining = maxSize - (currentSize + 4);
-        /* from rfc8647, "4.1.  Recommended Strategy: Block-Length Padding":
-           If a server receives a query that includes the EDNS(0) "Padding"
-           option, it MUST pad the corresponding response (see Section 4 of
-           RFC 7830) and SHOULD pad the corresponding response to a
-           multiple of 468 octets (see below).
-        */
-        const size_t blockSize = 468;
-        size_t modulo = (currentSize + 4) % blockSize;
-        size_t padSize = 0;
-        if (modulo > 0) {
-          padSize = std::min(blockSize - modulo, remaining);
-        }
-        returnedEdnsOptions.emplace_back(EDNSOptionCode::PADDING, makeEDNSPaddingOptString(padSize));
       }
     }
 
@@ -1684,6 +1784,30 @@ void startDoResolve(void* arg) // NOLINT(readability-function-cognitive-complexi
 
         if (packetWriter.size() < maxanswersize && (maxanswersize - packetWriter.size()) >= (EDNSOptionCodeSize + EDNSOptionLengthSize + sizeof(EDNSExtendedError::code) + eee->extraText.size())) {
           returnedEdnsOptions.emplace_back(EDNSOptionCode::EXTENDEDERROR, makeEDNSExtendedErrorOptString(*eee));
+        }
+      }
+
+      if (addPaddingToResponse) {
+        size_t currentSize = packetWriter.getSizeWithOpts(returnedEdnsOptions);
+        /* we don't use maxawnswersize because it accounts for some EDNS options, but
+           not all of them (for example ECS) */
+        size_t maxSize = min(static_cast<uint16_t>(edo.d_packetsize >= 512 ? edo.d_packetsize : 512), g_udpTruncationThreshold);
+
+        if (currentSize < (maxSize - 4)) {
+          size_t remaining = maxSize - (currentSize + 4);
+          /* from rfc8647, "4.1.  Recommended Strategy: Block-Length Padding":
+             If a server receives a query that includes the EDNS(0) "Padding"
+             option, it MUST pad the corresponding response (see Section 4 of
+             RFC 7830) and SHOULD pad the corresponding response to a
+             multiple of 468 octets (see below).
+          */
+          const size_t blockSize = 468;
+          size_t modulo = (currentSize + 4) % blockSize;
+          size_t padSize = 0;
+          if (modulo > 0) {
+            padSize = std::min(blockSize - modulo, remaining);
+          }
+          returnedEdnsOptions.emplace_back(EDNSOptionCode::PADDING, makeEDNSPaddingOptString(padSize));
         }
       }
 
@@ -1765,13 +1889,19 @@ void startDoResolve(void* arg) // NOLINT(readability-function-cognitive-complexi
     const bool intoPC = g_packetCache && !variableAnswer && !resolver.wasVariable() && (RecursorPacketCache::s_maxEntrySize == 0 || packet.size() <= RecursorPacketCache::s_maxEntrySize);
     if (intoPC) {
       minTTL = capPacketCacheTTL(*packetWriter.getHeader(), minTTL, seenAuthSOA);
+      // If we are adding ECS info, remember the offset and size in the PC
+      RecursorPacketCache::ECSInfo ecsInfo{};
+      if (g_useIncomingECS && comboWriter->d_ecsFound) {
+        ecsInfo = findScopeZero(packet);
+      }
+
       g_packetCache->insertResponsePacket(comboWriter->d_tag, comboWriter->d_qhash, std::move(comboWriter->d_query), comboWriter->d_mdp.d_qname,
                                           comboWriter->d_mdp.d_qtype, comboWriter->d_mdp.d_qclass,
                                           string(reinterpret_cast<const char*>(&*packet.begin()), packet.size()), // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
                                           g_now.tv_sec,
                                           minTTL,
                                           dnsQuestion.validationState,
-                                          std::move(pbDataForCache), comboWriter->d_tcp);
+                                          std::move(pbDataForCache), comboWriter->d_tcp, ecsInfo);
     }
 
     if (g_regressionTestMode) {
@@ -1795,7 +1925,7 @@ void startDoResolve(void* arg) // NOLINT(readability-function-cognitive-complexi
       }
     }
     else {
-      bool hadError = sendResponseOverTCP(comboWriter, packet);
+      bool hadError = sendResponseOverTCP(comboWriter, packet, g_slogtcpin);
       finishTCPReply(comboWriter, hadError, true);
       tcpGuard.setHandled();
     }
@@ -1875,7 +2005,7 @@ void startDoResolve(void* arg) // NOLINT(readability-function-cognitive-complexi
         pbMessage.setOpenTelemetryTraceID(resolver.d_otTrace.trace_id);
       }
       if (comboWriter->d_logResponse) {
-        protobufLogResponse(pbMessage);
+        protobufLogResponse(pbMessage, comboWriter->d_mdp.d_qname, luaconfsLocal->protobufExportConfig.logMappedFrom ? comboWriter->d_mappedSource : comboWriter->d_source);
       }
     }
 
@@ -1952,7 +2082,7 @@ void startDoResolve(void* arg) // NOLINT(readability-function-cognitive-complexi
       std::rethrow_if_nested(e);
     }
     catch (const std::exception& ne) {
-      resolver.d_slog->error(Logr::Error, ne.what(), "Nested exception in resolver context", Logging::Loggable("std::exception"));
+      resolver.d_slog->error(Logr::Error, ne.what(), "Nested exception in resolver context", "exception", Logging::Loggable("std::exception"));
     }
     catch (...) {
       ;
@@ -1964,10 +2094,10 @@ void startDoResolve(void* arg) // NOLINT(readability-function-cognitive-complexi
 
   runTaskOnce(g_logCommonErrors);
 
-  static const size_t stackSizeThreshold = 9 * ::arg().asNum("stack-size") / 10;
-  if (g_multiTasker->getMaxStackUsage() >= stackSizeThreshold) {
+  static const auto stackSizeThreshold = 9 * ::arg().asNum<size_t>("stack-size") / 10;
+  if (t_multiTasker->getMaxStackUsage() >= stackSizeThreshold) {
     resolver.d_slog->info(Logr::Error, "Reached mthread stack usage of 90%",
-                          "stackUsage", Logging::Loggable(g_multiTasker->getMaxStackUsage()),
+                          "stackUsage", Logging::Loggable(t_multiTasker->getMaxStackUsage()),
                           "outqueries", Logging::Loggable(resolver.d_outqueries),
                           "netms", Logging::Loggable(resolver.d_totUsec / 1000.0),
                           "throttled", Logging::Loggable(resolver.d_throttledqueries),
@@ -1976,7 +2106,7 @@ void startDoResolve(void* arg) // NOLINT(readability-function-cognitive-complexi
                           "dotout", Logging::Loggable(resolver.d_dotoutqueries),
                           "validationState", Logging::Loggable(resolver.getValidationState()));
   }
-  t_Counters.at(rec::Counter::maxMThreadStackUsage) = max(g_multiTasker->getMaxStackUsage(), t_Counters.at(rec::Counter::maxMThreadStackUsage));
+  t_Counters.at(rec::Counter::maxMThreadStackUsage) = max(t_multiTasker->getMaxStackUsage(), t_Counters.at(rec::Counter::maxMThreadStackUsage));
   t_Counters.updateSnap(g_regressionTestMode);
 }
 
@@ -2051,7 +2181,7 @@ bool checkForCacheHit(bool qnameParsed, unsigned int tag, const string& data,
                       DNSName& qname, uint16_t& qtype, uint16_t& qclass,
                       const struct timeval& now,
                       string& response, uint32_t& qhash,
-                      RecursorPacketCache::OptPBData& pbData, bool tcp, const ComboAddress& source, const ComboAddress& mappedSource)
+                      RecursorPacketCache::OptPBData& pbData, bool tcp, const ComboAddress& source, const ComboAddress& mappedSource, bool ecsFound, const EDNSSubnetOpts& edns)
 {
   if (!g_packetCache) {
     return false;
@@ -2060,14 +2190,25 @@ bool checkForCacheHit(bool qnameParsed, unsigned int tag, const string& data,
   uint32_t age = 0;
   vState valState = vState::Indeterminate;
 
+  RecursorPacketCache::ECSInfo ecsInfo;
   if (qnameParsed) {
-    cacheHit = g_packetCache->getResponsePacket(tag, data, qname, qtype, qclass, now.tv_sec, &response, &age, &valState, &qhash, &pbData, tcp);
+    cacheHit = g_packetCache->getResponsePacket(tag, data, qname, qtype, qclass, now.tv_sec, &response, &age, &valState, &qhash, &pbData, tcp, ecsInfo);
   }
   else {
-    cacheHit = g_packetCache->getResponsePacket(tag, data, qname, &qtype, &qclass, now.tv_sec, &response, &age, &valState, &qhash, &pbData, tcp);
+    cacheHit = g_packetCache->getResponsePacket(tag, data, qname, &qtype, &qclass, now.tv_sec, &response, &age, &valState, &qhash, &pbData, tcp, ecsInfo);
   }
 
   if (cacheHit) {
+    if (g_useIncomingECS && ecsFound && ecsInfo.second != 0) {
+      // We need to patch the packet so it contains the ECS data for the current client, not the
+      // one that caused insertion into the packe cache originally.
+      EDNSSubnetOpts ednsOptions;
+      ednsOptions.setSource(edns.getSource());
+      ednsOptions.setScopePrefixLength(0);
+      auto ecsPayload = ednsOptions.makeOptString();
+      substituteScopeZero(response, ecsInfo, ecsPayload);
+    }
+
     if (vStateIsBogus(valState)) {
       if (t_bogusremotes) {
         t_bogusremotes->push_back(source);
@@ -2225,7 +2366,7 @@ static string* doProcessUDPQuestion(const std::string& question, const ComboAddr
   const dnsheader* dnsheader = headerdata.get();
   unsigned int ctag = 0;
   uint32_t qhash = 0;
-  bool needEDNSParse = false;
+  bool needEDNSParse = g_useIncomingECS;
   std::unordered_set<std::string> policyTags;
   std::map<std::string, RecursorLua4::MetaValue> meta;
   LuaContext::LuaObject data;
@@ -2320,7 +2461,7 @@ static string* doProcessUDPQuestion(const std::string& question, const ComboAddr
           }
           catch (const MOADNSException& moadnsexception) {
             if (g_logCommonErrors) {
-              g_slogudpin->error(moadnsexception.what(), "Error parsing a query packet for tag determination", "qname", Logging::Loggable(qname), "exception", Logging::Loggable("MOADNSException"));
+              g_slogudpin->error(Logr::Error, moadnsexception.what(), "Error parsing a query packet for tag determination", "qname", Logging::Loggable(qname), "exception", Logging::Loggable("MOADNSException"));
             }
           }
           catch (const std::exception& stdException) {
@@ -2349,7 +2490,7 @@ static string* doProcessUDPQuestion(const std::string& question, const ComboAddr
          but it means that the hash would not be computed. If some script decides at a later time to mark back the answer
          as cacheable we would cache it with a wrong tag, so better safe than sorry. */
       auto match = eventTrace.add(RecEventTrace::PCacheCheck);
-      bool cacheHit = checkForCacheHit(qnameParsed, ctag, question, qname, qtype, qclass, g_now, response, qhash, pbData, false, source, mappedSource);
+      bool cacheHit = checkForCacheHit(qnameParsed, ctag, question, qname, qtype, qclass, g_now, response, qhash, pbData, false, source, mappedSource, ecsFound, ednssubnet);
       eventTrace.add(RecEventTrace::PCacheCheck, cacheHit, false, match);
       if (cacheHit) {
         if (!g_quiet) {
@@ -2381,7 +2522,7 @@ static string* doProcessUDPQuestion(const std::string& question, const ComboAddr
           g_slogudpin->error(Logr::Error, sendErr, "Sending UDP reply to client failed", "source", Logging::Loggable(source), "remote", Logging::Loggable(fromaddr));
         }
         struct timeval now{};
-        Utility::gettimeofday(&now, nullptr);
+        gettimeofday(&now, nullptr);
         uint64_t spentUsec = uSec(now - tval);
         t_Counters.at(rec::Histogram::cumulativeAnswers)(spentUsec);
         t_Counters.updateSnap(g_regressionTestMode);
@@ -2432,7 +2573,7 @@ static string* doProcessUDPQuestion(const std::string& question, const ComboAddr
     variable = true;
   }
 
-  if (g_multiTasker->numProcesses() >= g_maxMThreads) {
+  if (t_multiTasker->numProcesses() >= g_maxMThreads) {
     if (!g_quiet) {
       g_slogudpin->info(Logr::Notice, "Dropped question, over capacity", "source", Logging::Loggable(source), "remote", Logging::Loggable(fromaddr));
     }
@@ -2477,8 +2618,7 @@ static string* doProcessUDPQuestion(const std::string& question, const ComboAddr
   comboWriter->d_eventTrace = std::move(eventTrace);
   comboWriter->d_otTrace = std::move(otTrace);
 
-  g_multiTasker->makeThread(startDoResolve, (void*)comboWriter.release()); // deletes dc
-
+  t_multiTasker->makeThread(startDoResolve, (void*)comboWriter.release()); // deletes dc
   return nullptr;
 }
 
@@ -2634,7 +2774,7 @@ static void handleNewUDPQuestion(int fileDesc, FDMultiplexer::funcparam_t& /* va
         else if (dnsheader->opcode != static_cast<unsigned>(Opcode::Query) && dnsheader->opcode != static_cast<unsigned>(Opcode::Notify)) {
           t_Counters.at(rec::Counter::ignoredCount)++;
           if (g_logCommonErrors) {
-            g_slogudpin->info(Logr::Error, "Ignoring unsupported opcode server socket", "remote", Logging::Loggable(fromaddr), "opcode", Logging::Loggable(Opcode::to_s(dnsheader->opcode)));
+            g_slogudpin->info(Logr::Error, "Ignoring unsupported opcode on server socket", "remote", Logging::Loggable(fromaddr), "opcode", Logging::Loggable(Opcode::to_s(dnsheader->opcode)));
           }
         }
         else if (dnsheader->qdcount == 0U) {
@@ -2713,7 +2853,7 @@ unsigned int makeUDPServerSockets(deferredAdd_t& deferredAdds, Logr::log_t log, 
     throw PDNSException("No local address specified");
   }
 
-  const uint16_t defaultLocalPort = ::arg().asNum("local-port");
+  const auto defaultLocalPort = ::arg().asNum<uint16_t>("local-port");
   const vector<string> defaultVector = {"127.0.0.1", "::1"};
   const auto configIsDefault = localAddresses == defaultVector;
 
@@ -2932,7 +3072,7 @@ static void doResends(MT_t::waiters_t::iterator& iter, const std::shared_ptr<Pac
     auto packetID = std::make_shared<PacketID>(*resend);
     packetID->fd = fileDesc;
     packetID->id = qid;
-    g_multiTasker->sendEvent(packetID, &content);
+    t_multiTasker->sendEvent(packetID, &content);
     t_Counters.at(rec::Counter::chainResends)++;
   }
 }
@@ -2945,7 +3085,7 @@ void mthreadSleep(unsigned int jitterMsec)
   neverHappens->remote = ComboAddress("100::"); // discard-only
   neverHappens->remote.setPort(dns_random_uint16());
   neverHappens->fd = -1;
-  assert(g_multiTasker->waitEvent(neverHappens, nullptr, jitterMsec) != -1); // NOLINT
+  assert(t_multiTasker->waitEvent(neverHappens, nullptr, jitterMsec) != -1); // NOLINT
 }
 
 static bool checkIncomingECSSource(const PacketBuffer& packet, const Netmask& subnet)
@@ -2991,11 +3131,11 @@ static void handleUDPServerResponse(int fileDesc, FDMultiplexer::funcparam_t& va
     t_udpclientsocks->returnSocket(fileDesc);
 
     PacketBuffer empty;
-    auto iter = g_multiTasker->getWaiters().find(pid);
-    if (iter != g_multiTasker->getWaiters().end()) {
+    auto iter = t_multiTasker->getWaiters().find(pid);
+    if (iter != t_multiTasker->getWaiters().end()) {
       doResends(iter, pid, empty);
     }
-    g_multiTasker->sendEvent(pid, &empty); // this denotes error (does retry lookup using other NS)
+    t_multiTasker->sendEvent(pid, &empty); // this denotes error (does retry lookup using other NS)
     return;
   }
 
@@ -3019,49 +3159,53 @@ static void handleUDPServerResponse(int fileDesc, FDMultiplexer::funcparam_t& va
   pident->id = dnsheader.id;
   pident->fd = fileDesc;
 
-  if (!dnsheader.qr && g_logCommonErrors) {
-    g_slogout->info(Logr::Error, "Not taking data from question on outgoing socket", "from", Logging::Loggable(fromaddr));
+  if (!dnsheader.qr) {
+    // RFC 1035 Section 4.1.1: QR=0 means query, not response. Discard.
+    if (g_logCommonErrors) {
+      g_slogout->info(Logr::Error, "Not taking data from question on outgoing socket", "from", Logging::Loggable(fromaddr));
+    }
+    t_Counters.at(rec::Counter::unexpectedCount)++;
+    return;
   }
 
-  if (dnsheader.qdcount == 0U || // UPC, Nominum, very old BIND on FormErr, NSD
-      dnsheader.qr == 0U) { // one weird server
-    pident->domain.clear();
-    pident->type = 0;
+  if (ntohs(dnsheader.qdcount) != 1 && (ntohs(dnsheader.ancount) > 0 || ntohs(dnsheader.nscount) > 0 || ntohs(dnsheader.arcount) > 0)) {
+    g_slogout->info(Logr::Error, "Invalid qdcount in answer", "from", Logging::Loggable(fromaddr));
+    t_Counters.at(rec::Counter::unexpectedCount)++;
+    return;
   }
-  else {
-    try {
-      if (len > signed_sizeof_sdnsheader) {
-        pident->domain = DNSName(reinterpret_cast<const char*>(packet.data()), static_cast<int>(len), static_cast<int>(sizeof(dnsheader)), false, &pident->type); // don't copy this from above - we need to do the actual read  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
-      }
-      else {
-        // len == sizeof(dnsheader), only header case
-        // We will do a full scan search later to see if we can match this reply even without a domain
-        pident->domain.clear();
-        pident->type = 0;
-      }
+
+  try {
+    if (len > signed_sizeof_sdnsheader) {
+      pident->domain = DNSName(reinterpret_cast<const char*>(packet.data()), static_cast<int>(len), static_cast<int>(sizeof(dnsheader)), false, &pident->type); // don't copy this from above - we need to do the actual read  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
     }
-    catch (std::exception& e) {
-      // Parse error, continue waiting for other packets
-      t_Counters.at(rec::Counter::serverParseError)++; // won't be fed to lwres.cc, so we have to increment
-      g_slogudpin->error(Logr::Warning, e.what(), "Error in packet from remote nameserver", "from", Logging::Loggable(fromaddr));
-      return;
+    else {
+      // len == sizeof(dnsheader), only header case
+      // We will do a full scan search later to see if we can match this reply even without a domain
+      pident->domain.clear();
+      pident->type = 0;
     }
+  }
+  catch (std::exception& e) {
+    // Parse error, continue waiting for other packets
+    t_Counters.at(rec::Counter::serverParseError)++; // won't be fed to lwres.cc, so we have to increment
+    g_slogudpin->error(Logr::Warning, e.what(), "Error in packet from remote nameserver", "from", Logging::Loggable(fromaddr));
+    return;
   }
 
   if (!pident->domain.empty()) {
-    auto iter = g_multiTasker->getWaiters().find(pident);
-    if (iter != g_multiTasker->getWaiters().end()) {
+    auto iter = t_multiTasker->getWaiters().find(pident);
+    if (iter != t_multiTasker->getWaiters().end()) {
       doResends(iter, pident, packet);
     }
   }
 
 retryWithName:
 
-  if (pident->domain.empty() || g_multiTasker->sendEvent(pident, &packet) == 0) {
+  if (pident->domain.empty() || t_multiTasker->sendEvent(pident, &packet) == 0) {
     /* we did not find a match for this response, something is wrong */
 
     // we do a full scan for outstanding queries on unexpected answers. not too bad since we only accept them on the right port number, which is hard enough to guess
-    for (const auto& d_waiter : g_multiTasker->getWaiters()) {
+    for (const auto& d_waiter : t_multiTasker->getWaiters()) {
       if (pident->fd == d_waiter.key->fd && d_waiter.key->remote == pident->remote && d_waiter.key->type == pident->type && pident->domain == d_waiter.key->domain) {
         /* we are expecting an answer from that exact source, on that exact port (since we are using connected sockets), for that qname/qtype,
            but with a different message ID. That smells like a spoofing attempt. For now we will just increase the counter and will deal with
@@ -3073,7 +3217,7 @@ retryWithName:
       if (pident->domain.empty() && !d_waiter.key->domain.empty() && pident->type == 0 && d_waiter.key->type != 0 && pident->id == d_waiter.key->id && d_waiter.key->remote == pident->remote) {
         pident->domain = d_waiter.key->domain;
         pident->type = d_waiter.key->type;
-        goto retryWithName; // note that this only passes on an error, lwres will still reject the packet NOLINT(cppcoreguidelines-avoid-goto)
+        goto retryWithName; // note that this only passes on an error, lwres still should reject the packet NOLINT(cppcoreguidelines-avoid-goto)
       }
     }
     t_Counters.at(rec::Counter::unexpectedCount)++; // if we made it here, it really is an unexpected answer
@@ -3081,7 +3225,7 @@ retryWithName:
       g_slogudpin->info(Logr::Warning, "Discarding unexpected packet", "from", Logging::Loggable(fromaddr),
                         "qname", Logging::Loggable(pident->domain),
                         "qtype", Logging::Loggable(QType(pident->type)),
-                        "waiters", Logging::Loggable(g_multiTasker->getWaiters().size()));
+                        "waiters", Logging::Loggable(t_multiTasker->getWaiters().size()));
     }
   }
   else if (fileDesc >= 0) {

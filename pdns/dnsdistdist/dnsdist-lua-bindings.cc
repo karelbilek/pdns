@@ -115,13 +115,12 @@ void setupLuaBindings(LuaContext& luaCtx, bool client, bool configCheck)
   luaCtx.registerFunction<std::shared_ptr<DNSDistPacketCache> (std::shared_ptr<dnsdist::lua::LuaServerPoolObject>::*)() const>("getCache", [](const std::shared_ptr<dnsdist::lua::LuaServerPoolObject>& pool) {
     std::shared_ptr<DNSDistPacketCache> cache;
     if (pool) {
-      dnsdist::configuration::updateRuntimeConfiguration([&pool, &cache](dnsdist::configuration::RuntimeConfiguration& config) {
-        auto poolIt = config.d_pools.find(pool->poolName);
-        /* this might happen if the Server Pool has been removed in the meantime, let's gracefully ignore it */
-        if (poolIt != config.d_pools.end()) {
-          cache = poolIt->second.packetCache;
-        }
-      });
+      const auto& config = dnsdist::configuration::getCurrentRuntimeConfiguration();
+      auto poolIt = config.d_pools.find(pool->poolName);
+      /* this might happen if the Server Pool has been removed in the meantime, let's gracefully ignore it */
+      if (poolIt != config.d_pools.end()) {
+        cache = poolIt->second.packetCache;
+      }
     }
     return cache;
   });
@@ -140,13 +139,12 @@ void setupLuaBindings(LuaContext& luaCtx, bool client, bool configCheck)
   luaCtx.registerFunction<bool (std::shared_ptr<dnsdist::lua::LuaServerPoolObject>::*)() const>("getECS", [](const std::shared_ptr<dnsdist::lua::LuaServerPoolObject>& pool) {
     bool ecs = false;
     if (pool) {
-      dnsdist::configuration::updateRuntimeConfiguration([&pool, &ecs](dnsdist::configuration::RuntimeConfiguration& config) {
-        auto poolIt = config.d_pools.find(pool->poolName);
-        /* this might happen if the Server Pool has been removed in the meantime, let's gracefully ignore it */
-        if (poolIt != config.d_pools.end()) {
-          ecs = poolIt->second.getECS();
-        }
-      });
+      const auto& config = dnsdist::configuration::getCurrentRuntimeConfiguration();
+      auto poolIt = config.d_pools.find(pool->poolName);
+      /* this might happen if the Server Pool has been removed in the meantime, let's gracefully ignore it */
+      if (poolIt != config.d_pools.end()) {
+        ecs = poolIt->second.getECS();
+      }
     }
     return ecs;
   });
@@ -165,13 +163,12 @@ void setupLuaBindings(LuaContext& luaCtx, bool client, bool configCheck)
   luaCtx.registerFunction<bool (std::shared_ptr<dnsdist::lua::LuaServerPoolObject>::*)() const>("getZeroScope", [](const std::shared_ptr<dnsdist::lua::LuaServerPoolObject>& pool) {
     bool zeroScope = false;
     if (pool) {
-      dnsdist::configuration::updateRuntimeConfiguration([&pool, &zeroScope](dnsdist::configuration::RuntimeConfiguration& config) {
-        auto poolIt = config.d_pools.find(pool->poolName);
-        /* this might happen if the Server Pool has been removed in the meantime, let's gracefully ignore it */
-        if (poolIt != config.d_pools.end()) {
-          zeroScope = poolIt->second.getZeroScope();
-        }
-      });
+      const auto& config = dnsdist::configuration::getCurrentRuntimeConfiguration();
+      auto poolIt = config.d_pools.find(pool->poolName);
+      /* this might happen if the Server Pool has been removed in the meantime, let's gracefully ignore it */
+      if (poolIt != config.d_pools.end()) {
+        zeroScope = poolIt->second.getZeroScope();
+      }
     }
     return zeroScope;
   });
@@ -229,6 +226,12 @@ void setupLuaBindings(LuaContext& luaCtx, bool client, bool configCheck)
       return state->queries.load();
     }
     return 0U;
+  });
+  luaCtx.registerFunction<bool (std::shared_ptr<DownstreamState>::*)(std::optional<bool>) const>("canAcceptQueries", [](const std::shared_ptr<DownstreamState>& state, std::optional<bool> enforceQPS) -> bool {
+    if (state) {
+      return state->canAcceptNewQueries(enforceQPS.value_or(false));
+    }
+    return false;
   });
   luaCtx.registerFunction<double (std::shared_ptr<DownstreamState>::*)() const>("getLatency", [](const std::shared_ptr<DownstreamState>& state) -> double {
     if (state) {
@@ -293,20 +296,16 @@ void setupLuaBindings(LuaContext& luaCtx, bool client, bool configCheck)
       return;
     }
     size_t value = 0;
-    getOptionalValue<size_t>(vars, "maxCheckFailures", value);
-    if (value > 0) {
+    if (getOptionalValue<size_t>(vars, "maxCheckFailures", value) > 0 && value > 0) {
       state->d_config.maxCheckFailures.store(value);
     }
-    getOptionalValue<size_t>(vars, "rise", value);
-    if (value > 0) {
+    if (getOptionalValue<size_t>(vars, "rise", value) > 0 && value > 0) {
       state->d_config.minRiseSuccesses.store(value);
     }
-    getOptionalValue<size_t>(vars, "checkTimeout", value);
-    if (value > 0) {
+    if (getOptionalValue<size_t>(vars, "checkTimeout", value) > 0 && value > 0) {
       state->d_config.checkTimeout.store(value);
     }
-    getOptionalValue<size_t>(vars, "checkInterval", value);
-    if (value > 0) {
+    if (getOptionalValue<size_t>(vars, "checkInterval", value) > 0 && value > 0) {
       state->d_config.checkInterval.store(value);
     }
   });
@@ -381,6 +380,16 @@ void setupLuaBindings(LuaContext& luaCtx, bool client, bool configCheck)
       return "";
     }
     return boost::uuids::to_string(*state->d_config.id);
+  });
+  luaCtx.registerFunction<void (std::shared_ptr<DownstreamState>::*)(DownstreamState::HealthCheckResponseValidator validator)>("setHealthCheckResponseValidator", [](std::shared_ptr<DownstreamState>& state, DownstreamState::HealthCheckResponseValidator validator) {
+    if (!state) {
+      return;
+    }
+    if (dnsdist::configuration::isImmutableConfigurationDone()) {
+      throw std::runtime_error("setHealthCheckResponseValidator cannot be used at runtime!");
+      return;
+    }
+    state->d_config.d_healthCheckResponseValidationCallback = std::move(validator);
   });
 #endif /* DISABLE_DOWNSTREAM_BINDINGS */
 
@@ -476,6 +485,8 @@ void setupLuaBindings(LuaContext& luaCtx, bool client, bool configCheck)
   luaCtx.registerFunction<string (ComboAddress::*)() const>("tostringWithPort", [](const ComboAddress& addr) { return addr.toStringWithPort(); });
   luaCtx.registerFunction<string (ComboAddress::*)() const>("__tostring", [](const ComboAddress& addr) { return addr.toString(); });
   luaCtx.registerFunction<string (ComboAddress::*)() const>("toString", [](const ComboAddress& addr) { return addr.toString(); });
+  luaCtx.registerFunction<string (ComboAddress::*)() const>("toStringNoInterface", [](const ComboAddress& addr) { return addr.toStringNoInterface(); });
+  luaCtx.registerFunction<string (ComboAddress::*)() const>("toStringReversed", [](const ComboAddress& addr) { return addr.toStringReversed(); });
   luaCtx.registerFunction<string (ComboAddress::*)() const>("toStringWithPort", [](const ComboAddress& addr) { return addr.toStringWithPort(); });
   luaCtx.registerFunction<string (ComboAddress::*)() const>("getRaw", [](const ComboAddress& addr) { return addr.toByteString(); });
   luaCtx.registerFunction<uint16_t (ComboAddress::*)() const>("getPort", [](const ComboAddress& addr) { return ntohs(addr.sin4.sin_port); });
@@ -1018,17 +1029,12 @@ void setupLuaBindings(LuaContext& luaCtx, bool client, bool configCheck)
     return xsk->getMetrics();
   });
 #endif /* HAVE_XSK */
-  /* EDNSOptionView */
-  luaCtx.registerFunction<size_t (EDNSOptionView::*)() const>("count", [](const EDNSOptionView& option) {
-    return option.values.size();
+  /* EDNSOptionValues */
+  luaCtx.registerFunction<size_t (EDNSOptionValues::*)() const>("count", [](const EDNSOptionValues& values) {
+    return values.values.size();
   });
-  luaCtx.registerFunction<std::vector<string> (EDNSOptionView::*)() const>("getValues", [](const EDNSOptionView& option) {
-    std::vector<string> values;
-    values.reserve(values.size());
-    for (const auto& value : option.values) {
-      values.emplace_back(value.content, value.size);
-    }
-    return values;
+  luaCtx.registerFunction<std::vector<string> (EDNSOptionValues::*)() const>("getValues", [](const EDNSOptionValues& values) -> std::vector<string> {
+    return values.values;
   });
 
   luaCtx.writeFunction("newDOHResponseMapEntry", [](const std::string& regex, uint64_t status, const std::string& content, std::optional<LuaAssociativeTable<std::string>> customHeaders) {

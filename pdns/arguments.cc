@@ -288,27 +288,6 @@ uid_t ArgvMap::asUid(const string& arg)
   return uid;
 }
 
-int ArgvMap::asNum(const string& arg, int def)
-{
-  if (!parmIsset(arg)) {
-    throw ArgException(string("Undefined but needed argument: '") + arg + "'");
-  }
-
-  // use default for empty values
-  if (d_params[arg].empty()) {
-    return def;
-  }
-
-  const auto* cptr_orig = d_params[arg].c_str();
-  char* cptr_ret = nullptr;
-  auto retval = static_cast<int>(strtol(cptr_orig, &cptr_ret, 0));
-  if (retval == 0 && cptr_ret == cptr_orig) {
-    throw ArgException("'" + arg + "' value '" + string(cptr_orig) + string("' is not a valid number"));
-  }
-
-  return retval;
-}
-
 bool ArgvMap::isEmpty(const string& arg)
 {
   if (!parmIsset(arg)) {
@@ -537,7 +516,7 @@ bool ArgvMap::file(const string& fname, bool lax, bool included)
 
   if (!parseFile(fname, "", lax)) {
     SLOG(g_log << Logger::Warning << "Unable to open " << fname << std::endl,
-         d_log->error(Logr::Warning, "Unable to open file", "name", Logging::Loggable(fname)));
+         d_log->info(Logr::Warning, "Unable to open file", "name", Logging::Loggable(fname)));
     return false;
   }
 
@@ -564,36 +543,7 @@ void ArgvMap::gatherIncludes(const std::string& directory, const std::string& su
     return; // nothing to do
   }
 
-  std::vector<std::string> vec;
-  auto directoryError = pdns::visit_directory(directory, [this, &directory, &suffix, &vec]([[maybe_unused]] ino_t inodeNumber, const std::string_view& name) {
-    (void)this;
-    if (boost::starts_with(name, ".")) {
-      return true; // skip any dots
-    }
-    if (boost::ends_with(name, suffix)) {
-      // build name
-      string fullName = directory + "/" + std::string(name);
-      // ensure it's readable file
-      struct stat statInfo{};
-      if (stat(fullName.c_str(), &statInfo) != 0 || !S_ISREG(statInfo.st_mode)) {
-        string msg = fullName + " is not a regular file";
-        SLOG(g_log << Logger::Error << msg << std::endl,
-             d_log->info(Logr::Error, "Unable to open non-regular file", "name", Logging::Loggable(fullName)));
-        throw ArgException(std::move(msg));
-      }
-      vec.emplace_back(fullName);
-    }
-    return true;
-  });
-
-  if (directoryError) {
-    int err = errno;
-    string msg = directory + " is not accessible: " + stringerror(err);
-    SLOG(g_log << Logger::Error << msg << std::endl,
-         d_log->error(Logr::Error, err, "Directory is not accessible", "name", Logging::Loggable(directory)));
-    throw ArgException(std::move(msg));
-  }
-
+  std::vector<std::string> vec = pdns::list_directory(directory, suffix, d_log);
   std::sort(vec.begin(), vec.end(), CIStringComparePOSIX());
   extraConfigs.insert(extraConfigs.end(), vec.begin(), vec.end());
 }

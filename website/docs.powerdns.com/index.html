@@ -180,6 +180,13 @@
                     </div>
                     <div class="col-md-4">
                         <div class="product-card">
+                            <h3><a href="/spog/latest/">PowerDNS Single Pane of Glass</a></h3>
+                            <p>Observability Platform for Cloud Control.</p>
+                            <div id="spog-versions"></div>
+                        </div>
+                    </div>
+                    <div class="col-md-4">
+                        <div class="product-card">
                             <h3><a href="/zonecontrol/latest">PowerDNS ZoneControl</a></h3>
                             <p>DNS zone management and control system.</p>
                             <div id="zonecontrol-versions"></div>
@@ -190,6 +197,20 @@
                             <h3><a href="/defender">dnsdist Defender</a></h3>
                             <p>DNS security add-on for dnsdist providing protection against tunneling, data exfiltration, DDoS attacks, and command-and-control threats.</p>
                             <div id="defender-versions"></div>
+                        </div>
+                    </div>
+                    <div class="col-md-4">
+                        <div class="product-card">
+                            <h3><a href="/recursor-plexus">PowerDNS Recursor Plexus</a></h3>
+                            <p>Add-on to PowerDNS Recursor for preserving and sharing critical runtime state across Recursor instances.</p>
+                            <div id="recursor-plexus-versions"></div>
+                        </div>
+                    </div>
+                    <div class="col-md-4">
+                        <div class="product-card">
+                            <h3><a href="/platform-filter">PowerDNS Platform Filter</a></h3>
+                            <p>Carrier-grade internet filtering solution.</p>
+                            <div id="platform-filter-versions"></div>
                         </div>
                     </div>
                 </div>
@@ -232,6 +253,12 @@
                 }
             );
 
+            // Single Pane of Glass
+            loadVersionSelector(
+                '/spog',
+                'spog-versions'
+            );
+
             // DNSdist
             loadVersionSelector(
                 'https://dnsdist.org',
@@ -258,7 +285,7 @@
             loadVersionSelector(
                 '/lightningstream-enterprise',
                 'lightningstream-enterprise-versions'
-            )
+            );
 
             // Zone Control
             loadVersionSelector(
@@ -281,6 +308,18 @@
             loadVersionSelector(
                 '/defender',
                 'defender-versions'
+            );
+
+            // Plexus
+            loadVersionSelector(
+                '/recursor-plexus',
+                'recursor-plexus-versions'
+            );
+
+            // Platform Filter
+            loadVersionSelector(
+                '/platform-filter',
+                'platform-filter-versions'
             );
         });
     </script>

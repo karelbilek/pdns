@@ -19,11 +19,11 @@ on:
           el-8
           el-9
           el-10
-          debian-bullseye
           debian-bookworm
           debian-trixie
           ubuntu-jammy
           ubuntu-noble
+          ubuntu-resolute
       ref:
         description: git ref to checkout
         type: string

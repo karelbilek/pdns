@@ -44,6 +44,7 @@
 #include <sys/mman.h>
 #include <fcntl.h>
 #include <fstream>
+#include <vector>
 #include <boost/algorithm/string.hpp>
 #ifdef HAVE_LIBSODIUM
 #include <sodium.h>
@@ -105,6 +106,7 @@ const char* funnytext = "*******************************************************
 
 bool g_anyToTcp;
 bool g_8bitDNS;
+bool g_logDNSQueries;
 #ifdef HAVE_LUA_RECORDS
 bool g_doLuaRecord;
 int g_luaRecordExecLimit;
@@ -117,6 +119,9 @@ time_t g_luaConsistentHashesCleanupInterval{3600};
 bool g_doGssTSIG;
 #endif
 bool g_views;
+bool g_slogStructured{false};
+static Logger::Urgency s_logUrgency;
+std::string g_memberCatalogGroup;
 typedef Distributor<DNSPacket, DNSPacket, PacketHandler> DNSDistributor;
 
 ArgvMap theArg;
@@ -124,6 +129,8 @@ StatBag S; //!< Statistics are gathered across PDNS via the StatBag class S
 AuthPacketCache PC; //!< This is the main PacketCache, shared across all threads
 AuthQueryCache QC;
 AuthZoneCache g_zoneCache;
+std::vector<std::unique_ptr<RemoteLogger>> g_remote_loggers;
+
 std::unique_ptr<DNSProxy> DP{nullptr};
 static std::unique_ptr<DynListener> s_dynListener{nullptr};
 CommunicatorClass Communicator;
@@ -196,6 +203,7 @@ static void declareArguments()
 
   ::arg().set("version-string", "PowerDNS version in packets - full, anonymous, powerdns or custom") = "full";
   ::arg().set("control-console", "Debugging switch - don't use") = "no"; // but I know you will!
+  ::arg().setSwitch("logging-structured", "Produce structured log messages") = "no";
   ::arg().set("loglevel", "Amount of logging. Higher is more. Do not set below 3") = "4";
   ::arg().setSwitch("loglevel-show", "Include log level indicator in log output") = "no";
   ::arg().set("disable-syslog", "Disable logging to syslog, useful when running inside a supervisor that logs stderr") = "no";
@@ -246,8 +254,10 @@ static void declareArguments()
   ::arg().set("webserver-allow-from", "Webserver/API access is only allowed from these subnets") = "127.0.0.1,::1";
   ::arg().set("webserver-loglevel", "Amount of logging in the webserver (none, normal, detailed)") = "normal";
   ::arg().set("webserver-max-bodysize", "Webserver/API maximum request/response body size in megabytes") = "2";
+  ::arg().set("webserver-max-concurrent-connections", "Webserver/API maximum concurrent connections allowed") = "100";
   ::arg().set("webserver-connection-timeout", "Webserver/API request/response timeout in seconds") = "5";
   ::arg().setSwitch("webserver-hash-plaintext-credentials", "Whether to hash passwords and api keys supplied in plaintext, to prevent keeping the plaintext version in memory at runtime") = "no";
+  ::arg().set("webserver-cross-origin-request-header", "Webserver cross origin request header value") = "";
 
   ::arg().setSwitch("query-logging", "Hint backends that queries should be logged") = "no";
 
@@ -266,6 +276,8 @@ static void declareArguments()
   ::arg().set("default-soa-edit", "Default SOA-EDIT value") = "";
   ::arg().set("default-soa-edit-signed", "Default SOA-EDIT value for signed zones") = "";
   ::arg().set("default-soa-edit-api", "Default SOA-EDIT-API value for new zones") = "DEFAULT";
+  ::arg().set("soa-edit-spread", "Seconds to spread SOA-EDIT bumps over") = "0";
+  ::arg().set("rrsig-expiry-extend", "Seconds to extend RRSIG expiry by, or follow soa-edit-spread") = "soa-edit-spread";
   ::arg().set("dnssec-key-cache-ttl", "Seconds to cache DNSSEC keys from the database") = "30";
   ::arg().set("domain-metadata-cache-ttl", "Seconds to cache zone metadata from the database") = "";
   ::arg().set("zone-metadata-cache-ttl", "Seconds to cache zone metadata from the database") = "60";
@@ -334,16 +346,25 @@ static void declareArguments()
   ::arg().set("max-include-depth", "Maximum number of nested $INCLUDE directives while processing a zone file") = "20";
   ::arg().setSwitch("upgrade-unknown-types", "Transparently upgrade known TYPExxx records. Recommended to keep off, except for PowerDNS upgrades until data sources are cleaned up") = "no";
   ::arg().setSwitch("svc-autohints", "Transparently fill ipv6hint=auto ipv4hint=auto SVC params with AAAA/A records for the target name of the record (if within the same zone)") = "no";
+  ::arg().setSwitch("naptr-additional-processing", "Add NAPTR a and s records to the additional section") = "yes";
 
   ::arg().setSwitch("consistent-backends", "Assume individual zones are not divided over backends. Send only ANY lookup operations to the backend to reduce the number of lookups") = "yes";
 
   ::arg().set("default-catalog-zone", "Catalog zone to assign newly created primary zones (via the API) to") = "";
+  ::arg().set("member-catalog-group", "Catalog group used to signal that a member zone is a catalog") = "pdns-member-catalog";
+
+  ::arg().set("protobuf-servers", "Servers to send protobuf logging to");
 
 #ifdef ENABLE_GSS_TSIG
   ::arg().setSwitch("enable-gss-tsig", "Enable GSS TSIG processing") = "no";
+  ::arg().set("gss-max-contexts", "The maximum number of simultaneous GSS contexts allowed") = "1000";
 #endif
 
   ::arg().setSwitch("views", "Enable views (variants) of zones, for backends which support them") = "no";
+
+  // explicitly declared outside of HAVE_LUA_RECORDS guard to prevent writes
+  // even when LUA is not currently used
+  ::arg().setSwitch("enable-lua-record-updates", "Allow updates to Lua records") = "no";
 
   // FIXME520: remove when branching 5.2
   ::arg().set("entropy-source", "") = "";
@@ -386,11 +407,13 @@ try {
   return totcount;
 }
 catch (std::exception& e) {
-  g_log << Logger::Error << "Had error retrieving queue sizes: " << e.what() << endl;
+  SLOG(g_log << Logger::Error << "Had error retrieving queue sizes: " << e.what() << endl,
+       g_slog->error(Logr::Error, e.what(), "Had error retrieving queue sizes"));
   return 0;
 }
 catch (PDNSException& e) {
-  g_log << Logger::Error << "Had error retrieving queue sizes: " << e.reason << endl;
+  SLOG(g_log << Logger::Error << "Had error retrieving queue sizes: " << e.reason << endl,
+       g_slog->error(Logr::Error, e.reason, "Had error retrieving queue sizes"));
   return 0;
 }
 
@@ -531,7 +554,7 @@ static void update_latencies(int start, int diff)
   avg_latency = 0.999 * avg_latency + 0.001 * std::max(diff, 0); // 'EWMA'
 }
 
-static void sendout(std::unique_ptr<DNSPacket>& a, int start)
+static void sendout(std::unique_ptr<DNSPacket>& a, Logr::log_t slog, int start)
 {
   if (!a)
     return;
@@ -547,20 +570,27 @@ static void sendout(std::unique_ptr<DNSPacket>& a, int start)
     update_latencies(start, diff);
   }
   catch (const std::exception& e) {
-    g_log << Logger::Error << "Caught unhandled exception while sending a response: " << e.what() << endl;
+    SLOG(g_log << Logger::Error << "Caught unhandled exception while sending a response: " << e.what() << endl,
+         slog->error(Logr::Error, e.what(), "Caught unhandled exception while sending a response"));
   }
 }
 
 //! The qthread receives questions over the internet via the Nameserver class, and hands them to the Distributor for further processing
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 static void qthread(unsigned int num)
 {
+  std::shared_ptr<Logr::Logger> slog;
+  if (g_slogStructured) {
+    slog = g_slog->withName("receiver" + std::to_string(num));
+  }
+
   try {
     setThreadName("pdns/receiver");
 
-    s_distributors[num] = DNSDistributor::Create(::arg().asNum("distributor-threads", 1));
+    s_distributors[num] = DNSDistributor::Create(::arg().asNum("distributor-threads", 1), slog);
     DNSDistributor* distributor = s_distributors[num]; // the big dispatcher!
-    DNSPacket question(true);
-    DNSPacket cached(false);
+    DNSPacket question(slog, true);
+    DNSPacket cached(slog, false);
 
     AtomicCounter& numreceived = *S.getPointer("udp-queries");
     AtomicCounter& numreceiveddo = *S.getPointer("udp-do-queries");
@@ -573,7 +603,6 @@ static void qthread(unsigned int num)
 
     int diff{};
     int start{};
-    bool logDNSQueries = ::arg().mustDo("log-dns-queries");
     shared_ptr<UDPNameserver> NS; // NOLINT(readability-identifier-length)
     std::string buffer;
     ComboAddress accountremote;
@@ -608,10 +637,7 @@ static void qthread(unsigned int num)
 
         numreceived++;
 
-        accountremote = question.d_remote;
-        if (question.d_inner_remote) {
-          accountremote = *question.d_inner_remote;
-        }
+        accountremote = question.getInnerRemote();
 
         if (accountremote.sin4.sin_family == AF_INET) {
           numreceived4++;
@@ -634,24 +660,40 @@ static void qthread(unsigned int num)
 
         S.ringAccount("queries", question.qdomain, question.qtype);
         S.ringAccount("remotes", question.getInnerRemote());
-        if (logDNSQueries) {
-          g_log << Logger::Notice << "Remote " << question.getRemoteString() << " wants '" << question.qdomain << "|" << question.qtype << "', do = " << question.d_dnssecOk << ", bufsize = " << question.getMaxReplyLen();
-          if (question.d_ednsRawPacketSizeLimit > 0 && question.getMaxReplyLen() != (unsigned int)question.d_ednsRawPacketSizeLimit) {
-            g_log << " (" << question.d_ednsRawPacketSizeLimit << ")";
+        if (g_logDNSQueries) {
+          if (g_slogStructured) {
+            if (question.d_ednsRawPacketSizeLimit > 0 && question.getMaxReplyLen() != (unsigned int)question.d_ednsRawPacketSizeLimit) {
+              slog->info(Logr::Notice, "Query received", "remote", Logging::Loggable(question.getRemoteString()), "query", Logging::Loggable(question.qdomain), "type", Logging::Loggable(question.qtype), "dnssec", Logging::Loggable(question.d_dnssecOk), "max reply length", Logging::Loggable(question.getMaxReplyLen()), "raw packet size limit", Logging::Loggable(question.d_ednsRawPacketSizeLimit));
+            }
+            else {
+              slog->info(Logr::Notice, "Query received", "remote", Logging::Loggable(question.getRemoteString()), "query", Logging::Loggable(question.qdomain), "type", Logging::Loggable(question.qtype), "dnssec", Logging::Loggable(question.d_dnssecOk), "max reply length", Logging::Loggable(question.getMaxReplyLen()));
+            }
+          }
+          else {
+            g_log << Logger::Notice << "Remote " << question.getRemoteString() << " wants '" << question.qdomain << "|" << question.qtype << "', do = " << question.d_dnssecOk << ", bufsize = " << question.getMaxReplyLen();
+            if (question.d_ednsRawPacketSizeLimit > 0 && question.getMaxReplyLen() != (unsigned int)question.d_ednsRawPacketSizeLimit) {
+              g_log << " (" << question.d_ednsRawPacketSizeLimit << ")";
+            }
           }
         }
 
+        bool logAtNewline{false};
         if (PC.enabled() && (question.d.opcode != Opcode::Notify && question.d.opcode != Opcode::Update) && question.couldBeCached()) {
           start = diff;
           std::string view{};
           if (g_views) {
+            if (!g_slogStructured) {
+              g_log << endl;
+              logAtNewline = true; // because of getViewFromNetwork below
+            }
             Netmask netmask(accountremote);
             view = g_zoneCache.getViewFromNetwork(&netmask);
           }
           bool haveSomething = PC.get(question, cached, view); // does the PacketCache recognize this question?
           if (haveSomething) {
-            if (logDNSQueries) {
-              g_log << ": packetcache HIT" << endl;
+            if (g_logDNSQueries) {
+              SLOG(g_log << (logAtNewline ? "" : ": ") << "packetcache HIT" << endl,
+                   slog->info(Logr::Notice, "packetcache HIT"));
             }
             cached.setRemote(&question.d_remote); // inlined
             cached.d_inner_remote = question.d_inner_remote;
@@ -677,19 +719,23 @@ static void qthread(unsigned int num)
         }
 
         if (distributor->isOverloaded()) {
-          if (logDNSQueries) {
-            g_log << ": Dropped query, backends are overloaded" << endl;
+          if (g_logDNSQueries) {
+            SLOG(g_log << (logAtNewline ? "" : ": ") << "Dropped query, backends are overloaded" << endl,
+                 slog->info(Logr::Notice, "Dropped query, backends are overloaded"));
           }
           overloadDrops++;
           continue;
         }
 
-        if (logDNSQueries) {
+        if (g_logDNSQueries) {
           if (PC.enabled()) {
-            g_log << ": packetcache MISS" << endl;
+            SLOG(g_log << (logAtNewline ? "" : ": ") << "packetcache MISS" << endl,
+                 slog->info(Logr::Notice, "packetcache MISS"));
           }
           else {
-            g_log << endl;
+            if (!g_slogStructured) {
+              g_log << endl;
+            }
           }
         }
 
@@ -701,12 +747,14 @@ static void qthread(unsigned int num)
         }
       }
       catch (const std::exception& e) {
-        g_log << Logger::Error << "Caught unhandled exception in question thread: " << e.what() << endl;
+        SLOG(g_log << Logger::Error << "Caught unhandled exception in question thread: " << e.what() << endl,
+             slog->error(Logr::Error, e.what(), "Caught unhandled exception"));
       }
     }
   }
   catch (PDNSException& pe) {
-    g_log << Logger::Error << "Fatal error in question thread: " << pe.reason << endl;
+    SLOG(g_log << Logger::Error << "Fatal error in question thread: " << pe.reason << endl,
+         slog->error(Logr::Error, pe.reason, "Fatal error"));
     _exit(1);
   }
 }
@@ -721,8 +769,33 @@ static void triggerLoadOfLibraries()
   dummy.join();
 }
 
+static bool updateZoneCache(Logr::log_t slog)
+{
+  try {
+    UeberBackend B; // NOLINT(readability-identifier-length)
+    B.updateZoneCache();
+  }
+  catch (PDNSException& e) {
+    SLOG(g_log << Logger::Error << "PDNSException while filling the zone cache: " << e.reason << endl,
+         slog->error(Logr::Error, e.reason, "PDNSException while filling the zone cache"));
+    return false;
+  }
+  catch (std::exception& e) {
+    SLOG(g_log << Logger::Error << "STL Exception while filling the zone cache: " << e.what() << endl,
+         slog->error(Logr::Error, e.what(), "STL Exception while filling the zone cache"));
+    return false;
+  }
+  return true;
+}
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 static void mainthread()
 {
+  static std::shared_ptr<Logr::Logger> slog;
+  if (g_slogStructured) {
+    slog = g_slog->withName("pdns");
+  }
+
   gid_t newgid = 0;
   if (!::arg()["setgid"].empty())
     newgid = strToGID(::arg()["setgid"]);
@@ -730,54 +803,97 @@ static void mainthread()
   if (!::arg()["setuid"].empty())
     newuid = strToUID(::arg()["setuid"]);
 
-  g_anyToTcp = ::arg().mustDo("any-to-tcp");
-  g_8bitDNS = ::arg().mustDo("8bit-dns");
+  try {
+    g_anyToTcp = ::arg().mustDo("any-to-tcp");
+    g_8bitDNS = ::arg().mustDo("8bit-dns");
+    g_logDNSQueries = ::arg().mustDo("log-dns-queries");
+
+    g_soa_edit_spread = ::arg().asBoundedNum<uint32_t>("soa-edit-spread", 0, 604800);
+
+    if (::arg()["rrsig-expiry-extend"] == "soa-edit-spread") {
+      g_rrsig_expiry_extend = g_soa_edit_spread;
+    }
+    else {
+      g_rrsig_expiry_extend = ::arg().asBoundedNum<uint32_t>("rrsig-expiry-extend", 0, 31536000);
+    }
+
 #ifdef HAVE_LUA_RECORDS
-  g_doLuaRecord = ::arg().mustDo("enable-lua-records");
-  g_LuaRecordSharedState = (::arg()["enable-lua-records"] == "shared");
-  g_luaRecordExecLimit = ::arg().asNum("lua-records-exec-limit");
-  g_luaRecordInsertWhitespace = ::arg().mustDo("lua-records-insert-whitespace");
-  g_luaHealthChecksInterval = ::arg().asNum("lua-health-checks-interval");
-  g_luaConsistentHashesExpireDelay = ::arg().asNum("lua-consistent-hashes-expire-delay");
-  g_luaConsistentHashesCleanupInterval = ::arg().asNum("lua-consistent-hashes-cleanup-interval");
-  g_luaHealthChecksExpireDelay = ::arg().asNum("lua-health-checks-expire-delay");
+    g_doLuaRecord = ::arg().mustDo("enable-lua-records");
+    g_LuaRecordSharedState = (::arg()["enable-lua-records"] == "shared");
+    ::arg().assignNum(g_luaRecordExecLimit, "lua-records-exec-limit");
+    g_luaRecordInsertWhitespace = ::arg().mustDo("lua-records-insert-whitespace");
+    ::arg().assignNum(g_luaHealthChecksInterval, "lua-health-checks-interval");
+    ::arg().assignNum(g_luaConsistentHashesExpireDelay, "lua-consistent-hashes-expire-delay");
+    ::arg().assignNum(g_luaConsistentHashesCleanupInterval, "lua-consistent-hashes-cleanup-interval");
+    ::arg().assignNum(g_luaHealthChecksExpireDelay, "lua-health-checks-expire-delay");
 #endif
 #ifdef ENABLE_GSS_TSIG
-  g_doGssTSIG = ::arg().mustDo("enable-gss-tsig");
+    g_doGssTSIG = ::arg().mustDo("enable-gss-tsig");
+    if (g_doGssTSIG) {
+      ::arg().assignNum(GssContext::s_maxGssContexts, "gss-max-contexts");
+    }
 #endif
-  g_views = ::arg().mustDo("views");
+    g_views = ::arg().mustDo("views");
+    g_memberCatalogGroup = ::arg()["member-catalog-group"];
 
-  DNSPacket::s_udpTruncationThreshold = std::max(512, ::arg().asNum("udp-truncation-threshold"));
-  DNSPacket::s_doEDNSSubnetProcessing = ::arg().mustDo("edns-subnet-processing");
-  PacketHandler::s_SVCAutohints = ::arg().mustDo("svc-autohints");
+    DNSPacket::s_udpTruncationThreshold = std::max(static_cast<uint16_t>(512), ::arg().asNum<uint16_t>("udp-truncation-threshold"));
+    DNSPacket::s_doEDNSSubnetProcessing = ::arg().mustDo("edns-subnet-processing");
+    PacketHandler::s_SVCAutohints = ::arg().mustDo("svc-autohints");
+    PacketHandler::s_NAPTRprocessing = ::arg().mustDo("naptr-additional-processing");
 
-  g_proxyProtocolACL.toMasks(::arg()["proxy-protocol-from"]);
-  g_proxyProtocolMaximumSize = ::arg().asNum("proxy-protocol-maximum-size");
+    g_proxyProtocolACL.toMasks(::arg()["proxy-protocol-from"]);
+    ::arg().assignNum(g_proxyProtocolMaximumSize, "proxy-protocol-maximum-size");
+  }
+  catch (ArgException& exc) {
+    SLOG(g_log << Logger::Error << "Fatal error: " << exc.reason << endl,
+         slog->error(Logr::Error, exc.reason, "Fatal error"));
+    exit(1); // NOLINT(concurrency-mt-unsafe) we're single threaded at this point
+  }
 
   if (::arg()["edns-cookie-secret"].size() != 0) {
     // User wants cookie processing
 #ifdef HAVE_CRYPTO_SHORTHASH // we can do siphash-based cookies
     DNSPacket::s_doEDNSCookieProcessing = true;
-    const std::string& secret = ::arg()["edns-cookie-secret"];
-    if (secret == "random") {
-      std::array<char, EDNSCookiesOpt::EDNSCookieSecretSize / 2> key{};
-      dns_random(key.data(), key.size());
-      DNSPacket::s_EDNSCookieKey = std::string(key.data(), key.size());
-    }
-    else {
-      try {
-        if (secret.size() != EDNSCookiesOpt::EDNSCookieSecretSize) {
-          throw std::range_error("wrong size (" + std::to_string(secret.size()) + "), must be " + std::to_string(EDNSCookiesOpt::EDNSCookieSecretSize));
+    std::vector<std::string> secrets;
+    stringtok(secrets, ::arg()["edns-cookie-secret"], ",");
+    DNSPacket::s_OldEDNSCookieKeys.reserve(secrets.size() - 1);
+
+    bool first{true};
+    for (const auto& secret : secrets) {
+      if (secret == "random") {
+        if (!first) {
+          SLOG(g_log << Logger::Error << "only the first edns-cookie-secret can be 'random'" << endl,
+               slog->info(Logr::Error, "only the first edns-cookie-secret can be 'random'"));
+          exit(1); // NOLINT(concurrency-mt-unsafe) we're single threaded at this point
         }
-        DNSPacket::s_EDNSCookieKey = makeBytesFromHex(secret);
+        std::array<char, EDNSCookiesOpt::EDNSCookieSecretSize / 2> key{};
+        dns_random(key.data(), key.size());
+        DNSPacket::s_EDNSCookieKey = std::string(key.data(), key.size());
       }
-      catch (const std::range_error& e) {
-        g_log << Logger::Error << "edns-cookie-secret invalid: " << e.what() << endl;
-        exit(1); // NOLINT(concurrency-mt-unsafe) we're single threaded at this point
+      else {
+        try {
+          if (secret.size() != EDNSCookiesOpt::EDNSCookieSecretSize) {
+            throw std::range_error("wrong size (" + std::to_string(secret.size()) + "), must be " + std::to_string(EDNSCookiesOpt::EDNSCookieSecretSize));
+          }
+          auto secretBytes = makeBytesFromHex(secret);
+          if (first) {
+            DNSPacket::s_EDNSCookieKey = std::move(secretBytes);
+          }
+          else {
+            DNSPacket::s_OldEDNSCookieKeys.emplace_back(std::move(secretBytes));
+          }
+        }
+        catch (const std::range_error& e) {
+          SLOG(g_log << Logger::Error << "edns-cookie-secret invalid: " << e.what() << endl,
+               slog->error(Logr::Error, e.what(), "edns-cookie-secret is ill-formed"));
+          exit(1); // NOLINT(concurrency-mt-unsafe) we're single threaded at this point
+        }
       }
+      first = false;
     }
 #else
-    g_log << Logger::Error << "Support for EDNS Cookies is not available because of missing cryptographic functions (libsodium support should be enabled, with the crypto_shorthash() function available)" << endl;
+    SLOG(g_log << Logger::Error << "Support for EDNS Cookies is not available because of missing cryptographic functions (libsodium support should be enabled, with the crypto_shorthash() function available)" << endl,
+         slog->info(Logr::Error, "Support for EDNS Cookies is not available because of missing cryptographic functions (libsodium support should be enabled, with the crypto_shorthash() function available)"));
     exit(1);
 #endif
   }
@@ -786,7 +902,8 @@ static void mainthread()
   // - enabling views currently requires the zone cache to be active
   if (g_views) {
     if (::arg().asNum("zone-cache-refresh-interval") == 0) {
-      g_log << Logger::Error << R"(Error: use of views requires the zone cache to be enabled, please set "zone-cache-refresh-interval" to a nonzero value.)" << endl;
+      SLOG(g_log << Logger::Error << R"(Error: use of views requires the zone cache to be enabled, please set "zone-cache-refresh-interval" to a nonzero value.)" << endl,
+           slog->info(Logr::Error, R"(Error: use of views requires the zone cache to be enabled, please set "zone-cache-refresh-interval" to a nonzero value.)"));
       exit(1); // NOLINT(concurrency-mt-unsafe) we're single threaded at this point
     }
   }
@@ -794,32 +911,38 @@ static void mainthread()
   //   such thread configured
   if (::arg().mustDo("primary") || ::arg().mustDo("secondary") || !::arg()["forward-notify"].empty()) {
     if (::arg().asNum("retrieval-threads", 1) <= 0) {
-      g_log << Logger::Error << R"(Error: primary or secondary operation requires "retrieval-threads" to be set to a nonzero value.)" << endl;
+      SLOG(g_log << Logger::Error << R"(Error: primary or secondary operation requires "retrieval-threads" to be set to a nonzero value.)" << endl,
+           slog->info(Logr::Error, R"(Error: primary or secondary operation requires "retrieval-threads" to be set to a nonzero value.)"));
       exit(1); // NOLINT(concurrency-mt-unsafe) we're single threaded at this point
     }
   }
   // (no more checks yet)
 
-  PC.setTTL(::arg().asNum("cache-ttl"));
-  PC.setMaxEntries(::arg().asNum("max-packet-cache-entries"));
-  QC.setMaxEntries(::arg().asNum("max-cache-entries"));
-  DNSSECKeeper::setMaxEntries(::arg().asNum("max-cache-entries"));
+  PC.setSLog(slog);
+  PC.setTTL(::arg().asNum<uint32_t>("cache-ttl"));
+  PC.setMaxEntries(::arg().asNum<uint64_t>("max-packet-cache-entries"));
+  QC.setSLog(slog);
+  QC.setMaxEntries(::arg().asNum<uint64_t>("max-cache-entries"));
+  DNSSECKeeper::setMaxEntries(::arg().asNum<uint64_t>("max-cache-entries"));
 
   if (!PC.enabled() && ::arg().mustDo("log-dns-queries")) {
-    g_log << Logger::Warning << "Packet cache disabled, logging queries without HIT/MISS" << endl;
+    SLOG(g_log << Logger::Warning << "Packet cache disabled, logging queries without HIT/MISS" << endl,
+         slog->info(Logr::Warning, "Packet cache disabled, logging queries without HIT/MISS"));
   }
   if (::arg()["outgoing-axfr-expand-alias"] == "ignore-errors") {
-    g_log << Logger::Error << "Ignoring ALIAS resolve failures on outgoing AXFR transfers, see option \"outgoing-axfr-expand-alias\"" << endl;
+    SLOG(g_log << Logger::Error << "Ignoring ALIAS resolve failures on outgoing AXFR transfers, see option \"outgoing-axfr-expand-alias\"" << endl,
+         slog->info(Logr::Error, "Ignoring ALIAS resolve failures on outgoing AXFR transfers, see option \"outgoing-axfr-expand-alias\""));
   }
 
-  stubParseResolveConf();
+  stubParseResolveConf(slog);
 
   if (!::arg()["chroot"].empty()) {
 #ifdef HAVE_SYSTEMD
     char* ns;
     ns = getenv("NOTIFY_SOCKET");
     if (ns != nullptr) {
-      g_log << Logger::Error << "Unable to chroot when running from systemd. Please disable chroot= or set the 'Type' for this service to 'simple'" << endl;
+      SLOG(g_log << Logger::Error << "Unable to chroot when running from systemd. Please disable chroot= or set the 'Type' for this service to 'simple'" << endl,
+           slog->info(Logr::Error, "Unable to chroot when running from systemd. Please disable chroot= or set the 'Type' for this service to 'simple'"));
       exit(1);
     }
 #endif
@@ -828,26 +951,29 @@ static void mainthread()
       gethostbyname("a.root-servers.net"); // this forces all lookup libraries to be loaded
     Utility::dropGroupPrivs(newuid, newgid);
     if (chroot(::arg()["chroot"].c_str()) < 0 || chdir("/") < 0) {
-      g_log << Logger::Error << "Unable to chroot to '" + ::arg()["chroot"] + "': " << stringerror() << ", exiting" << endl;
+      SLOG(g_log << Logger::Error << "Unable to chroot to '" + ::arg()["chroot"] + "': " << stringerror() << ", exiting" << endl,
+           slog->error(Logr::Error, errno, "Unable to chroot", "directory", Logging::Loggable(::arg()["chroot"])));
       exit(1);
     }
     else
-      g_log << Logger::Error << "Chrooted to '" << ::arg()["chroot"] << "'" << endl;
+      SLOG(g_log << Logger::Error << "Chrooted to '" << ::arg()["chroot"] << "'" << endl,
+           slog->info(Logr::Error, "Chrooted", "directory", Logging::Loggable(::arg()["chroot"])));
   }
   else {
     Utility::dropGroupPrivs(newuid, newgid);
   }
 
-  AuthWebServer webserver;
+  AuthWebServer webserver(S);
   Utility::dropUserPrivs(newuid);
 
   if (::arg().mustDo("resolver")) {
-    DP = std::make_unique<DNSProxy>(::arg()["resolver"], ::arg()["dnsproxy-udp-port-range"]);
+    DP = std::make_unique<DNSProxy>(slog, ::arg()["resolver"], ::arg()["dnsproxy-udp-port-range"]);
     DP->go();
   }
 
+  bool performSecPoll{true};
   try {
-    doSecPoll(true);
+    performSecPoll = doSecPoll(slog, true);
   }
   catch (...) {
   }
@@ -857,17 +983,20 @@ static void mainthread()
     bool hadKeyError = false;
     int kskAlgo{0}, zskAlgo{0};
     for (const string algotype : {"ksk", "zsk"}) {
-      int algo, size;
-      if (::arg()["default-" + algotype + "-algorithm"].empty())
+      std::string key = "default-" + algotype + "-algorithm";
+      if (::arg()[key].empty())
         continue;
-      algo = DNSSECKeeper::shorthand2algorithm(::arg()["default-" + algotype + "-algorithm"]);
-      size = ::arg().asNum("default-" + algotype + "-size");
+      int algo = DNSSECKeeper::shorthand2algorithm(::arg()[key]);
+      std::string sizekey = "default-" + algotype + "-size";
+      auto size = ::arg().asNum<size_t>(sizekey);
       if (algo == -1) {
-        g_log << Logger::Error << "Error: default-" << algotype << "-algorithm set to unknown algorithm: " << ::arg()["default-" + algotype + "-algorithm"] << endl;
+        SLOG(g_log << Logger::Error << "Error: " << key << " set to unknown algorithm: " << ::arg()[key] << endl,
+             slog->info(Logr::Error, "Unknown algorithm specified", "setting", Logging::Loggable(key), "algorithm", Logging::Loggable(::arg()[key])));
         hadKeyError = true;
       }
       else if (algo <= 10 && size == 0) {
-        g_log << Logger::Error << "Error: default-" << algotype << "-algorithm is set to an algorithm (" << ::arg()["default-" + algotype + "-algorithm"] << ") that requires a non-zero default-" << algotype << "-size!" << endl;
+        SLOG(g_log << Logger::Error << "Error: " << key << " is set to an algorithm (" << ::arg()[key] << ") that requires a non-zero " << sizekey << "!" << endl,
+             slog->info(Logr::Error, "algorithm requires a non-zero key size", "setting", Logging::Loggable(sizekey), "algorithm", Logging::Loggable(::arg()[key])));
         hadKeyError = true;
       }
       if (algotype == "ksk") {
@@ -881,11 +1010,13 @@ static void mainthread()
       exit(1);
     }
     if (kskAlgo == 0 && zskAlgo != 0) {
-      g_log << Logger::Error << "Error: default-zsk-algorithm is set, but default-ksk-algorithm is not set." << endl;
+      SLOG(g_log << Logger::Error << "Error: default-zsk-algorithm is set, but default-ksk-algorithm is not set." << endl,
+           slog->info(Logr::Error, "default-zsk-algorithm is set, but default-ksk-algorithm is not set."));
       exit(1);
     }
     if (zskAlgo != 0 && zskAlgo != kskAlgo) {
-      g_log << Logger::Error << "Error: default-zsk-algorithm (" << ::arg()["default-zsk-algorithm"] << "), when set, can not be different from default-ksk-algorithm (" << ::arg()["default-ksk-algorithm"] << ")." << endl;
+      SLOG(g_log << Logger::Error << "Error: default-zsk-algorithm (" << ::arg()["default-zsk-algorithm"] << "), when set, can not be different from default-ksk-algorithm (" << ::arg()["default-ksk-algorithm"] << ")." << endl,
+           slog->info(Logr::Error, "default-zsk-algorithm, when set, can not be different from default-ksk-algorithm", "default-zsk-algorithm", Logging::Loggable(::arg()["default-zsk-algorithm"]), "default-ksk-algorithm", Logging::Loggable(::arg()["default-ksk-algorithm"])));
       exit(1);
     }
   }
@@ -894,28 +1025,31 @@ static void mainthread()
 
   pdns::parseTrustedNotificationProxy(::arg()["trusted-notification-proxy"]);
 
+  {
+    vector<string> addrs;
+    stringtok(addrs, ::arg()["protobuf-servers"], ", ;");
+
+    for (const string& addr : addrs) {
+      g_remote_loggers.emplace_back(make_unique<RemoteLogger>(ComboAddress(addr), 2, 100000, 1, false, RemoteLogger::FrameSize::Two, 5));
+    }
+  }
+
   UeberBackend::go();
 
   // Setup the zone cache
-  g_zoneCache.setRefreshInterval(::arg().asNum("zone-cache-refresh-interval"));
-  try {
-    UeberBackend B;
-    B.updateZoneCache();
-  }
-  catch (PDNSException& e) {
-    g_log << Logger::Error << "PDNSException while filling the zone cache: " << e.reason << endl;
-    exit(1);
-  }
-  catch (std::exception& e) {
-    g_log << Logger::Error << "STL Exception while filling the zone cache: " << e.what() << endl;
-    exit(1);
+  g_zoneCache.setSLog(slog);
+  g_zoneCache.setRefreshInterval(::arg().asNum<uint32_t>("zone-cache-refresh-interval"));
+  if (g_zoneCache.getRefreshInterval() != 0) {
+    if (!updateZoneCache(slog)) {
+      exit(1); // NOLINT(concurrency-mt-unsafe) we're single threaded at this point
+    }
   }
 
   // NOW SAFE TO CREATE THREADS!
   s_dynListener->go();
 
   if (::arg().mustDo("webserver") || ::arg().mustDo("api")) {
-    webserver.go(S);
+    webserver.go(slog);
   }
 
   if (::arg().mustDo("primary") || ::arg().mustDo("secondary") || !::arg()["forward-notify"].empty())
@@ -923,14 +1057,14 @@ static void mainthread()
 
   s_tcpNameserver->go(); // tcp nameserver launch
 
-  unsigned int max_rthreads = ::arg().asNum("receiver-threads", 1);
+  auto max_rthreads = ::arg().asNum<unsigned int>("receiver-threads", 1);
   s_distributors.resize(max_rthreads);
   for (unsigned int n = 0; n < max_rthreads; ++n) {
     std::thread t(qthread, n);
     t.detach();
   }
 
-  std::thread carbonThread(carbonDumpThread); // runs even w/o carbon, might change @ runtime
+  std::thread carbonThread(carbonDumpThread, std::ref(slog)); // runs even w/o carbon, might change @ runtime
 
 #ifdef HAVE_SYSTEMD
   /* If we are here, notify systemd that we are ay-ok! This might have some
@@ -945,36 +1079,34 @@ static void mainthread()
   uint32_t secpollSince = 0;
   uint32_t zoneCacheUpdateSince = 0;
   for (;;) {
-    const uint32_t sleeptime = g_zoneCache.getRefreshInterval() == 0 ? secpollInterval : std::min(secpollInterval, g_zoneCache.getRefreshInterval());
+    auto zoneCacheRefresh = g_zoneCache.getRefreshInterval();
+    const uint32_t sleeptime = zoneCacheRefresh == 0 ? secpollInterval : std::min(secpollInterval, zoneCacheRefresh);
     sleep(sleeptime); // if any signals arrive, we might run more often than expected.
 
-    zoneCacheUpdateSince += sleeptime;
-    if (zoneCacheUpdateSince >= g_zoneCache.getRefreshInterval()) {
-      try {
-        UeberBackend B;
-        B.updateZoneCache();
-        zoneCacheUpdateSince = 0;
-      }
-      catch (PDNSException& e) {
-        g_log << Logger::Error << "PDNSException while updating zone cache: " << e.reason << endl;
-      }
-      catch (std::exception& e) {
-        g_log << Logger::Error << "STL Exception while updating zone cache: " << e.what() << endl;
+    if (zoneCacheRefresh != 0) {
+      zoneCacheUpdateSince += sleeptime;
+      if (zoneCacheUpdateSince >= zoneCacheRefresh) {
+        if (updateZoneCache(slog)) {
+          zoneCacheUpdateSince = 0;
+        }
       }
     }
 
-    secpollSince += sleeptime;
-    if (secpollSince >= secpollInterval) {
-      secpollSince = 0;
-      try {
-        doSecPoll(false);
-      }
-      catch (...) {
+    if (performSecPoll) {
+      secpollSince += sleeptime;
+      if (secpollSince >= secpollInterval) {
+        secpollSince = 0;
+        try {
+          performSecPoll = doSecPoll(slog, false);
+        }
+        catch (...) {
+        }
       }
     }
   }
 
-  g_log << Logger::Error << "Mainthread exiting - should never happen" << endl;
+  SLOG(g_log << Logger::Error << "Mainthread exiting - should never happen" << endl,
+       slog->info(Logr::Error, "Mainthread exiting - should never happen"));
 }
 
 static void daemonize()
@@ -985,8 +1117,10 @@ static void daemonize()
   setsid();
 
   int i = open("/dev/null", O_RDWR); /* open stdin */
-  if (i < 0)
-    g_log << Logger::Critical << "Unable to open /dev/null: " << stringerror() << endl;
+  if (i < 0) {
+    SLOG(g_log << Logger::Critical << "Unable to open /dev/null: " << stringerror() << endl,
+         g_slog->withName("guardian")->error(Logr::Critical, errno, "Unable to open /dev/null"));
+  }
   else {
     dup2(i, 0); /* stdin */
     dup2(i, 1); /* stderr */
@@ -995,17 +1129,41 @@ static void daemonize()
   }
 }
 
-static int cpid;
-static void takedown(int /* i */)
+static bool axe(pid_t pid, bool waitok)
 {
-  if (cpid) {
-    g_log << Logger::Error << "Guardian is killed, taking down children with us" << endl;
-    kill(cpid, SIGKILL);
+  if (kill(pid, SIGTERM) != 0) {
+    // Either already gone or we can't signal it anyway, there is nothing we can do.
+    return false;
+  }
+  // If we are allowed to sleep here, give a few seconds (well, 2) to the
+  // process to disappear.
+  if (waitok) {
+    for (unsigned int cycles = 2 * 10; cycles != 0; --cycles) {
+      Utility::usleep(100UL * 1000UL);
+      int status{};
+      int ret = waitpid(pid, &status, WNOHANG);
+      if (ret > 0 && (WIFEXITED(status) || WIFSIGNALED(status))) {
+        return true; // process has died
+      }
+    }
+    // Process is taking time to exit, use a larger hammer
+    return kill(pid, SIGKILL) == 0;
+  }
+  return true;
+}
+
+static pid_t cpid;
+static void takedown(int signum)
+{
+  if (cpid != 0) {
+    SLOG(g_log << Logger::Error << "Guardian is killed, taking down children with us" << endl,
+         g_slog->withName("guardian")->info(Logr::Error, "Guardian is killed, taking down children with us"));
+    axe(cpid, signum == 0);
     exit(0);
   }
 }
 
-static void writePid()
+static void writePid(Logr::log_t slog)
 {
   if (!::arg().mustDo("write-pid"))
     return;
@@ -1023,10 +1181,13 @@ static void writePid()
 
   fname += +"/" + g_programname + ".pid";
   ofstream of(fname.c_str());
-  if (of)
+  if (of) {
     of << getpid() << endl;
-  else
-    g_log << Logger::Error << "Writing pid for " << getpid() << " to " << fname << " failed: " << stringerror() << endl;
+  }
+  else {
+    SLOG(g_log << Logger::Error << "Writing pid for " << getpid() << " to " << fname << " failed: " << stringerror() << endl,
+         slog->error(Logr::Error, errno, "Failed to write pid file", "pid", Logging::Loggable(getpid()), "file", Logging::Loggable(fname)));
+  }
 }
 
 static int g_fd1[2], g_fd2[2];
@@ -1034,15 +1195,13 @@ static FILE* g_fp;
 static std::mutex g_guardian_lock;
 
 // The next two methods are not in dynhandler.cc because they use a few items declared in this file.
-static string DLCycleHandler(const vector<string>& /* parts */, pid_t /* ppid */)
+static string DLCycleHandler(const vector<string>& /* parts */, pid_t /* ppid */, Logr::log_t /* slog */)
 {
-  kill(cpid, SIGKILL); // why?
-  kill(cpid, SIGKILL); // why?
-  sleep(1);
+  axe(cpid, true);
   return "ok";
 }
 
-static string DLRestHandler(const vector<string>& parts, pid_t /* ppid */)
+static string DLRestHandler(const vector<string>& parts, pid_t /* ppid */, Logr::log_t /* slog */)
 {
   string line;
 
@@ -1072,14 +1231,20 @@ static string DLRestHandler(const vector<string>& parts, pid_t /* ppid */)
   return response;
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity): can probably get removed when structured logging becomes the only alternative and SLOG macros disappear
 static int guardian(int argc, char** argv)
 {
   if (isGuarded(argv))
     return 0;
 
+  std::shared_ptr<Logr::Logger> slog;
+  if (g_slogStructured) {
+    slog = g_slog->withName("guardian");
+  }
+
   int infd = 0, outfd = 1;
 
-  DynListener dlg(g_programname);
+  DynListener dlg(slog, g_programname);
   DynListener::registerExitFunc("QUIT", &DLQuitHandler);
   DynListener::registerFunc("CYCLE", &DLCycleHandler, "restart instance");
   DynListener::registerFunc("PING", &DLPingHandler, "ping guardian");
@@ -1098,12 +1263,14 @@ static int guardian(int argc, char** argv)
     setStatus("Launching child");
 
     if (pipe(g_fd1) < 0 || pipe(g_fd2) < 0) {
-      g_log << Logger::Critical << "Unable to open pipe for coprocess: " << stringerror() << endl;
+      SLOG(g_log << Logger::Critical << "Unable to open pipe for coprocess: " << stringerror() << endl,
+           slog->error(Logr::Critical, errno, "Unable to open pipe for coprocess"));
       exit(1);
     }
 
     if (!(g_fp = fdopen(g_fd2[0], "r"))) {
-      g_log << Logger::Critical << "Unable to associate a file pointer with pipe: " << stringerror() << endl;
+      SLOG(g_log << Logger::Critical << "Unable to associate a file pointer with pipe: " << stringerror() << endl,
+           slog->error(Logr::Critical, errno, "Unable to associate a file pointer with pipe"));
       exit(1);
     }
     setbuf(g_fp, nullptr); // no buffering please, confuses select
@@ -1120,7 +1287,8 @@ static int guardian(int argc, char** argv)
 
       if (::arg()["config-name"] != "") {
         progname += "-" + ::arg()["config-name"];
-        g_log << Logger::Error << "Virtual configuration name: " << ::arg()["config-name"] << endl;
+        SLOG(g_log << Logger::Error << "Virtual configuration name: " << ::arg()["config-name"] << endl,
+             slog->info(Logr::Error, "Virtual configuration name", "name", Logging::Loggable(::arg()["config-name"])));
       }
 
       newargv[0] = strdup(const_cast<char*>((progname + "-instance").c_str()));
@@ -1129,7 +1297,8 @@ static int guardian(int argc, char** argv)
       }
       newargv[n] = nullptr;
 
-      g_log << Logger::Error << "Guardian is launching an instance" << endl;
+      SLOG(g_log << Logger::Error << "Guardian is launching an instance" << endl,
+           slog->info(Logr::Error, "Guardian is launching an instance"));
       close(g_fd1[1]);
       fclose(g_fp); // this closes g_fd2[0] for us
 
@@ -1143,14 +1312,26 @@ static int guardian(int argc, char** argv)
         close(g_fd2[1]);
       }
       if (execvp(argv[0], newargv) < 0) {
-        g_log << Logger::Error << "Unable to execvp '" << argv[0] << "': " << stringerror() << endl;
-        char** p = newargv;
-        while (*p)
-          g_log << Logger::Error << *p++ << endl;
-
+        if (g_slogStructured) {
+          // This is ugly, but will do until newargv is converted to a
+          // std::array.
+          std::vector<char*> vecargv;
+          vecargv.reserve(argc);
+          for (n = 0; n < argc; ++n) {
+            vecargv[n] = newargv[n];
+          }
+          slog->error(Logr::Error, errno, "Unable to execvp", "command", Logging::Loggable(argv[0]), "arguments", Logging::IterLoggable(vecargv.cbegin(), vecargv.cend()));
+        }
+        else {
+          g_log << Logger::Error << "Unable to execvp '" << argv[0] << "': " << stringerror() << endl;
+          char** p = newargv;
+          while (*p)
+            g_log << Logger::Error << *p++ << endl;
+        }
         exit(1);
       }
-      g_log << Logger::Error << "execvp returned!!" << endl;
+      SLOG(g_log << Logger::Error << "execvp returned!!" << endl,
+           slog->info(Logr::Error, "execv returned!!"));
       // never reached
     }
     else if (pid > 0) { // parent
@@ -1165,7 +1346,7 @@ static int guardian(int argc, char** argv)
         signal(SIGUSR1, SIG_IGN);
         signal(SIGUSR2, SIG_IGN);
 
-        writePid();
+        writePid(slog);
       }
       g_guardian_lock.unlock();
       int status;
@@ -1174,16 +1355,22 @@ static int guardian(int argc, char** argv)
         int ret = waitpid(pid, &status, WNOHANG);
 
         if (ret < 0) {
-          g_log << Logger::Error << "In guardian loop, waitpid returned error: " << stringerror() << endl;
-          g_log << Logger::Error << "Dying" << endl;
+          if (g_slogStructured) {
+            slog->error(Logr::Error, errno, "In guardian loop, waitpid returned an error. Dying");
+          }
+          else {
+            g_log << Logger::Error << "In guardian loop, waitpid returned error: " << stringerror() << endl;
+            g_log << Logger::Error << "Dying" << endl;
+          }
           exit(1);
         }
         else if (ret) // something exited
           break;
         else { // child is alive
           // execute some kind of ping here
-          if (DLQuitPlease())
-            takedown(1); // needs a parameter..
+          if (DLQuitPlease()) {
+            takedown(0); // not invoked from a signal handler
+          }
           setStatus("Child running on pid " + std::to_string(pid));
           sleep(1);
         }
@@ -1198,11 +1385,13 @@ static int guardian(int argc, char** argv)
         int ret = WEXITSTATUS(status);
 
         if (ret == 99) {
-          g_log << Logger::Error << "Child requested a stop, exiting" << endl;
+          SLOG(g_log << Logger::Error << "Child requested a stop, exiting" << endl,
+               slog->info(Logr::Error, "Child requested a stop, exiting"));
           exit(1);
         }
         setStatus("Child died with code " + std::to_string(ret));
-        g_log << Logger::Error << "Our pdns instance exited with code " << ret << ", respawning" << endl;
+        SLOG(g_log << Logger::Error << "Our pdns instance exited with code " << ret << ", respawning" << endl,
+             slog->info(Logr::Error, "Our pdns instance exited, respawning", "pid", Logging::Loggable(pid), "status code", Logging::Loggable(ret)));
 
         sleep(1);
         continue;
@@ -1210,20 +1399,30 @@ static int guardian(int argc, char** argv)
       if (WIFSIGNALED(status)) {
         int sig = WTERMSIG(status);
         setStatus("Child died because of signal " + std::to_string(sig));
-        g_log << Logger::Error << "Our pdns instance (" << pid << ") exited after signal " << sig << endl;
+        if (g_slogStructured) {
+          slog->info(Logr::Error, "Our pdns instance exited after signal, respawning", "pid", Logging::Loggable(pid), "signal", Logging::Loggable(sig),
 #ifdef WCOREDUMP
-        if (WCOREDUMP(status))
-          g_log << Logger::Error << "Dumped core" << endl;
+                     "coredump", Logging::Loggable(WCOREDUMP(status) ? "yes" : "no")
 #endif
-
-        g_log << Logger::Error << "Respawning" << endl;
+          );
+        }
+        else {
+          g_log << Logger::Error << "Our pdns instance (" << pid << ") exited after signal " << sig << endl;
+#ifdef WCOREDUMP
+          if (WCOREDUMP(status))
+            g_log << Logger::Error << "Dumped core" << endl;
+#endif
+          g_log << Logger::Error << "Respawning" << endl;
+        }
         sleep(1);
         continue;
       }
-      g_log << Logger::Error << "No clue what happened! Respawning" << endl;
+      SLOG(g_log << Logger::Error << "No clue what happened! Respawning" << endl,
+           slog->info(Logr::Error, "No clue what happened! Respawning"));
     }
     else {
-      g_log << Logger::Error << "Unable to fork: " << stringerror() << endl;
+      SLOG(g_log << Logger::Error << "Unable to fork: " << stringerror() << endl,
+           slog->error(Logr::Error, errno, "Unable to fork"));
       exit(1);
     }
   }
@@ -1233,6 +1432,8 @@ static int guardian(int argc, char** argv)
 #include <execinfo.h>
 static void tbhandler(int num)
 {
+  // We do not attempt to use the structured logger in this routine, for it
+  // may be invoked before its proper initialization.
   g_log << Logger::Critical << "Got a signal " << num << ", attempting to print trace: " << endl;
   void* array[20]; // only care about last 17 functions (3 taken with tracing support)
   size_t size;
@@ -1258,10 +1459,78 @@ static void sigTermHandler([[maybe_unused]] int signal)
 }
 #endif /* COVERAGE */
 
+static void loggerBackend(const Logging::Entry& entry)
+{
+  static thread_local std::stringstream buf;
+
+  // First map SL priority to syslog's Urgency
+  Logger::Urgency urg = entry.d_priority != 0 ? Logger::Urgency(entry.d_priority) : Logger::Info;
+  if (urg > s_logUrgency) {
+    // We do not log anything if the Urgency of the message is lower than the requested loglevel.
+    // Not that lower Urgency means higher number.
+    return;
+  }
+  buf.str("");
+  buf << "msg=" << std::quoted(entry.message);
+  if (entry.error) {
+    buf << " error=" << std::quoted(entry.error.value());
+  }
+
+  if (entry.name) {
+    buf << " subsystem=" << std::quoted(entry.name.value());
+  }
+#ifndef PDNS_AUTH
+  buf << " level=" << std::quoted(std::to_string(entry.level));
+#endif
+  if (entry.d_priority != 0) {
+    buf << " prio=" << std::quoted(Logr::Logger::toString(entry.d_priority));
+  }
+
+  std::array<char, 64> timebuf{};
+  buf << " ts=" << std::quoted(Logging::toTimestampStringMilli(entry.d_timestamp, timebuf));
+  for (auto const& value : entry.values) {
+    buf << " ";
+    buf << value.first << "=" << std::quoted(value.second);
+  }
+
+  g_log << urg << buf.str() << endl;
+}
+
+static void setupLogging()
+{
+  s_logUrgency = (Logger::Urgency)(::arg().asNum("loglevel"));
+
+  if (!::arg()["logging-facility"].empty()) {
+    int val = logFacilityToLOG(::arg().asNum("logging-facility"));
+    if (val >= 0)
+      g_log.setFacility(val);
+    else
+      g_log << Logger::Error << "Unknown logging facility " << ::arg().asNum("logging-facility") << endl;
+  }
+  g_log.setLoglevel(s_logUrgency);
+  g_log.toConsole(s_logUrgency);
+  g_log.disableSyslog(::arg().mustDo("disable-syslog"));
+  g_log.setTimestamps(::arg().mustDo("log-timestamp"));
+
+  g_slogStructured = ::arg().mustDo("logging-structured");
+  if (g_slogStructured) {
+    g_slog = Logging::Logger::create(loggerBackend);
+  }
+  else {
+    g_log.setPrefixed(::arg().mustDo("loglevel-show"));
+  }
+
+  if (g_slogStructured) {
+    Communicator.setSLog(g_slog->withName("communicator"));
+  }
+}
+
 //! The main function of pdns, the pdns process
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 int main(int argc, char** argv)
 {
+  std::string configname;
+
   versionSetProduct(ProductAuthoritative);
   reportAllTypes(); // init MOADNSParser
 
@@ -1294,7 +1563,7 @@ int main(int argc, char** argv)
 
     g_log.setName(g_programname);
 
-    string configname = ::arg()["config-dir"] + "/" + g_programname + ".conf";
+    configname = ::arg()["config-dir"] + "/" + g_programname + ".conf";
     cleanSlashes(configname);
 
     if (::arg()["config"] != "default" && !::arg().mustDo("no-config")) // "config" == print a configuration file
@@ -1312,12 +1581,24 @@ int main(int argc, char** argv)
                 << "and will be removed in a future version" << std::endl;
     }
 
-    if (!::arg()["logging-facility"].empty()) {
-      int val = logFacilityToLOG(::arg().asNum("logging-facility"));
-      if (val >= 0)
-        g_log.setFacility(val);
-      else
-        g_log << Logger::Error << "Unknown logging facility " << ::arg().asNum("logging-facility") << endl;
+    setupLogging();
+  }
+  catch (const ArgException& A) {
+    // At this point, we do not have a structured logger yet.
+    g_log << Logger::Error << "Fatal error: " << A.reason << endl;
+    exit(1);
+  }
+  catch (const std::exception& e) {
+    // At this point, we do not have a structured logger yet.
+    g_log << Logger::Error << "Fatal error: " << e.what() << endl;
+    exit(1);
+  }
+
+  try {
+    std::shared_ptr<Logr::Logger> startupLog;
+    if (g_slogStructured) {
+      startupLog = g_slog->withName("config");
+      ::arg().setSLog(startupLog);
     }
 
     if (!::arg().isEmpty("domain-metadata-cache-ttl"))
@@ -1325,12 +1606,6 @@ int main(int argc, char** argv)
 
     // this mirroring back is on purpose, so that config dumps reflect the actual setting on both names
     ::arg().set("domain-metadata-cache-ttl") = ::arg()["zone-metadata-cache-ttl"];
-
-    g_log.setLoglevel((Logger::Urgency)(::arg().asNum("loglevel")));
-    g_log.setPrefixed(::arg().mustDo("loglevel-show"));
-    g_log.disableSyslog(::arg().mustDo("disable-syslog"));
-    g_log.setTimestamps(::arg().mustDo("log-timestamp"));
-    g_log.toConsole((Logger::Urgency)(::arg().asNum("loglevel")));
 
     if (::arg().mustDo("help") || ::arg().mustDo("config")) {
       ::arg().set("daemon") = "no";
@@ -1357,7 +1632,8 @@ int main(int argc, char** argv)
 
 #if defined(__GLIBC__) && !defined(__UCLIBC__)
     if (!::arg().mustDo("traceback-handler")) {
-      g_log << Logger::Warning << "Disabling traceback handler" << endl;
+      SLOG(g_log << Logger::Warning << "Disabling traceback handler" << endl,
+           startupLog->info(Logr::Warning, "Disabling traceback handler"));
       signal(SIGSEGV, SIG_DFL);
       signal(SIGFPE, SIG_DFL);
       signal(SIGABRT, SIG_DFL);
@@ -1372,7 +1648,6 @@ int main(int argc, char** argv)
     }
 #endif
 
-    openssl_thread_setup();
     openssl_seed();
 
 #ifdef HAVE_LUA_RECORDS
@@ -1388,7 +1663,7 @@ int main(int argc, char** argv)
       }
     }
 
-    BackendMakers().launch(::arg()["launch"]); // vrooooom!
+    BackendMakers(g_slog).launch(::arg()["launch"]); // vrooooom!
 
     if (!::arg().getCommands().empty()) {
       cerr << "Fatal: non-option";
@@ -1450,12 +1725,14 @@ int main(int argc, char** argv)
       _exit(99);
     }
 
-    if (!::arg().asNum("local-port")) {
-      g_log << Logger::Error << "Unable to launch, binding to no port or port 0 makes no sense" << endl;
+    if (::arg().asNum<uint16_t>("local-port") == 0) {
+      SLOG(g_log << Logger::Error << "Unable to launch, binding to no port or port 0 makes no sense" << endl,
+           startupLog->info(Logr::Error, "Unable to launch, no proper local-port configured"));
       exit(99); // this isn't going to fix itself either
     }
     if (!BackendMakers().numLauncheable()) {
-      g_log << Logger::Error << "Unable to launch, no backends configured for querying" << endl;
+      SLOG(g_log << Logger::Error << "Unable to launch, no backends configured for querying" << endl,
+           startupLog->info(Logr::Error, "Unable to launch, no backends configured for querying"));
       exit(99); // this isn't going to fix itself either
     }
     if (::arg().mustDo("daemon")) {
@@ -1465,18 +1742,20 @@ int main(int argc, char** argv)
     }
 
     if (isGuarded(argv)) {
-      g_log << Logger::Warning << "This is a guarded instance of pdns" << endl;
-      s_dynListener = std::make_unique<DynListener>(); // listens on stdin
+      SLOG(g_log << Logger::Warning << "This is a guarded instance of pdns" << endl,
+           g_slog->info(Logr::Warning, "This is a guarded instance of pdns"));
+      s_dynListener = std::make_unique<DynListener>(g_slog); // listens on stdin
     }
     else {
-      g_log << Logger::Warning << "This is a standalone pdns" << endl;
+      SLOG(g_log << Logger::Warning << "This is a standalone pdns" << endl,
+           g_slog->info(Logr::Warning, "This is a standalone pdns"));
 
       if (::arg().mustDo("control-console"))
-        s_dynListener = std::make_unique<DynListener>();
+        s_dynListener = std::make_unique<DynListener>(g_slog);
       else
-        s_dynListener = std::make_unique<DynListener>(g_programname);
+        s_dynListener = std::make_unique<DynListener>(g_slog, g_programname);
 
-      writePid();
+      writePid(g_slog);
     }
     DynListener::registerExitFunc("QUIT", &DLRQuitHandler);
     DynListener::registerFunc("CCOUNTS", &DLCCHandler, "get cache statistics");
@@ -1499,9 +1778,10 @@ int main(int argc, char** argv)
     DynListener::registerFunc("UPTIME", &DLUptimeHandler, "get instance uptime");
     DynListener::registerFunc("VERSION", &DLVersionHandler, "get instance version");
     DynListener::registerFunc("XFR-QUEUE", &DLSuckRequests, "Get all requests for XFR in queue");
+    DynListener::registerFunc("COOKIE-SECRET", &DLManageCookieSecret, "Manage EDNS Cookie secrets", "<COMMAND>");
 
     if (!::arg()["tcp-control-address"].empty()) {
-      DynListener* dlTCP = new DynListener(ComboAddress(::arg()["tcp-control-address"], ::arg().asNum("tcp-control-port")));
+      auto* dlTCP = new DynListener(g_slog, ComboAddress(::arg()["tcp-control-address"], ::arg().asNum<uint16_t>("tcp-control-port")));
       dlTCP->go();
     }
 
@@ -1516,36 +1796,44 @@ int main(int argc, char** argv)
         ::arg().set("server-id") = tmp;
       }
       else {
-        g_log << Logger::Warning << "Unable to get the hostname, NSID and id.server values will be empty: " << stringerror() << endl;
+        SLOG(g_log << Logger::Warning << "Unable to get the hostname, NSID and id.server values will be empty: " << stringerror() << endl,
+             g_slog->error(Logr::Warning, errno, "Unable to get the hostname, NSID and id.server values will be empty"));
       }
     }
 
-    s_udpNameserver = std::make_shared<UDPNameserver>(); // this fails when we are not root, throws exception
+    s_udpNameserver = std::make_shared<UDPNameserver>(g_slog); // this fails when we are not root, throws exception
     s_udpReceivers.push_back(s_udpNameserver);
 
-    size_t rthreads = ::arg().asNum("receiver-threads", 1);
+    auto rthreads = ::arg().asNum<size_t>("receiver-threads", 1);
     if (rthreads > 1 && s_udpNameserver->canReusePort()) {
       s_udpReceivers.resize(rthreads);
 
       for (size_t idx = 1; idx < rthreads; idx++) {
         try {
-          s_udpReceivers[idx] = std::make_shared<UDPNameserver>(true);
+          s_udpReceivers[idx] = std::make_shared<UDPNameserver>(g_slog, true);
         }
         catch (const PDNSException& e) {
-          g_log << Logger::Error << "Unable to reuse port, falling back to original bind" << endl;
+          SLOG(g_log << Logger::Error << "Unable to reuse port, falling back to original bind" << endl,
+               g_slog->error(Logr::Error, e.reason, "Unable to reuse port, falling back to original bind"));
           break;
         }
       }
     }
 
-    s_tcpNameserver = make_unique<TCPNameserver>();
+    std::shared_ptr<Logr::Logger> nameserverslog;
+    if (g_slogStructured) {
+      nameserverslog = g_slog->withName("tcpnameserver");
+    }
+    s_tcpNameserver = make_unique<TCPNameserver>(nameserverslog);
   }
   catch (const ArgException& A) {
-    g_log << Logger::Error << "Fatal error: " << A.reason << endl;
+    SLOG(g_log << Logger::Error << "Fatal error: " << A.reason << endl,
+         g_slog->error(Logr::Error, A.reason, "Fatal error"));
     exit(1);
   }
   catch (const std::exception& e) {
-    g_log << Logger::Error << "Fatal error: " << e.what() << endl;
+    SLOG(g_log << Logger::Error << "Fatal error: " << e.what() << endl,
+         g_slog->error(Logr::Error, e.what(), "Fatal error"));
     exit(1);
   }
 
@@ -1553,26 +1841,30 @@ int main(int argc, char** argv)
     declareStats();
   }
   catch (const PDNSException& PE) {
-    g_log << Logger::Error << "Exiting because: " << PE.reason << endl;
+    SLOG(g_log << Logger::Error << "Exiting because: " << PE.reason << endl,
+         g_slog->error(Logr::Error, PE.reason, "Fatal error"));
     exit(1);
   }
 
   try {
-    auto defaultCatalog = ::arg()["default-catalog-zone"];
+    const auto& defaultCatalog = ::arg()["default-catalog-zone"];
     if (!defaultCatalog.empty()) {
       auto defCatalog = DNSName(defaultCatalog);
     }
   }
   catch (const std::exception& e) {
-    g_log << Logger::Error << "Invalid value '" << ::arg()["default-catalog-zone"] << "' for default-catalog-zone: " << e.what() << endl;
+    SLOG(g_log << Logger::Error << "Invalid value '" << ::arg()["default-catalog-zone"] << "' for default-catalog-zone: " << e.what() << endl,
+         g_slog->error(Logr::Error, e.what(), "Invalid value for default-catalog-zone"));
     exit(1);
   }
   S.blacklist("special-memory-usage");
 
-  DLOG(g_log << Logger::Warning << "Verbose logging in effect" << endl);
+  DLOG(SLOG(g_log << Logger::Warning << "Verbose logging in effect" << endl,
+            g_slog->info(Logr::Warning, "Verbose logging in effect")));
 
   for (const string& line : getProductVersionLines()) {
-    g_log << Logger::Warning << line << endl;
+    SLOG(g_log << Logger::Warning << line << endl,
+         g_slog->info(Logr::Warning, line));
   }
 
   try {
@@ -1586,7 +1878,8 @@ int main(int argc, char** argv)
     }
     catch (const ArgException& A) {
     }
-    g_log << Logger::Error << "Exiting because: " << e.reason << endl;
+    SLOG(g_log << Logger::Error << "Exiting because: " << e.reason << endl,
+         g_slog->error(Logr::Error, e.reason, "Fatal error"));
   }
   catch (const std::exception& e) {
     try {
@@ -1596,7 +1889,8 @@ int main(int argc, char** argv)
     }
     catch (const ArgException& A) {
     }
-    g_log << Logger::Error << "Exiting because of STL error: " << e.what() << endl;
+    SLOG(g_log << Logger::Error << "Exiting because of STL error: " << e.what() << endl,
+         g_slog->error(Logr::Error, e.what(), "Fatal STL error"));
   }
   catch (...) {
     cerr << "Uncaught exception of unknown type - sorry" << endl;

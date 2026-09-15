@@ -58,7 +58,7 @@ void RecordTextReader::xfrNodeOrLocatorID(NodeOrLocatorID& val) {
   skipSpaces();
   size_t len;
   for(len=0;
-      d_pos+len < d_string.length() && (isxdigit(d_string.at(d_pos+len)) || d_string.at(d_pos+len) == ':');
+      d_pos+len < d_string.length() && (isxdigit(static_cast<unsigned char>(d_string.at(d_pos+len))) != 0 || d_string.at(d_pos+len) == ':');
       len++) ;   // find length of ID
 
   // Parse as v6, and then strip the final 64 zero bytes
@@ -77,9 +77,9 @@ void RecordTextReader::xfr64BitInt(uint64_t &val)
 {
   skipSpaces();
 
-  if(!isdigit(d_string.at(d_pos)))
+  if (isdigit(static_cast<unsigned char>(d_string.at(d_pos))) == 0) {
     throw RecordTextException("expected digits at position "+std::to_string(d_pos)+" in '"+d_string+"'");
-
+  }
   size_t pos;
   val=std::stoull(d_string.substr(d_pos), &pos);
 
@@ -91,9 +91,9 @@ void RecordTextReader::xfr32BitInt(uint32_t &val)
 {
   skipSpaces();
 
-  if(!isdigit(d_string.at(d_pos)))
+  if (isdigit(static_cast<unsigned char>(d_string.at(d_pos))) == 0) {
     throw RecordTextException("expected digits at position "+std::to_string(d_pos)+" in '"+d_string+"'");
-
+  }
   size_t pos;
   val = pdns::checked_stoi<uint32_t>(d_string.c_str() + d_pos, &pos);
 
@@ -141,9 +141,9 @@ void RecordTextReader::xfrIP(uint32_t &val)
 {
   skipSpaces();
 
-  if(!isdigit(d_string.at(d_pos)))
+  if (isdigit(static_cast<unsigned char>(d_string.at(d_pos))) == 0) {
     throw RecordTextException("while parsing IP address, expected digits at position "+std::to_string(d_pos)+" in '"+d_string+"'");
-
+  }
   uint32_t octet=0;
   val=0;
   char count=0;
@@ -161,7 +161,7 @@ void RecordTextReader::xfrIP(uint32_t &val)
       if(count > 3)
         throw RecordTextException(string("unable to parse IP address, too many dots"));
     }
-    else if(isdigit(d_string.at(d_pos))) {
+    else if (isdigit(static_cast<unsigned char>(d_string.at(d_pos))) != 0) {
       last_was_digit = true;
       octet*=10;
       octet+=d_string.at(d_pos) - '0';
@@ -196,7 +196,7 @@ void RecordTextReader::xfrIP6(std::string &val)
   size_t len;
   // lookup end of value - think of ::ffff encoding too, has dots in it!
   for(len=0;
-      d_pos+len < d_string.length() && (isxdigit(d_string.at(d_pos+len)) || d_string.at(d_pos+len) == ':' || d_string.at(d_pos+len)=='.');
+      d_pos+len < d_string.length() && (isxdigit(static_cast<unsigned char>(d_string.at(d_pos+len))) != 0 || d_string.at(d_pos+len) == ':' || d_string.at(d_pos+len)=='.');
     len++);
 
   if(!len)
@@ -236,7 +236,7 @@ void RecordTextReader::xfrCAPort(ComboAddress &val)
   val.sin4.sin_port = port;
 }
 
-bool RecordTextReader::eof()
+bool RecordTextReader::eof() const
 {
   return d_pos==d_end;
 }
@@ -327,7 +327,7 @@ void RecordTextReader::xfrBlobNoSpaces(string& val, int len)
     throw RecordTextException("Record length "+std::to_string(val.size()) + " does not match expected length '"+std::to_string(len));
 }
 
-void RecordTextReader::xfrBlob(string& val, int)
+void RecordTextReader::xfrBlob(string& val, int len)
 {
   skipSpaces();
   auto pos = d_pos;
@@ -342,6 +342,10 @@ void RecordTextReader::xfrBlob(string& val, int)
   boost::erase_all(tmp," ");
   val.clear();
   B64Decode(tmp, val);
+
+  if (len>-1 && val.size() != static_cast<size_t>(len)) {
+    throw RecordTextException("Record length "+std::to_string(val.size()) + " does not match expected length '"+std::to_string(len));
+  }
 }
 
 void RecordTextReader::xfrRFC1035CharString(string &val) {
@@ -356,6 +360,7 @@ void RecordTextReader::xfrSVCBValueList(vector<string> &val) {
 
 void RecordTextReader::xfrSvcParamKeyVals(set<SvcParam>& val) // NOLINT(readability-function-cognitive-complexity)
 {
+  set<SvcParam::SvcParamKey> seenKeys;
   while (d_pos != d_end) {
     skipSpaces();
     if (d_pos == d_end)
@@ -378,6 +383,10 @@ void RecordTextReader::xfrSvcParamKeyVals(set<SvcParam>& val) // NOLINT(readabil
       key = SvcParam::keyFromString(k, generic);
     } catch (const std::invalid_argument &e) {
       throw RecordTextException(e.what());
+    }
+
+    if (!seenKeys.insert(key).second) {
+      throw RecordTextException("SvcParamKey '" + k + "' appears more than once");
     }
 
     if (d_pos != d_end && d_string.at(d_pos) == '=') {
@@ -403,6 +412,9 @@ void RecordTextReader::xfrSvcParamKeyVals(set<SvcParam>& val) // NOLINT(readabil
         string value;
         xfrRFC1035CharString(value);
         size_t len = key == SvcParam::ipv4hint ? 4 : 16;
+        if (value.empty()) {
+          throw RecordTextException("value is required for SVC Param " + k);
+        }
         if (value.size() % len != 0) {
           throw RecordTextException(k + " in generic format has wrong number of bytes");
         }
@@ -447,6 +459,9 @@ void RecordTextReader::xfrSvcParamKeyVals(set<SvcParam>& val) // NOLINT(readabil
           if (len == 0) {
             throw RecordTextException("ALPN values cannot be empty strings");
           }
+          if (len > 255) {
+            throw RecordTextException("Length of ALPN value goes over 255");
+          }
           if (len > v.length() - spos) {
             throw RecordTextException("Length of ALPN value goes over total length of alpn SVC Param");
           }
@@ -455,6 +470,11 @@ void RecordTextReader::xfrSvcParamKeyVals(set<SvcParam>& val) // NOLINT(readabil
         }
       } else {
         xfrSVCBValueList(value);
+        for (const auto& item : value) {
+          if (item.length() > 255) {
+            throw RecordTextException("Length of SVC value goes over 255");
+          }
+        }
       }
       if (value.empty()) {
         throw RecordTextException("value is required for SVC Param " + k);
@@ -479,8 +499,8 @@ void RecordTextReader::xfrSvcParamKeyVals(set<SvcParam>& val) // NOLINT(readabil
         }
         std::set<SvcParam::SvcParamKey> keys;
         for (size_t i=0; i < v.length(); i += 2) {
-          uint16_t mand = (v.at(i) << 8);
-          mand += v.at(i+1);
+          uint16_t mand = (static_cast<uint8_t>(v.at(i)) << 8);
+          mand += static_cast<uint8_t>(v.at(i+1));
           keys.insert(SvcParam::SvcParamKey(mand));
         }
         val.insert(SvcParam(key, std::move(keys)));
@@ -500,11 +520,14 @@ void RecordTextReader::xfrSvcParamKeyVals(set<SvcParam>& val) // NOLINT(readabil
       if (generic) {
         string v;
         xfrRFC1035CharString(v);
+        if (v.empty()) {
+          throw RecordTextException("value is required for SVC Param " + k);
+        }
         if (v.length() != 2) {
           throw RecordTextException("port in generic format has the wrong length, expected 2, got " + std::to_string(v.length()));
         }
-        port = (v.at(0) << 8);
-        port += v.at(1);
+        port = static_cast<uint8_t>(v.at(0)) << 8;
+        port += static_cast<uint8_t>(v.at(1));
       } else {
         string portstring;
         xfrRFC1035CharString(portstring);
@@ -615,7 +638,7 @@ static void HEXDecode(std::string_view chunk, string& out)
   bool lowdigit{false};
   uint8_t val{0};
   for (auto chr : chunk) {
-    if(isalnum(chr) == 0) {
+    if(isalnum(static_cast<unsigned char>(chr)) == 0) {
       continue;
     }
     if (!lowdigit) {

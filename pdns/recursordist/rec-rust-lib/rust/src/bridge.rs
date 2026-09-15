@@ -428,6 +428,7 @@ impl ProtobufServer {
         insertu(&mut map, "timeout", self.timeout);
         insertu(&mut map, "maxQueuedEntries", self.maxQueuedEntries);
         insertu(&mut map, "reconnectWaitTime", self.reconnectWaitTime);
+        insertu(&mut map, "stalledWriteTimeout", self.stalledWriteTimeout);
         insertb(&mut map, "taggedOnly", self.taggedOnly);
         insertb(&mut map, "asyncConnect", self.asyncConnect);
         insertb(&mut map, "logQueries", self.logQueries);
@@ -438,6 +439,8 @@ impl ProtobufServer {
         }
         insertseq(&mut map, "exportTypes", &seq2);
         insertb(&mut map, "logMappedFrom", self.logMappedFrom);
+        insertb(&mut map, "frame4", self.frame4);
+        inserts(&mut map, "strategy", &self.strategy);
         serde_yaml::Value::Mapping(map)
     }
 }
@@ -575,6 +578,7 @@ impl RPZ {
         insertu32(&mut map, "axfrTimeout", self.axfrTimeout);
         inserts(&mut map, "dumpFile", &self.dumpFile);
         inserts(&mut map, "seedFile", &self.seedFile);
+        insertb(&mut map, "wipePacketCache", self.wipePacketCache);
         serde_yaml::Value::Mapping(map)
     }
 }
@@ -797,7 +801,6 @@ impl IncomingWSConfig {
 }
 
 impl OutgoingTLSConfiguration {
-
     fn to_yaml_map(&self) -> serde_yaml::Value {
         let mut map = serde_yaml::Mapping::new();
         inserts(&mut map, "name", &self.name);
@@ -818,7 +821,12 @@ impl OutgoingTLSConfiguration {
         inserts(&mut map, "subject_name", &self.subject_name);
         inserts(&mut map, "subject_address", &self.subject_address);
         inserts(&mut map, "ciphers", &self.ciphers);
-        inserts(&mut map, "ciphers_tls", &self.ciphers_tls_13);
+        inserts(&mut map, "ciphers_tls_13", &self.ciphers_tls_13);
+
+        inserts(&mut map, "client_certificate", &self.client_certificate);
+        inserts(&mut map, "client_certificate_key", &self.client_certificate_key);
+        inserts(&mut map, "client_certificate_password", &self.client_certificate_password);
+
         serde_yaml::Value::Mapping(map)
     }
 
@@ -842,6 +850,28 @@ impl OutgoingTLSConfiguration {
 }
 
 impl OpenTelemetryTraceCondition {
+    fn to_yaml_map(&self) -> serde_yaml::Value {
+        let mut map = serde_yaml::Mapping::new();
+        let mut acls = serde_yaml::Sequence::new();
+        for entry in &self.acls {
+            acls.push(serde_yaml::Value::String(entry.to_owned()));
+        }
+        insertseq(&mut map, "acls", &acls);
+        let mut qnames = serde_yaml::Sequence::new();
+        for entry in &self.qnames {
+            qnames.push(serde_yaml::Value::String(entry.to_owned()));
+        }
+        insertseq(&mut map, "qtypes", &qnames);
+        let mut qtypes = serde_yaml::Sequence::new();
+        for entry in &self.qtypes {
+            qtypes.push(serde_yaml::Value::String(entry.to_owned()));
+        }
+        insertseq(&mut map, "qtypes", &qtypes);
+        insertu32(&mut map, "qid", self.qid);
+        insertb(&mut map, "edns_option_required", self.edns_option_required);
+        insertb(&mut map, "traceid_only", self.traceid_only);
+        serde_yaml::Value::Mapping(map)
+    }
     pub fn validate(&self, field: &str) -> Result<(), ValidationError> {
         validate_vec(
             &(field.to_string() + ".acls"),
@@ -865,6 +895,25 @@ impl OpenTelemetryTraceCondition {
         Ok(())
     }
 }
+
+impl QNameAndQType {
+    fn to_yaml_map(&self) -> serde_yaml::Value {
+        let mut map = serde_yaml::Mapping::new();
+        inserts(&mut map, "qname", &self.qname);
+        inserts(&mut map, "qtype", &self.qtype);
+        serde_yaml::Value::Mapping(map)
+    }
+
+    pub fn validate(&self, field: &str) -> Result<(), ValidationError> {
+        if self.qname.is_empty() {
+            let msg = format!("{}: value may not be empty", field);
+            return Err(ValidationError { msg });
+        }
+        validate_qtype(&(field.to_string() + ".qtype"), &self.qtype)?;
+        Ok(())
+    }
+}
+
 
 #[allow(clippy::ptr_arg)] //# Avoids creating a rust::Slice object on the C++ side.
 pub fn validate_auth_zones(field: &str, vec: &Vec<AuthZone>) -> Result<(), ValidationError> {
@@ -1203,6 +1252,20 @@ pub fn map_to_yaml_string(vec: &Vec<OldStyle>) -> Result<String, serde_yaml::Err
                         }
                         serde_yaml::Value::Sequence(seq)
                     }
+                    "Vec<OpenTelemetryTraceCondition>" => {
+                        let mut seq = serde_yaml::Sequence::new();
+                        for element in &entry.value.vec_opentelemetrytracecondition_val {
+                            seq.push(element.to_yaml_map());
+                        }
+                        serde_yaml::Value::Sequence(seq)
+                    }
+                    "Vec<QNameAndQType>" => {
+                        let mut seq = serde_yaml::Sequence::new();
+                        for element in &entry.value.vec_qnameandqtype_val {
+                            seq.push(element.to_yaml_map());
+                        }
+                        serde_yaml::Value::Sequence(seq)
+                    }
                     other => serde_yaml::Value::String(
                         "map_to_yaml_string: Unknown type: ".to_owned() + other,
                     ),
@@ -1375,6 +1438,22 @@ pub fn def_additional_mode() -> String {
 
 pub fn default_value_equals_additional_mode(value: &String) -> bool {
     &def_additional_mode() == value
+}
+
+pub fn def_pb_strategy() -> String {
+    String::from("All")
+}
+
+pub fn def_value_equals_pb_strategy(value: &String) -> bool {
+    &def_pb_strategy() == value
+}
+
+pub fn def_qnameandqtype_qtype() -> String {
+    String::from("A")
+}
+
+pub fn def_value_equals_qnameqtype_qtype(value: &String) -> bool {
+    &def_qnameandqtype_qtype() == value
 }
 
 pub fn validate_dnssec(dnssec: &recsettings::Dnssec) -> Result<(), ValidationError> {

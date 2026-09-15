@@ -40,6 +40,7 @@
 #include "dnsdist-frontend.hh"
 #include "dnsdist-healthchecks.hh"
 #include "dnsdist-lua.hh"
+#include "dnsdist-lua-types.hh"
 #include "dnsdist-metrics.hh"
 #include "dnsdist-prometheus.hh"
 #include "dnsdist-rings.hh"
@@ -98,6 +99,10 @@ std::map<std::string, MetricDefinition> MetricDefinitionStorage::metrics{
   {"latency-doq-avg1000", MetricDefinition(PrometheusMetricType::gauge, "Average response latency, in microseconds, of the last 1000 packets received over DoQ")},
   {"latency-doq-avg10000", MetricDefinition(PrometheusMetricType::gauge, "Average response latency, in microseconds, of the last 10000 packets received over DoQ")},
   {"latency-doq-avg1000000", MetricDefinition(PrometheusMetricType::gauge, "Average response latency, in microseconds, of the last 1000000 packets received over DoQ")},
+  {"latency-doh3-avg100", MetricDefinition(PrometheusMetricType::gauge, "Average response latency, in microseconds, of the last 100 packets received over DoH3")},
+  {"latency-doh3-avg1000", MetricDefinition(PrometheusMetricType::gauge, "Average response latency, in microseconds, of the last 1000 packets received over DoH3")},
+  {"latency-doh3-avg10000", MetricDefinition(PrometheusMetricType::gauge, "Average response latency, in microseconds, of the last 10000 packets received over DoH3")},
+  {"latency-doh3-avg1000000", MetricDefinition(PrometheusMetricType::gauge, "Average response latency, in microseconds, of the last 1000000 packets received over DoH3")},
   {"uptime", MetricDefinition(PrometheusMetricType::gauge, "Uptime of the dnsdist process in seconds")},
   {"real-memory-usage", MetricDefinition(PrometheusMetricType::gauge, "Current memory usage in bytes")},
   {"noncompliant-queries", MetricDefinition(PrometheusMetricType::counter, "Number of queries dropped as non-compliant")},
@@ -331,35 +336,38 @@ static bool isAnAPIRequest(const YaHTTP::Request& req)
   return req.url.path.find("/api/") == 0;
 }
 
-static bool isAnAPIRequestAllowedWithWebAuth(const YaHTTP::Request& req)
-{
-  return req.url.path == "/api/v1/servers/localhost";
-}
-
-static bool isAStatsRequest(const YaHTTP::Request& req)
+static bool isAMetricsRequest(const YaHTTP::Request& req)
 {
   return req.url.path == "/jsonstat" || req.url.path == "/metrics";
+}
+
+static bool isADashboardMetricsRequest(const YaHTTP::Request& req)
+{
+  return req.url.path == "/jsonstat" || req.url.path == "/api/v1/servers/localhost";
 }
 
 static bool handleAuthorization(const YaHTTP::Request& req)
 {
   const auto& config = dnsdist::configuration::getCurrentRuntimeConfiguration();
 
-  if (isAStatsRequest(req)) {
+  if (isADashboardMetricsRequest(req)) {
+    if (checkWebPassword(req, config.d_webPassword, config.d_dashboardRequiresAuthentication)) {
+      return true;
+    }
+  }
+
+  if (isAMetricsRequest(req)) {
     if (config.d_statsRequireAuthentication) {
       /* Access to the stats is allowed for both API and Web users */
-      return checkAPIKey(req, config.d_webAPIKey) || checkWebPassword(req, config.d_webPassword, config.d_dashboardRequiresAuthentication);
+      return checkAPIKey(req, config.d_webAPIKey)
+        || checkWebPassword(req, config.d_webPassword, true);
     }
     return true;
   }
 
   if (isAnAPIRequest(req)) {
     /* Access to the API requires a valid API key */
-    if (!config.d_apiRequiresAuthentication || checkAPIKey(req, config.d_webAPIKey)) {
-      return true;
-    }
-
-    return isAnAPIRequestAllowedWithWebAuth(req) && checkWebPassword(req, config.d_webPassword, config.d_dashboardRequiresAuthentication);
+    return !config.d_apiRequiresAuthentication || checkAPIKey(req, config.d_webAPIKey);
   }
 
   return checkWebPassword(req, config.d_webPassword, config.d_dashboardRequiresAuthentication);
@@ -395,9 +403,10 @@ static void handleCORS(const YaHTTP::Request& req, YaHTTP::Response& resp)
 {
   const auto origin = req.headers.find("Origin");
   if (origin != req.headers.end()) {
+    const auto& config = dnsdist::configuration::getCurrentRuntimeConfiguration();
     if (req.method == "OPTIONS") {
       /* Pre-flight request */
-      if (dnsdist::configuration::getCurrentRuntimeConfiguration().d_apiReadWrite) {
+      if (config.d_apiReadWrite) {
         resp.headers["Access-Control-Allow-Methods"] = "GET, PUT";
       }
       else {
@@ -406,10 +415,13 @@ static void handleCORS(const YaHTTP::Request& req, YaHTTP::Response& resp)
       resp.headers["Access-Control-Allow-Headers"] = "Authorization, X-API-Key";
     }
 
-    resp.headers["Access-Control-Allow-Origin"] = origin->second;
+    if (config.d_webServerAllowCrossOriginRequests) {
+      resp.headers["Access-Control-Allow-Origin"] = origin->second;
+      resp.headers["Vary"] = "Origin"; // prevents cached data to be used for a different Origin
 
-    if (isAStatsRequest(req) || isAnAPIRequestAllowedWithWebAuth(req)) {
-      resp.headers["Access-Control-Allow-Credentials"] = "true";
+      if (isAMetricsRequest(req) || isADashboardMetricsRequest(req)) {
+        resp.headers["Access-Control-Allow-Credentials"] = "true";
+      }
     }
   }
 }
@@ -499,6 +511,31 @@ static void addHistogramToPrometheusOutput(std::ostringstream& output, const T& 
 
   output << metricName << "_sum" << label << " " << container.latencySum << "\n";
   output << metricName << "_count" << label << " " << container.latencyCount << "\n";
+}
+
+static std::string escapePrometheusLabelValue(const std::string& labelValue)
+{
+  /* "label_value can be any sequence of UTF-8 characters, but the backslash (\), double-quote ("),
+      and line feed (\n) characters have to be escaped as \\, \", and \n, respectively." */
+  std::string result;
+  result.reserve(labelValue.size());
+  for (char val : labelValue) {
+    switch (val) {
+    case '"':
+      result += "\\\"";
+      break;
+    case '\\':
+      result += "\\\\";
+      break;
+    case '\n':
+      result += "\\n";
+      break;
+    default:
+      result += val;
+      break;
+    }
+  }
+  return result;
 }
 
 static void handlePrometheus(const YaHTTP::Request& req, YaHTTP::Response& resp, const Logr::Logger& logger)
@@ -737,6 +774,14 @@ static void handlePrometheus(const YaHTTP::Request& req, YaHTTP::Response& resp,
   output << "# TYPE " << frontsbase << "tcpclienttimeouts " << "counter" << "\n";
   output << "# HELP " << frontsbase << "tcpdownstreamtimeouts " << "Amount of TCP connections terminated by a timeout while reading from the backend" << "\n";
   output << "# TYPE " << frontsbase << "tcpdownstreamtimeouts " << "counter" << "\n";
+  output << "# HELP " << frontsbase << "tcpdiedduringprocessing " << "Amount of TCP connections terminated by an internal error during processing" << "\n";
+  output << "# TYPE " << frontsbase << "tcpdiedduringprocessing " << "counter" << "\n";
+  output << "# HELP " << frontsbase << "tcpbadalpn " << "Amount of TCP connections terminated because the client did not send the expected ALPN" << "\n";
+  output << "# TYPE " << frontsbase << "tcpbadalpn " << "counter" << "\n";
+  output << "# HELP " << frontsbase << "tcpbadproxyprotocol " << "Amount of TCP connections terminated because the client send an invalid Proxy Protocol payload" << "\n";
+  output << "# TYPE " << frontsbase << "tcpbadproxyprotocol " << "counter" << "\n";
+  output << "# HELP " << frontsbase << "tcpmaxdurationreached " << "Amount of TCP connections terminated because the connection reached its maximum configured duration" << "\n";
+  output << "# TYPE " << frontsbase << "tcpmaxdurationreached " << "counter" << "\n";
   output << "# HELP " << frontsbase << "tcpcurrentconnections " << "Amount of current incoming TCP connections from clients" << "\n";
   output << "# TYPE " << frontsbase << "tcpcurrentconnections " << "gauge" << "\n";
   output << "# HELP " << frontsbase << "tcpmaxconcurrentconnections " << "Maximum number of concurrent incoming TCP connections from clients" << "\n";
@@ -789,6 +834,10 @@ static void handlePrometheus(const YaHTTP::Request& req, YaHTTP::Response& resp,
       output << frontsbase << "tcpgaveup" << label << front->tcpGaveUp.load() << "\n";
       output << frontsbase << "tcpclienttimeouts" << label << front->tcpClientTimeouts.load() << "\n";
       output << frontsbase << "tcpdownstreamtimeouts" << label << front->tcpDownstreamTimeouts.load() << "\n";
+      output << frontsbase << "tcpdiedduringprocessing" << label << front->tcpDiedDuringProcessing.load() << "\n";
+      output << frontsbase << "tcpbadalpn" << label << front->tcpBadALPN.load() << "\n";
+      output << frontsbase << "tcpbadproxyprotocol" << label << front->tcpBadProxyProtocol.load() << "\n";
+      output << frontsbase << "tcpmaxdurationreached" << label << front->tcpMaxDurationReached.load() << "\n";
       output << frontsbase << "tcpcurrentconnections" << label << front->tcpCurrentConnections.load() << "\n";
       output << frontsbase << "tcpmaxconcurrentconnections" << label << front->tcpMaxConcurrentConnections.load() << "\n";
       output << frontsbase << "tcpavgqueriesperconnection" << label << front->tcpAvgQueriesPerConnection.load() << "\n";
@@ -968,7 +1017,7 @@ static void handlePrometheus(const YaHTTP::Request& req, YaHTTP::Response& resp,
   auto topSuffixesByReason = DynBlockMaintenance::getHitsForTopSuffixes();
   for (const auto& entry : topSuffixesByReason) {
     for (const auto& suffix : entry.second) {
-      output << "dnsdist_dynblocks_smt_top_offenders_hits_per_second{reason=\"" << entry.first << "\",suffix=\"" << suffix.first.toString() << "\"" << (instanceLabel.empty() ? "" : instanceLabelPlusComma) << "} " << suffix.second << "\n";
+      output << "dnsdist_dynblocks_smt_top_offenders_hits_per_second{reason=\"" << entry.first << "\",suffix=\"" << escapePrometheusLabelValue(suffix.first.toString()) << "\"" << (instanceLabel.empty() ? "" : instanceLabelPlusComma) << "} " << suffix.second << "\n";
     }
   }
 #endif /* DISABLE_DYNBLOCKS */
@@ -1232,6 +1281,10 @@ static void handleStats(const YaHTTP::Request& req, YaHTTP::Response& resp, cons
       {"tcpGaveUp", (double)front->tcpGaveUp.load()},
       {"tcpClientTimeouts", (double)front->tcpClientTimeouts},
       {"tcpDownstreamTimeouts", (double)front->tcpDownstreamTimeouts},
+      {"tcpDiedDuringProcessing", (double)front->tcpDiedDuringProcessing},
+      {"tcpBadALPN", (double)front->tcpBadALPN},
+      {"tcpBadProxyProtocol", (double)front->tcpBadProxyProtocol},
+      {"tcpMaxDurationReached", (double)front->tcpMaxDurationReached},
       {"tcpCurrentConnections", (double)front->tcpCurrentConnections},
       {"tcpMaxConcurrentConnections", (double)front->tcpMaxConcurrentConnections},
       {"tcpAvgQueriesPerConnection", (double)front->tcpAvgQueriesPerConnection},

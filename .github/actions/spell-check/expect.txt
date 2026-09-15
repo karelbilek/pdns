@@ -48,6 +48,7 @@ arecvfrom
 Arentz
 Arjen
 Arjo
+armhf
 Arnoud
 arpa
 Arsen
@@ -78,8 +79,10 @@ autoserial
 autotools
 axfrfilter
 Baan
+Babak
 backgrounding
 backticks
+backupselector
 BADALG
 BADCOOKIE
 badguys
@@ -163,14 +166,18 @@ cachekey
 Cairney
 calculatesoaserial
 calidns
+Cao
 capf
+catalogzone
 catzone
 Cauquil
+Cavid
 ccache
 ccls
 ccounts
 cdb
 CDBKV
+cdn
 cdnskey
 cds
 Cegetel
@@ -185,6 +192,7 @@ Chiavacci
 Christof
 chrooted
 chrooting
+cjson
 clangd
 Cloos
 closesocket
@@ -250,6 +258,7 @@ CXXFLAGS
 cxxsettings
 cxxsupport
 Cybertinus
+cython
 daemonized
 daemonizing
 daemontools
@@ -283,13 +292,12 @@ defttl
 Dehaine
 delichik
 DENIC
-descclassname
-descname
 Dessel
 destname
 Detlef
 devicename
 devtoolset
+Deyan
 DHCID
 dhcpd
 dhcpdupdate
@@ -300,7 +308,6 @@ dijk
 dilinger
 Dimitrios
 Directi
-Disqus
 distclean
 djbdns
 dlerror
@@ -334,6 +341,7 @@ DNSR
 dnsrecord
 dnsreplay
 dnsresourcerecord
+dnsresponse
 dnsscan
 dnsscope
 dnssec
@@ -347,11 +355,13 @@ dnsupdate
 dnsviz
 dnswasher
 dnszone
+dnt
 Dobrawy
 docnamecachelookup
 documentclass
 documentwrapper
 Dohmen
+dohpath
 domaininfo
 domainmetadata
 domainname
@@ -373,6 +383,7 @@ Dufberg
 dumpluaraw
 dumresp
 dwarfstd
+dylibs
 dynblock
 dynblocklist
 dynblocksref
@@ -380,10 +391,12 @@ dynbpf
 dyndns
 dynhandler
 dynmodules
+dynunblock
 easydns
 ebpf
 ebpfblocklist
 ECCN
+ecdhe
 ech
 econds
 ecswho
@@ -407,7 +420,6 @@ elgoog
 elisp
 elpa
 emacs
-Emph
 endblock
 endbr
 Enden
@@ -416,10 +428,11 @@ Ensar
 ents
 envoutput
 epel
-eqno
 Eriksson
 errlog
 errorlevels
+Ersin
+Ethicxz
 EUips
 evanjones
 evildomain
@@ -431,7 +444,9 @@ Exx
 ezdns
 Faerch
 failedservers
+Fallah
 famfo
+Farrokhi
 farsightsec
 fcontext
 fedoraproject
@@ -479,7 +494,6 @@ gcna
 gcovr
 gdpr
 Geijn
-genindex
 geobackend
 geoipbackend
 geolocated
@@ -518,7 +532,6 @@ gnutls
 godbc
 godbcbackend
 Godwottery
-goodmatch
 goracle
 goraclebackend
 gouv
@@ -534,7 +547,6 @@ gsqlite
 gss
 gssapi
 gtld
-guilabel
 Guo
 gutenberg
 Gyselinck
@@ -542,6 +554,7 @@ Haixin
 Hakulinen
 Hannu
 Harker
+Haruto
 Hausberger
 headbgcolor
 headerline
@@ -556,6 +569,7 @@ Hendriks
 Henk
 Hensbergen
 Heuer
+HHIT
 hidesoadetails
 hidettl
 highlighttable
@@ -563,7 +577,6 @@ Hiljanen
 hinfo
 hitrate
 hkraal
-hll
 Hoentjen
 Hofstaedtler
 Holger
@@ -589,22 +602,25 @@ ifportup
 ifurlextup
 ifurlup
 ihsinme
+ilya
 Ilyin
 imenu
 Imhard
 incbin
 includeboilerplate
 includerings
-indextable
 inetutils
 infolog
 infosecinstitute
 initscript
+innerspan
 Inno
 innodb
 installable
+instrumenta
 internic
 interoperation
+IPbackend
 ipcipher
 ipcrypt
 ipdecrypt
@@ -644,13 +660,14 @@ jpmens
 jsonstat
 jsrender
 Juergen
-jumpbox
 Juraj
+Kabenin
 Kadyshev
 Kaminsky
 Kaseorg
 Kdhcp
 Kdhcpdupdate
+keepwarm
 Kees
 Kerkhof
 KEYBITS
@@ -666,7 +683,6 @@ keysize
 keystyle
 keytab
 keytype
-keywordmatches
 kickdaddy
 Kirill
 Klebermass
@@ -686,6 +702,7 @@ kskrollcdnskey
 ktls
 KTNAME
 Kuehrer
+Kushwaha
 kvs
 KVTo
 kxdpgun
@@ -721,7 +738,6 @@ LIBPQ
 libsodium
 lightningstream
 Lindqvist
-linenos
 linenum
 linkcolor
 lintian
@@ -736,7 +752,6 @@ loadbalancer
 loadbalancing
 localaddr
 localip
-localtoc
 locaweb
 lochiiconnectivity
 lockfree
@@ -747,8 +762,6 @@ Loopia
 Lorbach
 lordievader
 Louwers
-loweralpha
-lowerroman
 Lrhazi
 lsock
 lsp
@@ -777,6 +790,7 @@ malware
 Mamane
 mapasync
 Mapbox
+mapsize
 mariadb
 Markmann
 Massar
@@ -790,18 +804,21 @@ mbed
 mbedtls
 MBOXFW
 mbytes
+Medjahed
 Meerwald
+Mehtab
 Mekking
 melpa
 memlock
 Memusage
-menuselection
 metadatabase
 metadatas
 metainformation
+metaprogramming
 metricnames
 metricscarbon
 Meulen
+Micay
 Michiel
 Miek
 Miell
@@ -814,12 +831,12 @@ Mischan
 mjt
 mkuchar
 mmdb
+MMDBKV
 mnordhoff
 MOADNS
 Modderman
 modeline
 modifyingpolicydecisions
-modindex
 monshouwer
 motherboards
 mozilla
@@ -857,6 +874,7 @@ mywebapp
 namedroppers
 nameserving
 Nankai
+Naoki
 naptr
 Nauck
 Navarrete
@@ -959,6 +977,7 @@ Odintsov
 Oestreicher
 offsite
 oftc
+ohttp
 Olafur
 Omroep
 openapis
@@ -1074,7 +1093,6 @@ pqpp
 Predota
 prefixpowerdns
 preoutquery
-Preproc
 prepublishkeyroll
 prequery
 prerpz
@@ -1093,6 +1111,7 @@ providername
 proxymapping
 proxyprotocol
 proxyprotocolvalues
+PRSD
 pseudonymize
 pseudorecord
 pthread
@@ -1123,6 +1142,7 @@ qytpe
 ragel
 raii
 Rak
+Ramsanker
 randombackend
 randombit
 randomisation
@@ -1158,7 +1178,6 @@ reid
 reimplementation
 Reinier
 Rejo
-relbar
 relbarbgcolor
 relbarlinkcolor
 relbartextcolor
@@ -1169,6 +1188,7 @@ remi
 remoteaddr
 remotebackend
 remoteip
+remoteloggers
 removedomainkey
 replacerrset
 requery
@@ -1178,7 +1198,6 @@ respawned
 respawning
 respout
 respsizes
-reuseds
 reuseport
 RFCs
 rhel
@@ -1195,8 +1214,10 @@ rocommunity
 Roel
 Rolff
 rolltype
+rootspan
 Rosmalen
 roundrobin
+rozentsvaig
 rping
 rpms
 rpz
@@ -1211,6 +1232,7 @@ Rueckert
 rulesets
 runtimedir
 rustc
+RUSTFLAGS
 rustls
 Ruthensteiner
 Rvd
@@ -1285,6 +1307,7 @@ Signingpiper
 signpipe
 signttl
 signzone
+Simonovich
 singlethreaded
 Sipek
 siphash
@@ -1315,7 +1338,6 @@ sortlist
 sourcecode
 SOURCEDIR
 sourceforge
-sourcelink
 sourceware
 Spaans
 Spackages
@@ -1338,6 +1360,7 @@ srv
 sshfp
 SSQ
 stacksize
+stampfile
 starttransaction
 Stasic
 statbag
@@ -1396,6 +1419,7 @@ tarballs
 Tarjei
 Tarnell
 taskqueue
+taskthreads
 tbhandler
 tcely
 tcounter
@@ -1424,6 +1448,7 @@ Thomassen
 threadmessage
 throttlemap
 thrysoee
+Tibs
 timedipsetrule
 timedout
 timeframe
@@ -1448,6 +1473,8 @@ Toosarani
 Toshifumi
 totms
 traceid
+traceparent
+transitioning
 Travaille
 treemacs
 tribool
@@ -1498,8 +1525,6 @@ unreachables
 unshadowing
 updatepolicy
 upgradeable
-upperalpha
-upperroman
 urandom
 usecase
 userbase
@@ -1517,10 +1542,10 @@ Vasiliy
 Veldhuyzen
 Verheijen
 Verschuren
-versionmodified
 Viala
 viewcode
 visitedlinkcolor
+Vitaly
 Vixie
 vla
 Voegeli
@@ -1531,6 +1556,7 @@ VRF
 vulns
 Waidner
 WAITFORONE
+Wakamatsu
 wal
 warnlog
 wds
@@ -1538,6 +1564,7 @@ webbased
 webdocs
 webhandler
 webpassword
+webpki
 webservice
 Webspider
 Wegener
@@ -1574,7 +1601,9 @@ wrandom
 wrapv
 wuh
 Wzs
+Xabier
 Xander
+Xav
 xchacha
 xdb
 xdp
@@ -1597,6 +1626,7 @@ Yehuda
 yeswehack
 Yiu
 Ylitalo
+ylwango
 YMMV
 Yogesh
 yourcompany
@@ -1607,8 +1637,10 @@ yubikey
 Yufan
 Yunyi
 Yuxiao
+YWH
 YYYYMMD
 YYYYMMDDSS
+Zafar
 Zash
 Zealey
 zeha

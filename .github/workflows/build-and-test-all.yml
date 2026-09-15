@@ -43,7 +43,7 @@ jobs:
       tag: ${{ steps.get-runner-image.outputs.tag }}
     env:
       DEFAULT_IMAGE_TAG: master # update when backporting, e.g. auth-4.9.x
-      DOCKER_IMAGE: ${{ inputs.runner-docker-image-name || 'base-pdns-ci-image/debian-13-pdns-base' }}
+      DOCKER_IMAGE: ${{ inputs.runner-docker-image-name || 'base-pdns-ci-image/debian-13-pdns-base-py13' }}
     steps:
       - id: get-runner-image
         run: |
@@ -70,7 +70,7 @@ jobs:
       run:
         working-directory: ./pdns-${{ env.BUILDER_VERSION }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 5
           submodules: recursive
@@ -126,7 +126,7 @@ jobs:
           mkdir -p /opt/pdns-auth/sbin; mv /opt/pdns-auth/bin/pdns_server /opt/pdns-auth/sbin/
       - if: ${{ matrix.builder == 'meson' }}
         name: Store the binaries
-        uses: actions/upload-artifact@v5 # this takes 30 seconds, maybe we want to tar
+        uses: actions/upload-artifact@v7 # this takes 30 seconds, maybe we want to tar
         with:
           name: pdns-auth-${{ matrix.builder}}-${{ env.normalized-branch-name }}
           path: /opt/pdns-auth
@@ -139,7 +139,6 @@ jobs:
     needs: get-runner-container-image
     strategy:
       matrix:
-        builder: [autotools, meson]
         sanitizers: [asan+ubsan, tsan]
         features: [least, full]
         exclude:
@@ -159,7 +158,7 @@ jobs:
       run:
         working-directory: ./pdns/recursordist/pdns-recursor-${{ env.BUILDER_VERSION }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 5
           submodules: recursive
@@ -170,7 +169,7 @@ jobs:
       - name: set up build
         uses: ./.github/actions/cache
         with:
-          cache-key-base: recursor-ccache-${{ matrix.builder }}-${{ matrix.features }}-${{ matrix.sanitizers }}
+          cache-key-base: recursor-ccache-meson-${{ matrix.features }}-${{ matrix.sanitizers }}
       - name: install pip build dependencies
         uses: ./.github/actions/pip-build-dependencies
         with:
@@ -180,16 +179,15 @@ jobs:
         working-directory: ./pdns/recursordist/
       - run: ${{ env.INV_CMD }} ci-install-rust ${REPO_HOME}
         working-directory: ./pdns/recursordist/
-      - run: ${{ env.INV_CMD }} ci-autoconf ${{ matrix.builder == 'meson' && '--meson' || '' }}
+      - run: ${{ env.INV_CMD }} ci-rec-configure ${{ matrix.features }} pdns-recursor-${{ env.BUILDER_VERSION }}
         working-directory: ./pdns/recursordist/
-      - run: ${{ env.INV_CMD }} ci-rec-configure -f ${{ matrix.features }} -b pdns-recursor-${{ env.BUILDER_VERSION }} ${{ matrix.builder == 'meson' && '--meson' || '' }}
+      - run: ${{ env.INV_CMD }} ci-rec-run-ninja pdns-recursor-${{ env.BUILDER_VERSION }}
         working-directory: ./pdns/recursordist/
-      - run: ${{ env.INV_CMD }} ci-rec-build ${{ matrix.builder == 'meson' && '--meson' || '' }}
-      - run: ${{ env.INV_CMD }} ci-rec-run-unit-tests ${{ matrix.builder == 'meson' && '--meson' || '' }}
+      - run: ${{ env.INV_CMD }} ci-rec-run-unit-tests
       - run: ${{ env.INV_CMD }} generate-coverage-info ./testrunner 'recursor' $GITHUB_WORKSPACE
-        if: ${{ env.COVERAGE == 'yes' && matrix.sanitizers != 'tsan' && matrix.builder == 'meson' }}
+        if: ${{ env.COVERAGE == 'yes' && matrix.sanitizers != 'tsan' }}
       - name: Coveralls Parallel rec unit
-        if: ${{ env.COVERAGE == 'yes' && matrix.sanitizers != 'tsan' && matrix.builder == 'meson' }}
+        if: ${{ env.COVERAGE == 'yes' && matrix.sanitizers != 'tsan' }}
         uses: coverallsapp/github-action@5cbfd81b66ca5d10c19b062c04de0199c215fb6e
         with:
           flag-name: rec-unit-${{ matrix.features }}-${{ matrix.sanitizers }}
@@ -197,15 +195,13 @@ jobs:
           parallel: true
           allow-empty: true
           fail-on-error: false
-      - run: ${{ env.INV_CMD }} ci-rec-install ${{ matrix.builder == 'meson' && '--meson' || '' }}
+      - run: ${{ env.INV_CMD }} ci-rec-install
       - run: ccache -s
       - uses: ./.github/actions/normalize-branch-name
-        if: ${{ matrix.builder == 'meson' }}
-      - if: ${{ matrix.builder == 'meson' }}
-        name: Store the binaries
-        uses: actions/upload-artifact@v5 # this takes 30 seconds, maybe we want to tar
+      - name: Store the binaries
+        uses: actions/upload-artifact@v7 # this takes 30 seconds, maybe we want to tar
         with:
-          name: pdns-recursor-${{ matrix.features }}-${{ matrix.sanitizers }}-${{ matrix.builder}}-${{ env.normalized-branch-name }}
+          name: pdns-recursor-${{ matrix.features }}-${{ matrix.sanitizers }}-meson-${{ env.normalized-branch-name }}
           path: /opt/pdns-recursor
           retention-days: 1
 
@@ -216,7 +212,6 @@ jobs:
     needs: get-runner-container-image
     strategy:
       matrix:
-        builder: [autotools, meson]
         sanitizers: [asan+ubsan, tsan]
         features: [least, full]
         architecture_suffix: ${{ contains(needs.get-runner-container-image.outputs.id, 'debian-11') && fromJson('[""]') || fromJson('["", "-arm"]') }}
@@ -224,9 +219,9 @@ jobs:
           - sanitizers: tsan
             features: least
           - architecture_suffix: '-arm'
-            builder: autotools
-          - architecture_suffix: '-arm'
             features: least
+          - architecture_suffix: '-arm'
+            sanitizers: tsan
       fail-fast: false
     container:
       image: "${{ needs.get-runner-container-image.outputs.id }}:${{ needs.get-runner-container-image.outputs.tag }}"
@@ -241,7 +236,7 @@ jobs:
       run:
         working-directory: ./pdns/dnsdistdist/dnsdist-${{ env.BUILDER_VERSION }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 5
           submodules: recursive
@@ -252,13 +247,13 @@ jobs:
       - name: set up build
         uses: ./.github/actions/cache
         with:
-          cache-key-base: dnsdist-${{ matrix.features }}-${{ matrix.sanitizers }}-${{ matrix.builder}}${{ matrix.architecture_suffix }}-ccache
+          cache-key-base: dnsdist-${{ matrix.features }}-${{ matrix.sanitizers }}-meson${{ matrix.architecture_suffix }}-ccache
       - name: install pip build dependencies
         uses: ./.github/actions/pip-build-dependencies
         with:
           venv-parent: ${{ env.REPO_HOME }}
           working-directory: .
-      - run: ${{ env.INV_CMD }} install-dnsdist-build-deps $([ "$(. /etc/os-release && echo $VERSION_CODENAME)" = "bullseye" ] && echo "--skipXDP=True")
+      - run: ${{ env.INV_CMD }} install-dnsdist-build-deps
         working-directory: .
       - run: ${{ env.INV_CMD }} install-clang
         working-directory: .
@@ -269,24 +264,15 @@ jobs:
       - run: ${{ env.INV_CMD }} ci-build-and-install-quiche ${REPO_HOME}
         if: ${{ matrix.features != 'least' }}
         working-directory: ./pdns/dnsdistdist/
-      - run: ${{ env.INV_CMD }} ci-autoconf
-        if: ${{ matrix.builder == 'autotools' }}
+      - run: ${{ env.INV_CMD }} ci-dnsdist-configure ${{ matrix.features }} dnsdist-${{ env.BUILDER_VERSION }}
         working-directory: ./pdns/dnsdistdist/
-      - run: ${{ env.INV_CMD }} ci-dnsdist-configure ${{ matrix.features }} ${{ matrix.builder }} dnsdist-${{ env.BUILDER_VERSION }}
+      - run: ${{ env.INV_CMD }} ci-dnsdist-run-ninja dnsdist-${{ env.BUILDER_VERSION }}
         working-directory: ./pdns/dnsdistdist/
-        if: ${{ matrix.builder != 'autotools' }}
-      - run: |
-          mkdir dnsdist-${{ env.BUILDER_VERSION }}
-        if: ${{ matrix.builder == 'autotools' }}
-        working-directory: ./pdns/dnsdistdist/
-      - run: ${{ env.INV_CMD }} ci-dnsdist-configure ${{ matrix.features }} ${{ matrix.builder }} dnsdist-${{ env.BUILDER_VERSION }}
-        if: ${{ matrix.builder == 'autotools' }}
-      - run: ${{ env.INV_CMD }} ci-dnsdist-make-bear ${{ matrix.builder }}
-      - run: ${{ env.INV_CMD }} ci-dnsdist-run-unit-tests ${{ matrix.builder }}
+      - run: ${{ env.INV_CMD }} ci-dnsdist-run-unit-tests
       - run: ${{ env.INV_CMD }} generate-coverage-info ./testrunner 'dnsdist' $GITHUB_WORKSPACE
-        if: ${{ env.COVERAGE == 'yes' && matrix.sanitizers != 'tsan' && matrix.builder == 'meson'}}
+        if: ${{ env.COVERAGE == 'yes' && matrix.sanitizers != 'tsan' }}
       - name: Coveralls Parallel dnsdist unit
-        if: ${{ env.COVERAGE == 'yes' && matrix.sanitizers != 'tsan' && matrix.builder == 'meson' }}
+        if: ${{ env.COVERAGE == 'yes' && matrix.sanitizers != 'tsan' }}
         uses: coverallsapp/github-action@5cbfd81b66ca5d10c19b062c04de0199c215fb6e
         with:
           flag-name: dnsdist-unit-${{ matrix.features }}-${{ matrix.sanitizers }}
@@ -294,20 +280,17 @@ jobs:
           parallel: true
           allow-empty: true
           fail-on-error: false
-      - run: ${{ env.INV_CMD }} ci-dnsdist-install ${{ matrix.builder == 'meson' && '--meson' || '' }}
+      - run: ${{ env.INV_CMD }} ci-dnsdist-install
       - run: ccache -s
       - uses: ./.github/actions/normalize-branch-name
-        if: ${{ matrix.builder == 'meson' }}
       - name: Prepare binaries folder
-        if: ${{ matrix.builder == 'meson' }}
         run: |
           mkdir -p /opt/dnsdist/bin
           for i in $(find . -maxdepth 1 -type f -executable); do cp ${i} /opt/dnsdist/bin/; done
       - name: Store the binaries
-        if: ${{ matrix.builder == 'meson' }}
-        uses: actions/upload-artifact@v5 # this takes 30 seconds, maybe we want to tar
+        uses: actions/upload-artifact@v7 # this takes 30 seconds, maybe we want to tar
         with:
-          name: dnsdist-${{ matrix.features }}-${{ matrix.sanitizers }}-${{ matrix.builder}}${{ matrix.architecture_suffix }}-${{ env.normalized-branch-name }}
+          name: dnsdist-${{ matrix.features }}-${{ matrix.sanitizers }}-meson${{ matrix.architecture_suffix }}-${{ env.normalized-branch-name }}
           path: /opt/dnsdist
           retention-days: 1
 
@@ -350,7 +333,7 @@ jobs:
         options: >-
           --restart always
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 5
           submodules: recursive
@@ -360,7 +343,7 @@ jobs:
         uses: ./.github/actions/problem-matchers
       - uses: ./.github/actions/normalize-branch-name
       - name: Fetch the binaries
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v8
         with:
           name: pdns-auth-meson-${{ env.normalized-branch-name }}
           path: /opt/pdns-auth
@@ -485,7 +468,7 @@ jobs:
         options: >-
           --restart always
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 5
           submodules: recursive
@@ -495,7 +478,7 @@ jobs:
         uses: ./.github/actions/problem-matchers
       - uses: ./.github/actions/normalize-branch-name
       - name: Fetch the binaries
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v8
         with:
           name: pdns-auth-meson-${{ env.normalized-branch-name }}
           path: /opt/pdns-auth
@@ -533,7 +516,7 @@ jobs:
         ASAN_OPTIONS: detect_leaks=0
       options: --sysctl net.ipv6.conf.all.disable_ipv6=0
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 5
           submodules: recursive
@@ -543,7 +526,7 @@ jobs:
         uses: ./.github/actions/problem-matchers
       - uses: ./.github/actions/normalize-branch-name
       - name: Fetch the binaries
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v8
         with:
           name: pdns-auth-meson-${{ env.normalized-branch-name }}
           path: /opt/pdns-auth
@@ -586,7 +569,7 @@ jobs:
         TSAN_OPTIONS: "halt_on_error=1:suppressions=${{ env.REPO_HOME }}/pdns/recursordist/recursor-tsan.supp"
       options: --sysctl net.ipv6.conf.all.disable_ipv6=0
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 5
           submodules: recursive
@@ -596,7 +579,7 @@ jobs:
         uses: ./.github/actions/problem-matchers
       - uses: ./.github/actions/normalize-branch-name
       - name: Fetch the binaries
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v8
         with:
           name: pdns-recursor-full-${{ matrix.sanitizers }}-meson-${{ env.normalized-branch-name }}
           path: /opt/pdns-recursor
@@ -643,7 +626,7 @@ jobs:
       options: --sysctl net.ipv6.conf.all.disable_ipv6=0
     steps:
       # - uses: PowerDNS/pdns/set-ubuntu-mirror@meta
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 5
           submodules: recursive
@@ -653,7 +636,7 @@ jobs:
       - name: add problem matchers
         uses: ./.github/actions/problem-matchers
       - name: Fetch the binaries
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v8
         with:
           name: pdns-recursor-full-${{ matrix.sanitizers }}-meson-${{ env.normalized-branch-name }}
           path: /opt/pdns-recursor
@@ -701,7 +684,7 @@ jobs:
         TSAN_OPTIONS: "halt_on_error=1:suppressions=${{ env.REPO_HOME }}/pdns/recursordist/recursor-tsan.supp"
       options: --sysctl net.ipv6.conf.all.disable_ipv6=0
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 5
           submodules: recursive
@@ -711,7 +694,7 @@ jobs:
         uses: ./.github/actions/problem-matchers
       - uses: ./.github/actions/normalize-branch-name
       - name: Fetch the binaries
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v8
         with:
           name: pdns-recursor-full-${{ matrix.sanitizers }}-meson-${{ env.normalized-branch-name }}
           path: /opt/pdns-recursor
@@ -750,7 +733,7 @@ jobs:
         shards: [1024]
         IPv6: [0, 1]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 5
           submodules: recursive
@@ -760,7 +743,7 @@ jobs:
         uses: ./.github/actions/problem-matchers
       - uses: ./.github/actions/normalize-branch-name
       - name: Fetch the binaries
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v8
         with:
           name: pdns-recursor-full-${{ matrix.sanitizers }}-meson-${{ env.normalized-branch-name }}
           path: /opt/pdns-recursor
@@ -811,7 +794,7 @@ jobs:
         COVERAGE: no
       options: --sysctl net.ipv6.conf.all.disable_ipv6=0 --privileged
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 5
           submodules: recursive
@@ -821,7 +804,7 @@ jobs:
         uses: ./.github/actions/problem-matchers
       - uses: ./.github/actions/normalize-branch-name
       - name: Fetch the binaries
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v8
         with:
           name: dnsdist-full-${{ matrix.sanitizers }}-meson-${{ env.normalized-branch-name }}
           path: /opt/dnsdist
@@ -830,8 +813,8 @@ jobs:
         with:
           venv-parent: ${{ env.REPO_HOME }}
       - run: ${{ env.INV_CMD }} install-clang-runtime
-      - run: ${{ env.INV_CMD }} install-dnsdist-test-deps $([ "$(. /etc/os-release && echo $VERSION_CODENAME)" = "bullseye" ] && echo "--skipXDP=True")
-      - run: ${{ env.INV_CMD }} test-dnsdist $([ "$(. /etc/os-release && echo $VERSION_CODENAME)" = "bullseye" ] && echo "--skipXDP=True")
+      - run: ${{ env.INV_CMD }} install-dnsdist-test-deps
+      - run: ${{ env.INV_CMD }} test-dnsdist
       - run: ${{ env.INV_CMD }} generate-coverage-info /opt/dnsdist/bin/dnsdist 'dnsdist' $GITHUB_WORKSPACE
         if: ${{ env.COVERAGE == 'yes' && matrix.sanitizers != 'tsan' }}
       - name: Coveralls Parallel dnsdist regression
@@ -844,7 +827,7 @@ jobs:
           allow-empty: true
           fail-on-error: false
 
-  swagger-syntax-check:
+  openapi-syntax-check:
     if: ${{ (!github.event.schedule || vars.SCHEDULED_JOBS_BUILD_AND_TEST_ALL) && ! contains(needs.get-runner-container-image.outputs.id, 'debian-11') }}
     runs-on: ubuntu-24.04
     needs:
@@ -853,7 +836,7 @@ jobs:
       image: "${{ needs.get-runner-container-image.outputs.id }}:${{ needs.get-runner-container-image.outputs.tag }}"
       options: --sysctl net.ipv6.conf.all.disable_ipv6=0
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 5
           submodules: recursive
@@ -866,15 +849,15 @@ jobs:
         with:
           venv-parent: ${{ env.REPO_HOME }}
           working-directory: .
-      - run: ${{ env.INV_CMD }} install-swagger-tools
-      - run: ${{ env.INV_CMD }} swagger-syntax-check
+      - run: ${{ env.INV_CMD }} install-openapi-tools
+      - run: ${{ env.INV_CMD }} openapi-syntax-check
 
   collect:
     needs:
       - build-auth
       - build-dnsdist
       - build-recursor
-      - swagger-syntax-check
+      - openapi-syntax-check
       - test-auth-api
       - test-auth-backend
       - test-dnsdist-regression
@@ -898,7 +881,7 @@ jobs:
         run: "sudo apt-get update && sudo apt-get install jq jc"
       - name: Fail job if any of the previous jobs failed
         run: "for i in `echo ${NEEDS} | jq -r '.[].result'`; do if [[ $i == 'failure' ]]; then echo ${NEEDS}; exit 1; fi; done;"
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 5
           submodules: recursive

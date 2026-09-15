@@ -18,12 +18,6 @@ if dep_libssl.found()
     'SSL_CTX_set_num_tickets',
     'SSL_CTX_set_keylog_callback',
     'SSL_CTX_get0_privatekey',
-    'SSL_set_hostflags',
-    'SSL_CTX_set_alpn_protos',
-    'SSL_CTX_set_next_proto_select_cb',
-    'SSL_get0_alpn_selected',
-    'SSL_get0_next_proto_negotiated',
-    'SSL_CTX_set_alpn_select_cb',
     'SSL_CTX_use_cert_and_key',
   ]
 
@@ -31,17 +25,6 @@ if dep_libssl.found()
     has = cxx.has_function(func, dependencies: dep_libssl)
     conf.set('HAVE_' + func.to_upper(), has, description: 'Have OpenSSL libssl ' + func)
   endforeach
-
-  has = cxx.has_header_symbol(
-    'openssl/ssl.h',
-    'SSL_CTX_set_min_proto_version',
-    dependencies: dep_libssl,
-  )
-  conf.set(
-    'HAVE_SSL_CTX_SET_MIN_PROTO_VERSION',
-    has,
-    description: 'Have OpenSSL libssl SSL_CTX_set_min_proto_version',
-  )
 endif
 
 conf.set('HAVE_LIBSSL', dep_libssl.found(), description: 'OpenSSL libssl')

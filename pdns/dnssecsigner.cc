@@ -92,13 +92,14 @@ static void fillOutRRSIG(DNSSECPrivateKey& dpk, const DNSName& signQName, RRSIGR
   if(doCache) {
     /* we add some jitter here so not all your secondaries start pruning their caches at the very same millisecond */
     time_t weekno = (time(nullptr) - dns_random(3600)) / static_cast<time_t>(86400*7);  // we just spent milliseconds doing a signature, microsecond more won't kill us
-    const static int maxcachesize=::arg().asNum("max-signature-cache-entries", INT_MAX);
+    const static auto maxcachesize=::arg().asNum<size_t>("max-signature-cache-entries", INT_MAX);
 
     signaturecache_t oldsigs;
     {
       auto signatures = g_signatures.write_lock();
-      if (g_cacheweekno < weekno || signatures->size() >= (uint) maxcachesize) {  // blunt but effective (C) Habbie, mind04
-        g_log<<Logger::Warning<<"Cleared signature cache."<<endl;
+      if (g_cacheweekno < weekno || signatures->size() >= maxcachesize) {  // blunt but effective (C) Habbie, mind04
+        SLOG(g_log<<Logger::Warning<<"Cleared signature cache."<<endl,
+             g_slog->info(Logr::Warning, "Cleared signature cache."));
         std::swap(oldsigs, *signatures);
         g_cacheweekno = weekno;
       }
@@ -114,14 +115,14 @@ static int getRRSIGsForRRSET(DNSSECKeeper& dsk, const ZoneName& signer, const DN
 {
   if(toSign.empty())
     return -1;
-  uint32_t startOfWeek = getStartOfWeek();
+  auto [startOfWeek, _] = getStartOfWeek();
   RRSIGRecordContent rrc;
   rrc.d_type=signQType;
 
   rrc.d_labels=signQName.countLabels()-signQName.isWildcard();
   rrc.d_originalttl=signTTL;
   rrc.d_siginception=startOfWeek - 7*86400; // XXX should come from zone metadata
-  rrc.d_sigexpire=startOfWeek + 14*86400;
+  rrc.d_sigexpire=startOfWeek + 14*86400 + g_rrsig_expiry_extend;
   rrc.d_signer = signer.operator const DNSName&();
   rrc.d_tag = 0;
 

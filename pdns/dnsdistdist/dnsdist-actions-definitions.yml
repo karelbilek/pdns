@@ -1,6 +1,16 @@
 ---
 - name: "allow"
   description: "Let these packets go through"
+- name: "ByName"
+  skip-cpp: true
+  skip-rust: true
+  no-lua-equivalent: true
+  description: "References an already declared action by its name"
+  version_added: 2.2.0
+  parameters:
+    - name: "action_name"
+      type: "String"
+      descripton: "The action name"
 - name: "continue"
   description: "Execute the specified action and override its return with None, making it possible to continue the processing. Subsequent rules are processed after this action"
   skip-cpp: true
@@ -101,10 +111,10 @@
       type: "String"
       description: "The name of the tag to store the result into"
 - name: "log"
-  description: "Log a line for each query, to the specified file if any, to the console (require verbose) if the empty string is given as filename.
-If an empty string is supplied in the file name, the logging is done to stdout, and only in verbose mode by default. This can be changed by setting ``verbose_only`` to ``false``.
-When logging to a file, the ``binary`` parameter specifies whether we log in binary form (default) or in textual form. The ``append`` parameter specifies whether we open the file for appending or truncate each time (default). The ``buffered`` parameter specifies whether writes to the file are buffered (default) or not.
-Subsequent rules are processed after this action"
+  description: |
+    Log a line for each query, to the specified file if any, to the console (require verbose) if the empty string is given as filename.
+    If an empty string is supplied in the file name, the logging is done to stdout, and only in verbose mode by default. This can be changed by setting ``verbose_only`` to ``false``.
+    When logging to a file, the ``binary`` parameter specifies whether we log in binary form (default) or in textual form. The ``append`` parameter specifies whether we open the file for appending or truncate each time (default). The ``buffered`` parameter specifies whether writes to the file are buffered (default) or not. Subsequent rules are processed after this action
   parameters:
     - name: "file_name"
       type: "String"
@@ -171,8 +181,9 @@ Subsequent rules are processed after this action"
       default: ""
       description: "The path to a file containing the code of the Lua function"
 - name: "LuaFFIPerThread"
-  description: "Invoke a Lua function that accepts a pointer to a ``dnsdist_ffi_dnsquestion_t`` object, whose bindings are defined in ``dnsdist-lua-ffi-interface.h``. The function should return a :ref:`DNSAction`. If the Lua code fails, ``ServFail`` is returned.
-The function will be invoked in a per-thread Lua state, without access to the global Lua state. All constants (:ref:`DNSQType`, :ref:`DNSRCode`, ...) are available in that per-thread context, as well as all FFI functions. Objects and their bindings that are not usable in a FFI context (:class:`DNSQuestion`, :class:`DNSDistProtoBufMessage`, :class:`PacketCache`, ...) are not available."
+  description: |
+    Invoke a Lua function that accepts a pointer to a ``dnsdist_ffi_dnsquestion_t`` object, whose bindings are defined in ``dnsdist-lua-ffi-interface.h``. The function should return a :ref:`DNSAction`. If the Lua code fails, ``ServFail`` is returned.
+    The function will be invoked in a per-thread Lua state, without access to the global Lua state. All constants (:ref:`DNSQType`, :ref:`DNSRCode`, ...) are available in that per-thread context, as well as all FFI functions. Objects and their bindings that are not usable in a FFI context (:class:`DNSQuestion`, :class:`DNSDistProtoBufMessage`, :class:`PacketCache`, ...) are not available.
   parameters:
     - name: "code"
       type: "String"
@@ -259,6 +270,9 @@ The function will be invoked in a per-thread Lua state, without access to the gl
   skip-cpp: true
   skip-rust: true
   description: "Send the current query to a remote logger as a Protocol Buffer message. ``alter_function`` is a callback, receiving a :class:`DNSQuestion` and a :class:`DNSDistProtoBufMessage`, that can be used to modify the message, for example for anonymization purposes. Subsequent rules are processed after this action"
+  changes:
+    - version: 2.2.0
+      content: "Added the ``export_tags_key_only``, ``export_tags_prefixes`` and ``export_tags_strip_prefixes`` options"
   parameters:
     - name: "logger_name"
       type: "String"
@@ -286,25 +300,38 @@ The function will be invoked in a per-thread Lua state, without access to the gl
     - name: "ip_encrypt_key"
       type: "String"
       default: ""
-      description: "A key to encrypt the IP address of the requestor for anonymization purposes. For the \"legacy\" method, it can be generated via the :func:`makeIPCipherKey` function. The encryption method can be set using ``ip_encrypt_method``"
+      description: 'A key to encrypt the IP address of the requestor for anonymization purposes. For the "legacy" method, it can be generated via the :func:`makeIPCipherKey` function. The encryption method can be set using ``ip_encrypt_method``'
     - name: "ip_encrypt_method"
       type: "String"
       default: "legacy"
-      description: "
+      description: |
         The method to encrypt the IP addresses with.
+
           * legacy: The encryption is done using ipcrypt for IPv4 and a 128-bit AES ECB operation for IPv6. This is the default.
-          * ipcrypt-pfx: IPCrypt2, using prefix-preserving encryption. See `the ipcrypt website <https://ipcrypt-std.github.io/>__`. ``ip_encrypt_key`` must be 32 bytes."
+          * ipcrypt-pfx: IPCrypt2, using prefix-preserving encryption. See `the ipcrypt website <https://ipcrypt-std.github.io/>`__. ``ip_encrypt_key`` must be 32 bytes.
     - name: "export_tags"
       type: "Vec<String>"
       default: ""
-      description: "The comma-separated list of keys of internal tags to export into the ``tags`` Protocol Buffer field, as ``key:value`` strings. Note that a tag with an empty value will be exported as ``<key>``, not ``<key>:``. An empty string means that no internal tag will be exported. The special value ``*`` means that all tags will be exported"
+      description: "The list of keys of internal tags to export into the ``tags`` Protocol Buffer field, as ``key:value`` strings (or as ``key`` if ``export_tags_key_only`` is set). Note that a tag with an empty value will be exported as ``<key>``, not ``<key>:``. An empty string means that no internal tag will be exported. The special value ``*`` means that all tags will be exported. See :doc:`protobuf` for some examples."
+    - name: "export_tags_key_only"
+      type: "bool"
+      default: "false"
+      description: "Whether to export tags matched by ``export_tags`` or ``export_tags_prefixes`` as ``key`` (``true``) or ``key:value`` strings (``false``, the default)."
+    - name: "export_tags_prefixes"
+      type: "Vec<String>"
+      default: ""
+      description: "Internal tags whose keys match at least one of these prefixes will be exported into the ``tags`` Protocol Buffer field, as ``key:value`` strings (or as ``key`` if ``export_tags_key_only`` is set). Tags whose keys match at least of the entries in ``export_tags`` will be exported as well."
+    - name: "export_tags_strip_prefixes"
+      type: "bool"
+      default: "false"
+      description: "Whether to strip the prefix part of the key when exporting a tag matched by one of the prefixes defined in ``export_tags_prefixes``."
     - name: "metas"
       type: "Vec<ProtoBufMetaConfiguration>"
       default: true
       description: "A list of ``name``=``key`` pairs, for meta-data to be added to Protocol Buffer message"
 - name: "SetAdditionalProxyProtocolValue"
-  description: "Add a Proxy-Protocol Type-Length value to be sent to the server along with this query. It does not replace any existing value with the same type but adds a new value. Be careful that Proxy Protocol values are sent once at the beginning of the TCP connection for TCP and DoT queries. That means that values received on an incoming TCP connection will be inherited by subsequent queries received over the same incoming TCP connection, if any, but values set to a query will not be inherited by subsequent queries. Subsequent rules
-are processed after this action"
+  description: |
+    Add a Proxy-Protocol Type-Length value to be sent to the server along with this query. It does not replace any existing value with the same type but adds a new value. Be careful that Proxy Protocol values are sent once at the beginning of the TCP connection for TCP and DoT queries. That means that values received on an incoming TCP connection will be inherited by subsequent queries received over the same incoming TCP connection, if any, but values set to a query will not be inherited by subsequent queries. Subsequent rules are processed after this action
   parameters:
     - name: "proxy_type"
       type: "u8"
@@ -420,21 +447,23 @@ are processed after this action"
     - name: remote_loggers
       type: "Vec<String>"
       default: ""
-      description: |
-        The names of all the loggers that should be sent the protobuf messages that includes the tracing information.
-        This message will be sent once dnsdist is finished with the DNS transaction (i.e. the response has been sent, the query was dropped, or when a timeout occured).
-    - name: "use_incoming_traceid"
+      description: "The names of all the loggers that should be sent the protobuf messages that includes the tracing information. This message will be sent once dnsdist is finished with the DNS transaction (i.e. the response has been sent, the query was dropped, or when a timeout occured)."
+    - name: "use_incoming_traceparent"
       type: "bool"
       default: "false"
-      description: "When set in the EDNS section, use the query's Trace ID and Span ID"
-    - name: "trace_edns_option"
+      description: "When set in the EDNS section, use the Trace ID and Span ID from the TRACEPARENT option"
+    - name: "traceparent_edns_option_code"
       type: "u16"
       default: 65500
-      description: "The EDNS Option code to take the Trace ID from"
-    - name: "strip_incoming_traceid"
+      description: "The EDNS Option code for TRACEPARENT"
+    - name: "strip_incoming_traceparent"
       type: "bool"
       default: "false"
       description: "Remove any existing TRACEPARENT EDNS option from the query. When use_incoming_traceid is set to true, the ID will be picked set before removing the option"
+    - name: "send_downstream_traceparent"
+      type: "bool"
+      default: "false"
+      description: "Set to true to add (or update) the TRACEPARENT option in the EDNS options of the query forwarded to the downstream server. When ``strip_incoming_traceparent`` is ``false`` and this option is ``false``, any TRACEPARENT option in the original query will be sent downstream unaltered"
 - name: "SNMPTrap"
   description: "Send an SNMP trap, adding the message string as the query description. Subsequent rules are processed after this action"
   parameters:
@@ -480,20 +509,20 @@ are processed after this action"
       description: "The length of the DNS packet"
 - name: "SpoofRaw"
   description: |
-               Forge a response with the specified raw bytes as record data. Non-character values should be encoded in the ``\DDD`` format where ``DDD`` is the decimal value. For example to wire content of an A record containing ``1.2.3.4`` should be encoded as ``\001\002\003\004``.
+    Forge a response with the specified raw bytes as record data. Non-character values should be encoded in the ``\DDD`` format where ``DDD`` is the decimal value. For example to wire content of an A record containing ``1.2.3.4`` should be encoded as ``\001\002\003\004``.
 
-               ``sdig dumpluaraw`` and ``pdnsutil raw-lua-from-content`` from PowerDNS can generate raw answers for you:
+    ``sdig dumpluaraw`` and ``pdnsutil raw-lua-from-content`` from PowerDNS can generate raw answers for you:
 
-               .. code-block:: Shell
+    .. code-block:: Shell
 
-                 $ pdnsutil raw-lua-from-content SRV '0 0 65535 srv.powerdns.com.'
-                 "\000\000\000\000\255\255\003srv\008powerdns\003com\000"
-                 $ sdig 127.0.0.1 53 open-xchange.com MX recurse dumpluaraw
-                 Reply to question for qname='open-xchange.com.', qtype=MX
-                 Rcode: 0 (No Error), RD: 1, QR: 1, TC: 0, AA: 0, opcode: 0
-                 0 open-xchange.com. IN  MX  "\000c\004mx\049\049\012open\045xchange\003com\000"
-                 0 open-xchange.com. IN  MX  "\000\010\003mx\049\012open\045xchange\003com\000"
-                 0 open-xchange.com. IN  MX  "\000\020\003mx\050\012open\045xchange\003com\000"
+      $ pdnsutil raw-lua-from-content SRV '0 0 65535 srv.powerdns.com.'
+      "\000\000\000\000\255\255\003srv\008powerdns\003com\000"
+      $ sdig 127.0.0.1 53 open-xchange.com MX recurse dumpluaraw
+      Reply to question for qname='open-xchange.com.', qtype=MX
+      Rcode: 0 (No Error), RD: 1, QR: 1, TC: 0, AA: 0, opcode: 0
+      0 open-xchange.com. IN  MX  "\000c\004mx\049\049\012open\045xchange\003com\000"
+      0 open-xchange.com. IN  MX  "\000\010\003mx\049\012open\045xchange\003com\000"
+      0 open-xchange.com. IN  MX  "\000\020\003mx\050\012open\045xchange\003com\000"
   skip-cpp: true
   skip-rust: true
   parameters:
@@ -530,7 +559,7 @@ are processed after this action"
       rust-type: "String"
       description: "The address and port of the remote server"
     - name: "lca"
-      type: "ComboAddress"
+      type: "OptionalComboAddress"
       rust-type: "String"
       default: ""
       description: "The source address to use to send packets to the remote server"
@@ -542,3 +571,9 @@ are processed after this action"
       type: "bool"
       default: "false"
       description: "Whether to add a proxy protocol payload to the query"
+- name: "UnsetTag"
+  description: "Remove a tag named ``tag`` from this query. Subsequent rules are processed after this action"
+  parameters:
+    - name: "tag"
+      type: "String"
+      description: "The tag name"

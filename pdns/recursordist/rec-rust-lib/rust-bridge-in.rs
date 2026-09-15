@@ -71,6 +71,13 @@ pub struct ProtobufServer {
     exportTypes: Vec<String>,
     #[serde(default, skip_serializing_if = "crate::is_default", alias = "log_mapped_from")]
     logMappedFrom: bool,
+    // Added in 5.5.0
+    #[serde(default, skip_serializing_if = "crate::is_default")]
+    frame4: bool,
+    #[serde(default = "crate::def_pb_strategy", skip_serializing_if = "crate::def_value_equals_pb_strategy")]
+    strategy: String,
+    #[serde(default = "crate::U64::<5>::value", skip_serializing_if = "crate::U64::<5>::is_equal", alias = "stalled_write_timeout")]
+    stalledWriteTimeout: u64,
 }
 
 // A dnstap logging server
@@ -179,6 +186,9 @@ pub struct RPZ {
     dumpFile: String,
     #[serde(default, skip_serializing_if = "crate::is_default", alias = "seed_file")]
     seedFile: String,
+    // Added in 5.5.0
+    #[serde(default = "crate::Bool::<true>::value", skip_serializing_if = "crate::if_true", alias = "wipe_packet_cache")]
+    wipePacketCache: bool,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
@@ -348,6 +358,13 @@ struct OutgoingTLSConfiguration {
     ciphers: String,
     #[serde(default, skip_serializing_if = "crate::is_default")]
     ciphers_tls_13: String,
+    #[serde(default, skip_serializing_if = "crate::is_default")]
+    // Fields below added in 5.5.0
+    client_certificate: String,
+    #[serde(default, skip_serializing_if = "crate::is_default")]
+    client_certificate_key: String,
+    #[serde(default, skip_serializing_if = "crate::is_default")]
+    client_certificate_password: String,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
@@ -365,6 +382,15 @@ struct OpenTelemetryTraceCondition {
     edns_option_required: bool,
     #[serde(default, skip_serializing_if = "crate::is_default")]
     traceid_only: bool,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct QNameAndQType {
+    #[serde(default, skip_serializing_if = "crate::is_default")]
+    qname: String,
+    #[serde(default = "crate::def_qnameandqtype_qtype", skip_serializing_if = "crate::def_value_equals_qnameqtype_qtype")]
+    qtype: String,
 }
 
 // Two structs used to generated YAML based on a vector of name to value mappings
@@ -390,6 +416,8 @@ struct Value {
     vec_forwardingcatalogzone_val: Vec<ForwardingCatalogZone>,
     vec_incomingwsconfig_val: Vec<IncomingWSConfig>,
     vec_outgoingtlsconfiguration_val: Vec<OutgoingTLSConfiguration>,
+    vec_opentelemetrytracecondition_val: Vec<OpenTelemetryTraceCondition>,
+    vec_qnameandqtype_val: Vec<QNameAndQType>,
 }
 
 struct OldStyle {

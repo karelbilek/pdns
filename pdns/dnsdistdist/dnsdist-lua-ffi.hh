@@ -45,6 +45,15 @@ struct LuaContext::Pusher<dnsdist_ffi_dnsquestion_t*>
   }
 };
 
+namespace dnsdist::lua::ffi
+{
+enum class ObjectType : uint64_t
+{
+  Question = 0xaa55aa55,
+  Response = 0x55aa55aa,
+};
+}
+
 struct dnsdist_ffi_dnsquestion_t
 {
   dnsdist_ffi_dnsquestion_t(DNSQuestion* dq_) :
@@ -52,7 +61,10 @@ struct dnsdist_ffi_dnsquestion_t
   {
   }
 
+  // these two fields (pointer to DNSQuestion, then objectType) should remain at the same offset
+  // here and in dnsdist_ffi_dnsresponse_t
   DNSQuestion* dq{nullptr};
+  const dnsdist::lua::ffi::ObjectType objectType{dnsdist::lua::ffi::ObjectType::Question};
   ComboAddress maskedRemote;
   std::string trailingData;
   std::optional<std::string> result{std::nullopt};
@@ -93,7 +105,10 @@ struct dnsdist_ffi_dnsresponse_t
   {
   }
 
+  // these two fields (pointer to DNSResponse, then objectType) should remain at the same offset
+  // here and in dnsdist_ffi_dnsquestion_t
   DNSResponse* dr{nullptr};
+  const dnsdist::lua::ffi::ObjectType objectType{dnsdist::lua::ffi::ObjectType::Response};
   std::optional<std::string> result{std::nullopt};
 #if !defined(DISABLE_PROTOBUF)
   protozero::pbf_writer pbfWriter{};

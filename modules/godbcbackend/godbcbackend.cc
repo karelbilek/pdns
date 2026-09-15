@@ -37,17 +37,23 @@
 gODBCBackend::gODBCBackend(const std::string& mode, const std::string& suffix) :
   GSQLBackend(mode, suffix)
 {
+  if (g_slogStructured) {
+    d_slog = g_slog->withName("godbc" + suffix);
+  }
+
   try {
-    setDB(std::unique_ptr<SSql>(new SODBC(getArg("datasource"), getArg("username"), getArg("password"))));
+    setDB(std::unique_ptr<SSql>(new SODBC(d_slog, getArg("datasource"), getArg("username"), getArg("password"))));
   }
   catch (SSqlException& e) {
-    g_log << Logger::Error << mode << " Connection failed: " << e.txtReason() << std::endl;
+    SLOG(g_log << Logger::Error << mode << " Connection failed: " << e.txtReason() << std::endl,
+         d_slog->error(Logr::Error, e.txtReason(), "Database connection failed", "mode", Logging::Loggable(mode)));
     throw PDNSException("Unable to launch " + mode + " connection: " + e.txtReason());
   }
 
   allocateStatements();
 
-  g_log << Logger::Warning << mode << " Connection successful" << std::endl;
+  SLOG(g_log << Logger::Warning << mode << " Connection successful" << std::endl,
+       d_slog->info(Logr::Info, "Database connection successful", "mode", Logging::Loggable(mode)));
 }
 
 //! Constructs a gODBCBackend
@@ -116,8 +122,8 @@ public:
     declare(suffix, "update-serial-query", "", "update domains set notified_serial=? where id=?");
     declare(suffix, "update-lastcheck-query", "", "update domains set last_check=? where id=?");
     declare(suffix, "info-all-primary-query", "", "select domains.id, domains.name, domains.type, domains.notified_serial, domains.options, domains.catalog, records.content from records join domains on records.domain_id=domains.id and records.name=domains.name where records.type='SOA' and records.disabled=0 and domains.type in ('MASTER', 'PRODUCER') order by domains.id");
-    declare(suffix, "info-producer-members-query", "", "select domains.id, domains.name, domains.options from records join domains on records.domain_id=domains.id and records.name=domains.name where domains.type='MASTER' and domains.catalog=? and records.type='SOA' and records.disabled=0");
-    declare(suffix, "info-consumer-members-query", "", "select id, name, options, master from domains where type='SLAVE' and catalog=?");
+    declare(suffix, "info-producer-members-query", "", "select domains.id, domains.name, domains.type, domains.options from records join domains on records.domain_id=domains.id and records.name=domains.name where domains.type in ('MASTER', 'PRODUCER') and domains.catalog=? and records.type='SOA' and records.disabled=0");
+    declare(suffix, "info-consumer-members-query", "", "select id, name, type, options, master from domains where type in ('SLAVE', 'CONSUMER') and catalog=?");
     declare(suffix, "delete-domain-query", "", "delete from domains where name=?");
     declare(suffix, "delete-zone-query", "", "delete from records where domain_id=?");
     declare(suffix, "delete-rrset-query", "", "delete from records where domain_id=? and name=? and type=?");
@@ -138,9 +144,9 @@ public:
     declare(suffix, "remove-domain-key-query", "", "delete from cryptokeys where domain_id=(select id from domains where name=?) and cryptokeys.id=?");
     declare(suffix, "clear-domain-all-keys-query", "", "delete from cryptokeys where domain_id=(select id from domains where name=?)");
     declare(suffix, "get-tsig-key-query", "", "select algorithm, secret from tsigkeys where name=?");
-    /* FIXME: set-tsig-key-query only works on an empty database right now. For MySQL we use the "update into" statement..
-       According to the internet, we need to construct a pretty hefty "merge" query: https://msdn.microsoft.com/en-us/library/bb510625.aspx
-    */
+    // FIXME: set-tsig-key-query only works if no existing key is present right
+    // now. According to the internet, we need to construct a pretty hefty
+    // "merge" query: https://msdn.microsoft.com/en-us/library/bb510625.aspx
     declare(suffix, "set-tsig-key-query", "", "insert into tsigkeys (name,algorithm,secret) values(?,?,?)");
     declare(suffix, "delete-tsig-key-query", "", "delete from tsigkeys where name=?");
     declare(suffix, "get-tsig-keys-query", "", "select name,algorithm, secret from tsigkeys");
@@ -173,6 +179,9 @@ public:
   gODBCLoader()
   {
     BackendMakers().report(std::make_unique<gODBCFactory>("godbc"));
+    // If this module is not loaded dynamically at runtime, this code runs
+    // as part of a global constructor, before the structured logger has a
+    // chance to be set up, so fallback to simple logging.
     g_log << Logger::Warning << "This is module godbcbackend reporting" << std::endl;
   }
 };

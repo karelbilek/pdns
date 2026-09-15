@@ -46,6 +46,7 @@ public:
   static constexpr uint8_t s_default_maxNSEC3CommonPrefix = 10;
   static uint64_t s_nsec3DenialProofMaxCost;
   static uint8_t s_maxNSEC3CommonPrefix;
+  static uint32_t s_maxEntrySize;
 
   AggressiveNSECCache(uint64_t entries) :
     d_maxEntries(entries)
@@ -92,7 +93,6 @@ public:
     return d_nsec3WildcardHits;
   }
 
-  // exported for unit test purposes
   static bool isSmallCoveringNSEC3(const DNSName& owner, const std::string& nextHash);
 
   void prune(time_t now);
@@ -103,11 +103,6 @@ private:
   {
     ZoneEntry(const DNSName& zone) :
       d_zone(zone)
-    {
-    }
-
-    ZoneEntry(const DNSName& zone, const std::string& salt, uint16_t iterations, bool nsec3) :
-      d_zone(zone), d_salt(salt), d_iterations(iterations), d_nsec3(nsec3)
     {
     }
 
@@ -131,9 +126,20 @@ private:
       DNSName d_qname; // of the query data that lead to this entry being created/updated
       time_t d_ttd;
       QType d_qtype; // of the query data that lead to this entry being created/updated
+
+      [[nodiscard]] size_t sizeEstimate() const;
     };
 
-    typedef multi_index_container<
+    enum class ZoneDenialType : uint8_t
+    {
+      Unknown = 0,
+      NSEC = 1,
+      NSEC3 = 2
+    };
+
+    static const std::string& getZoneTypeAsString(ZoneDenialType type);
+
+    using cache_t = multi_index_container<
       CacheEntry,
       indexed_by<
         ordered_unique<tag<OrderedTag>,
@@ -141,14 +147,13 @@ private:
                        CanonDNSNameCompare>,
         sequenced<tag<SequencedTag>>,
         hashed_non_unique<tag<HashedTag>,
-                          member<CacheEntry, const DNSName, &CacheEntry::d_owner>>>>
-      cache_t;
+                          member<CacheEntry, const DNSName, &CacheEntry::d_owner>>>>;
 
     cache_t d_entries;
     const DNSName d_zone;
     std::string d_salt;
     uint16_t d_iterations{0};
-    bool d_nsec3{false};
+    ZoneDenialType d_denialType{ZoneDenialType::Unknown};
   };
 
   std::shared_ptr<LockGuarded<ZoneEntry>> getZone(const DNSName& zone);

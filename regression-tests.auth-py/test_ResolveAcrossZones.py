@@ -12,6 +12,7 @@ class CrossZoneResolveBase(AuthTest):
 any-to-tcp=no
 launch={backend}
 edns-subnet-processing=yes
+logging-structured
 """
     target_otherzone_ip = "192.0.2.2"
     target_subzone_ip = "192.0.2.3"
@@ -51,9 +52,7 @@ resolve-across-zones=no
     )
 
     def impl_cname_only_test(self, qname, target):
-        expected_cname = dns.rrset.from_text(
-            qname, 0, dns.rdataclass.IN, "CNAME", target
-        )
+        expected_cname = dns.rrset.from_text(qname, 0, dns.rdataclass.IN, "CNAME", target)
         query = dns.message.make_query(qname, "A")
         res = self.sendUDPQuery(query)
         self.assertRcodeEqual(res, dns.rcode.NOERROR)
@@ -64,9 +63,7 @@ resolve-across-zones=no
         self.impl_cname_only_test("cname-otherzone.example.org.", "target.example.com.")
 
     def testCNAMESubZone(self):
-        self.impl_cname_only_test(
-            "cname-subzone.example.org.", "target.subzone.example.org."
-        )
+        self.impl_cname_only_test("cname-subzone.example.org.", "target.subzone.example.org.")
 
 
 class TestCrossZoneResolveOn(CrossZoneResolveBase):
@@ -78,12 +75,8 @@ resolve-across-zones=yes
     )
 
     def impl_cname_and_target_test(self, qname, target, target_ip):
-        expected_cname = dns.rrset.from_text(
-            qname, 0, dns.rdataclass.IN, "CNAME", target
-        )
-        expected_target = dns.rrset.from_text(
-            target, 0, dns.rdataclass.IN, "A", target_ip
-        )
+        expected_cname = dns.rrset.from_text(qname, 0, dns.rdataclass.IN, "CNAME", target)
+        expected_target = dns.rrset.from_text(target, 0, dns.rdataclass.IN, "A", target_ip)
         query = dns.message.make_query(qname, "A")
         res = self.sendUDPQuery(query)
         self.assertRcodeEqual(res, dns.rcode.NOERROR)

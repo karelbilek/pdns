@@ -11,6 +11,7 @@ project(
     'cpp_std=c++17',
   ],
 )
+meson.add_dist_script('meson-dist-script.sh')
 
 add_project_arguments('-DPDNS_AUTH', language: 'cpp')
 
@@ -156,7 +157,6 @@ deps = [
   dep_geoip,
   dep_mmdb,
   dep_cxx_fs,
-  dep_boost_test,
 ]
 
 if dep_systemd_prog.found()
@@ -359,21 +359,21 @@ if not fs.is_file(libpdns_dnslabeltext_gen)
   libpdns_dnslabeltext_gen = ragel_generator.process(libpdns_dnslabeltext_source)
 endif
 
-libpdns_apidocfiles_source = 'docs' / 'http-api' / 'swagger' / 'authoritative-api-swagger.yaml'
+libpdns_apidocfiles_source = 'docs' / 'http-api' / 'openapi' / 'authoritative-api-openapi.yaml'
 libpdns_apidocfiles_gen    = src_dir / 'apidocfiles.h'
-generate_api_swagger_py    = src_dir / 'generate-api-swagger.py'
+generate_api_openapi_py    = src_dir / 'generate-api-openapi.py'
 if not fs.is_file(libpdns_apidocfiles_gen)
   py = import('python')
   python = py.find_installation('python3', modules: 'yaml', required: true)
 
-  summary('Python', python.found(), bool_yn: true, section: 'Swagger API')
-  summary('Path', python.full_path(), section: 'Swagger API')
-  summary('Version', python.version(), section: 'Swagger API')
+  summary('Python', python.found(), bool_yn: true, section: 'Openapi API')
+  summary('Path', python.full_path(), section: 'Openapi API')
+  summary('Version', python.version(), section: 'Openapi API')
 
   libpdns_apidocfiles_gen = custom_target(
     'pdns-apidocfiles-h',
     command: [python, '@INPUT0@', '@INPUT1@'],
-    input: [generate_api_swagger_py, libpdns_apidocfiles_source],
+    input: [generate_api_openapi_py, libpdns_apidocfiles_source],
     output: 'apidocfiles.h',
     capture: true,
   )
@@ -458,6 +458,21 @@ if dep_pkcs11.found()
   )
 endif
 
+# Needs link_whole, so the symbols are put into pdns_server and pdnsutil, and
+# dynamically loaded backends can use the symbols from their host program (uses
+# export_dynamic).
+libpdns_sqlbackend = declare_dependency(
+  link_whole: static_library(
+    'pdns-sqlbackend',
+    sources: files(
+      src_dir / 'backends' / 'gsql' / 'gsqlbackend.cc',
+      src_dir / 'backends' / 'gsql' / 'gsqlbackend.hh',
+      src_dir / 'backends' / 'gsql' / 'ssql.hh',
+    ),
+    dependencies: deps,
+  )
+)
+
 # This needs to be link_whole'd because it's needed by auth backends.
 libpdns_ssqlite3 = dependency('', required: false)
 if dep_sqlite3.found()
@@ -497,9 +512,6 @@ common_sources += files(
   src_dir / 'auth-zonecache.hh',
   src_dir / 'axfr-retriever.cc',
   src_dir / 'axfr-retriever.hh',
-  src_dir / 'backends' / 'gsql' / 'gsqlbackend.cc', # TODO Move to a separate module.
-  src_dir / 'backends' / 'gsql' / 'gsqlbackend.hh', # TODO Move to a separate module.
-  src_dir / 'backends' / 'gsql' / 'ssql.hh',        # TODO Move to a separate module.
   src_dir / 'base32.cc',
   src_dir / 'base32.hh',
   src_dir / 'base64.cc',
@@ -567,7 +579,9 @@ common_sources += files(
   src_dir / 'lock.hh',
   src_dir / 'logger.cc',
   src_dir / 'logger.hh',
+  src_dir / 'logging.cc',
   src_dir / 'logging.hh',
+  src_dir / 'logr.hh',
   src_dir / 'lua-auth4.cc',
   src_dir / 'lua-auth4.hh',
   src_dir / 'lua-base4.cc',
@@ -583,6 +597,8 @@ common_sources += files(
   src_dir / 'packethandler.cc',
   src_dir / 'packethandler.hh',
   src_dir / 'pdnsexception.hh',
+  src_dir / 'protozero.cc',
+  src_dir / 'protozero.hh',
   src_dir / 'proxy-protocol.cc',
   src_dir / 'proxy-protocol.hh',
   src_dir / 'qtype.cc',
@@ -591,6 +607,8 @@ common_sources += files(
   src_dir / 'query-local-address.hh',
   src_dir / 'rcpgenerator.cc',
   src_dir / 'rcpgenerator.hh',
+  src_dir / 'remote_logger.cc',
+  src_dir / 'remote_logger.hh',
   src_dir / 'resolver.cc',
   src_dir / 'resolver.hh',
   src_dir / 'responsestats-auth.cc',
@@ -691,8 +709,10 @@ tools = {
       libpdns_gettime,
       libpdns_signers_openssl,
       libpdns_signers_sodium,
+      libpdns_sqlbackend,
     ],
     'manpages': ['pdns_server.1'],
+    'install_dir': get_option('sbindir'),
   },
   'pdnsutil': {
     'main': src_dir / 'pdnsutil.cc',
@@ -703,6 +723,7 @@ tools = {
       libpdns_ssqlite3,
       libpdns_signers_openssl,
       libpdns_signers_sodium,
+      libpdns_sqlbackend,
     ],
     'manpages': ['pdnsutil.1'],
   },
@@ -925,6 +946,7 @@ if get_option('unit-tests')
     'pdns-auth-testrunner': {
       'main': src_dir / 'testrunner.cc',
       'deps-extra': [
+        dep_boost_test,
         libpdns_test,
         libpdns_signers_openssl,
         libpdns_signers_sodium,
@@ -953,11 +975,13 @@ if get_option('fuzz-targets')
   endif
 
   fuzz_targets = [
+    'dnspacketroundtrip',
     'moadnsparser',
     'packetcache',
     'proxyprotocol',
     'dnslabeltext-parseRFC1035CharString',
     'yahttp',
+    'recordcontent',
     'zoneparsertng',
   ]
 
@@ -998,6 +1022,7 @@ foreach tool, info: tools
   deps_extra = 'deps-extra' in info ? info['deps-extra'] : []
   link_args = 'link-args' in info ? info['link-args'] : []
   install = 'install' in info ? info['install'] : true
+  install_dir = 'install_dir' in info ? info['install_dir'] : get_option('bindir')
 
   set_variable(
     var_name,
@@ -1015,6 +1040,7 @@ foreach tool, info: tools
         deps_extra,
       ],
       install: install,
+      install_dir: install_dir,
     )
   )
 
@@ -1059,7 +1085,7 @@ if python.found()
         else
           install_man(
             'docs' / man_page,
-            install_dir: join_paths(get_option('mandir'), 'man1'),
+            install_dir: man_page.endswith('.5') ? join_paths(get_option('mandir'), 'man5') : join_paths(get_option('mandir'), 'man1'),
           )
         endif
       endforeach
@@ -1072,6 +1098,7 @@ if python.found()
      input: man_pages,
      output: generated_man_pages,
      install: true,
+     # wrong for ixfrdist.yml.5 but I don't know how to handle that
      install_dir: join_paths(get_option('mandir'), 'man1'),
      command: [
        python,
@@ -1097,6 +1124,7 @@ if get_option('unit-tests')
       'BOOST_TEST_LOG_LEVEL': 'message',
     },
     is_parallel: false,
+    timeout: 300,
   )
 endif
 
@@ -1149,6 +1177,7 @@ if get_option('unit-tests-backends')
         workdir: product_source_dir / fs.parent(module_remotebackend_testrunner),
         is_parallel: false,
         depends: get_variable(exec_var_name),
+        timeout: 300,
       )
     endforeach
   endif
@@ -1167,17 +1196,32 @@ if get_option('unit-tests-backends')
       test(
         'pdns-auth-backend-' + module,
         start_test_stop,
-        env: {'PDNS_BUILD_PATH': meson.build_root()},
+        env: {'PDNS_BUILD_PATH': meson.project_build_root()},
         args: ['5300', module],
         workdir: product_source_dir / 'regression-tests',
         depends: [pdns_server, pdnsutil, sdig, saxfr, pdns_notify, nsec3dig],
         is_parallel: false,
+        timeout: 300,
       )
     endif
   endforeach
 endif
 
 if python.found()
+  json_schema = custom_target(
+    'auth-json-schema',
+    input: product_source_dir / docs_dir / 'http-api' / 'openapi' / 'authoritative-api-openapi.yaml',
+    output: 'auth-schema-generated.stamp',
+    command: [
+      python,
+      product_source_dir / docs_dir / 'generate-jsonschema.py',
+      '@INPUT@',
+      product_source_dir / docs_dir / 'http-api' / 'openapi' / 'authoritative-api-schema.yaml',
+      '--stampfile',
+      '@OUTPUT@'
+    ],
+  )
+
   html_docs = custom_target(
     'html-docs',
     command: [
@@ -1193,6 +1237,7 @@ if python.found()
     output: 'sphinx.stamp',
     console: true,
     depfile: 'sphinx.d',
+    depends: [json_schema],
   )
 
   docs_tarball = custom_target(
@@ -1216,6 +1261,7 @@ if python.found()
     output: 'PowerDNS-Authoritative.pdf',
     console: true,
     depfile: 'sphinx.d',
+    depends: [json_schema],
   )
 
   run_target(
@@ -1223,4 +1269,11 @@ if python.found()
     # args mentioned in command line become auto-dependency
     command: ['echo', 'Generated', html_docs, docs_tarball, pdf_docs],
   )
+
+  run_target(
+    'html-docs',
+    # args mentioned in command line become auto-dependency
+    command: ['echo', 'Generated', html_docs, docs_tarball],
+  )
+
 endif

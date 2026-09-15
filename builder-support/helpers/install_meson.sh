@@ -5,13 +5,13 @@ set -e
 [ -e /tmp/.pdns_meson_installed ] && exit 0  # we already have meson, let's assume we put it there earlier
 
 readonly MESON_VERSION=$(jq -r .version < meson.json)
-readonly MESON_TARBALL="${MESON_VERSION}.tar.gz"
-readonly MESON_TARBALL_URL="https://github.com/mesonbuild/meson/archive/${MESON_TARBALL}"
+readonly MESON_TARBALL="meson-${MESON_VERSION}.tar.gz"
+readonly MESON_TARBALL_URL="https://github.com/mesonbuild/meson/releases/download/${MESON_VERSION}/${MESON_TARBALL}"
 readonly MESON_TARBALL_HASH=$(jq -r .SHA256SUM < meson.json)
 
 cd /tmp
 echo $0: Downloading ${MESON_TARBALL}
-curl -L -o "${MESON_TARBALL}" "${MESON_TARBALL_URL}"
+curl --fail -L -o "${MESON_TARBALL}" "${MESON_TARBALL_URL}"
 echo $0: Checking that the hash of ${MESON_TARBALL} is ${MESON_TARBALL_HASH}
 # Line below should echo two spaces between digest and name
 if echo "${MESON_TARBALL_HASH}  ${MESON_TARBALL}" | sha256sum -c -; then

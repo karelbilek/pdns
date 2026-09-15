@@ -31,7 +31,6 @@
 #include "dnsdist-metrics.hh"
 #include "dnsdist-lua-network.hh"
 #include "dnsdist-lua.hh"
-#include "dnsdist-ecs.hh"
 #include "dnsdist-rings.hh"
 #include "dnsdist-self-answers.hh"
 #include "dnsdist-svc.hh"
@@ -43,39 +42,46 @@ static std::shared_ptr<const Logr::Logger> getLogger(const std::string_view from
   return dnsdist::logging::getTopLogger("lua-ffi-script")->withValues("lua.ffi.function", Logging::Loggable(fromFunction));
 }
 
-uint16_t dnsdist_ffi_dnsquestion_get_qtype(const dnsdist_ffi_dnsquestion_t* dq)
+uint16_t dnsdist_ffi_dnsquestion_get_qtype(const dnsdist_ffi_dnsquestion_t* dnsQuestion)
 {
-  return dq->dq->ids.qtype;
+  return dnsQuestion->dq->ids.qtype;
 }
 
-uint16_t dnsdist_ffi_dnsquestion_get_qclass(const dnsdist_ffi_dnsquestion_t* dq)
+uint16_t dnsdist_ffi_dnsquestion_get_qclass(const dnsdist_ffi_dnsquestion_t* dnsQuestion)
 {
-  return dq->dq->ids.qclass;
+  return dnsQuestion->dq->ids.qclass;
 }
 
-uint16_t dnsdist_ffi_dnsquestion_get_id(const dnsdist_ffi_dnsquestion_t* dq)
+uint16_t dnsdist_ffi_dnsquestion_get_id(const dnsdist_ffi_dnsquestion_t* dnsQuestion)
 {
-  if (dq == nullptr) {
+  if (dnsQuestion == nullptr) {
     return 0;
   }
-  return ntohs(dq->dq->getHeader()->id);
+  try {
+    return ntohs(dnsQuestion->dq->getHeader()->id);
+  }
+  catch (const std::exception& e) {
+    VERBOSESLOG(infolog("Error getting ID from packet: %s", e.what()),
+                getLogger(__func__)->error(Logr::Info, e.what(), "Error getting ID from packet"));
+    return 0;
+  }
 }
 
-static void dnsdist_ffi_comboaddress_to_raw(const ComboAddress& ca, const void** addr, size_t* addrSize)
+static void dnsdist_ffi_comboaddress_to_raw(const ComboAddress& caAddr, const void** addr, size_t* addrSize)
 {
-  if (ca.isIPv4()) {
-    *addr = &ca.sin4.sin_addr.s_addr;
-    *addrSize = sizeof(ca.sin4.sin_addr.s_addr);
+  if (caAddr.isIPv4()) {
+    *addr = &caAddr.sin4.sin_addr.s_addr;
+    *addrSize = sizeof(caAddr.sin4.sin_addr.s_addr);
   }
   else {
-    *addr = &ca.sin6.sin6_addr.s6_addr;
-    *addrSize = sizeof(ca.sin6.sin6_addr.s6_addr);
+    *addr = &caAddr.sin6.sin6_addr.s6_addr;
+    *addrSize = sizeof(caAddr.sin6.sin6_addr.s6_addr);
   }
 }
 
-void dnsdist_ffi_dnsquestion_get_localaddr(const dnsdist_ffi_dnsquestion_t* dq, const void** addr, size_t* addrSize)
+void dnsdist_ffi_dnsquestion_get_localaddr(const dnsdist_ffi_dnsquestion_t* dnsQuestion, const void** addr, size_t* addrSize)
 {
-  dnsdist_ffi_comboaddress_to_raw(dq->dq->ids.origDest, addr, addrSize);
+  dnsdist_ffi_comboaddress_to_raw(dnsQuestion->dq->ids.origDest, addr, addrSize);
 }
 
 bool dnsdist_ffi_dnsquestion_is_remote_v6(const dnsdist_ffi_dnsquestion_t* dnsQuestion)
@@ -87,47 +93,81 @@ bool dnsdist_ffi_dnsquestion_is_remote_v6(const dnsdist_ffi_dnsquestion_t* dnsQu
   return dnsQuestion->dq->ids.origRemote.isIPv6();
 }
 
-void dnsdist_ffi_dnsquestion_get_remoteaddr(const dnsdist_ffi_dnsquestion_t* dq, const void** addr, size_t* addrSize)
+void dnsdist_ffi_dnsquestion_get_remoteaddr(const dnsdist_ffi_dnsquestion_t* dnsQuestion, const void** addr, size_t* addrSize)
 {
-  dnsdist_ffi_comboaddress_to_raw(dq->dq->ids.origRemote, addr, addrSize);
+  dnsdist_ffi_comboaddress_to_raw(dnsQuestion->dq->ids.origRemote, addr, addrSize);
 }
 
-size_t dnsdist_ffi_dnsquestion_get_mac_addr(const dnsdist_ffi_dnsquestion_t* dq, void* buffer, size_t bufferSize)
+size_t dnsdist_ffi_dnsquestion_get_mac_addr(const dnsdist_ffi_dnsquestion_t* dnsQuestion, void* buffer, size_t bufferSize)
 {
-  if (dq == nullptr) {
-    return 0;
-  }
-  auto ret = dnsdist::MacAddressesCache::get(dq->dq->ids.origRemote, reinterpret_cast<unsigned char*>(buffer), bufferSize);
-  if (ret != 0) {
+  if (dnsQuestion == nullptr) {
     return 0;
   }
 
-  return 6;
+  try {
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+    auto ret = dnsdist::MacAddressesCache::get(dnsQuestion->dq->ids.origRemote, reinterpret_cast<unsigned char*>(buffer), bufferSize);
+    if (ret != 0) {
+      return 0;
+    }
+
+    return 6;
+  }
+  catch (const std::exception& e) {
+    VERBOSESLOG(infolog("Error getting MAC address: %s", e.what()),
+                getLogger(__func__)->error(Logr::Info, e.what(), "Error getting MAC address"));
+    return 0;
+  }
 }
 
-uint64_t dnsdist_ffi_dnsquestion_get_elapsed_us(const dnsdist_ffi_dnsquestion_t* dq)
+uint64_t dnsdist_ffi_dnsquestion_get_elapsed_us(const dnsdist_ffi_dnsquestion_t* dnsQuestion)
 {
-  if (dq == nullptr) {
+  if (dnsQuestion == nullptr) {
     return 0;
   }
 
-  return static_cast<uint64_t>(std::round(dq->dq->ids.queryRealTime.udiff()));
+  return static_cast<uint64_t>(std::round(dnsQuestion->dq->ids.queryRealTime.udiff()));
 }
 
-void dnsdist_ffi_dnsquestion_get_masked_remoteaddr(dnsdist_ffi_dnsquestion_t* dq, const void** addr, size_t* addrSize, uint8_t bits)
+static bool checkDNSQuestionType(const char* functionName, const dnsdist_ffi_dnsquestion_t* dnsQuestion)
 {
-  dq->maskedRemote = Netmask(dq->dq->ids.origRemote, bits).getMaskedNetwork();
-  dnsdist_ffi_comboaddress_to_raw(dq->maskedRemote, addr, addrSize);
+  if (dnsQuestion->objectType != dnsdist::lua::ffi::ObjectType::Question) {
+    VERBOSESLOG(infolog("Error: calling FFI function %s with a wrong type", functionName),
+                getLogger(functionName)->info(Logr::Info, "Error: calling FFI function with a wrong type"));
+    return false;
+  }
+  return true;
 }
 
-uint16_t dnsdist_ffi_dnsquestion_get_local_port(const dnsdist_ffi_dnsquestion_t* dq)
+static bool checkDNSResponseType(const char* functionName, const dnsdist_ffi_dnsresponse_t* dnsResponse)
 {
-  return dq->dq->ids.origDest.getPort();
+  if (dnsResponse->objectType != dnsdist::lua::ffi::ObjectType::Response) {
+    VERBOSESLOG(infolog("Error: calling FFI function %s with a wrong type", functionName),
+                getLogger(functionName)->info(Logr::Info, "Error: calling FFI function with a wrong type"));
+    return false;
+  }
+  return true;
 }
 
-uint16_t dnsdist_ffi_dnsquestion_get_remote_port(const dnsdist_ffi_dnsquestion_t* dq)
+void dnsdist_ffi_dnsquestion_get_masked_remoteaddr(dnsdist_ffi_dnsquestion_t* dnsQuestion, const void** addr, size_t* addrSize, uint8_t bits)
 {
-  return dq->dq->ids.origRemote.getPort();
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+  if (!checkDNSQuestionType(__func__, dnsQuestion)) {
+    return;
+  }
+
+  dnsQuestion->maskedRemote = Netmask(dnsQuestion->dq->ids.origRemote, bits).getMaskedNetwork();
+  dnsdist_ffi_comboaddress_to_raw(dnsQuestion->maskedRemote, addr, addrSize);
+}
+
+uint16_t dnsdist_ffi_dnsquestion_get_local_port(const dnsdist_ffi_dnsquestion_t* dnsQuestion)
+{
+  return dnsQuestion->dq->ids.origDest.getPort();
+}
+
+uint16_t dnsdist_ffi_dnsquestion_get_remote_port(const dnsdist_ffi_dnsquestion_t* dnsQuestion)
+{
+  return dnsQuestion->dq->ids.origRemote.getPort();
 }
 
 const char* dnsdist_ffi_dnsquestion_get_incoming_interface(const dnsdist_ffi_dnsquestion_t* dnsQuestion)
@@ -138,121 +178,194 @@ const char* dnsdist_ffi_dnsquestion_get_incoming_interface(const dnsdist_ffi_dns
   return dnsQuestion->dq->ids.cs->interface.c_str();
 }
 
-void dnsdist_ffi_dnsquestion_get_qname_raw(const dnsdist_ffi_dnsquestion_t* dq, const char** qname, size_t* qnameSize)
+void dnsdist_ffi_dnsquestion_get_qname_raw(const dnsdist_ffi_dnsquestion_t* dnsQuestion, const char** qname, size_t* qnameSize)
 {
-  const auto& storage = dq->dq->ids.qname.getStorage();
+  const auto& storage = dnsQuestion->dq->ids.qname.getStorage();
   *qname = storage.data();
   *qnameSize = storage.size();
 }
 
-size_t dnsdist_ffi_dnsquestion_get_qname_hash(const dnsdist_ffi_dnsquestion_t* dq, size_t init)
+size_t dnsdist_ffi_dnsquestion_get_qname_hash(const dnsdist_ffi_dnsquestion_t* dnsQuestion, size_t init)
 {
-  return dq->dq->ids.qname.hash(init);
+  return dnsQuestion->dq->ids.qname.hash(init);
 }
 
-int dnsdist_ffi_dnsquestion_get_rcode(const dnsdist_ffi_dnsquestion_t* dq)
-{
-  return dq->dq->getHeader()->rcode;
-}
-
-void* dnsdist_ffi_dnsquestion_get_header(const dnsdist_ffi_dnsquestion_t* dq)
-{
-  return dq->dq->getMutableHeader();
-}
-
-uint16_t dnsdist_ffi_dnsquestion_get_len(const dnsdist_ffi_dnsquestion_t* dq)
-{
-  return dq->dq->getData().size();
-}
-
-size_t dnsdist_ffi_dnsquestion_get_size(const dnsdist_ffi_dnsquestion_t* dq)
-{
-  return dq->dq->getData().size();
-}
-
-bool dnsdist_ffi_dnsquestion_set_size(dnsdist_ffi_dnsquestion_t* dq, size_t newSize)
+int dnsdist_ffi_dnsquestion_get_rcode(const dnsdist_ffi_dnsquestion_t* dnsQuestion)
 {
   try {
-    dq->dq->getMutableData().resize(newSize);
+    return dnsQuestion->dq->getHeader()->rcode;
+  }
+  catch (const std::exception& e) {
+    VERBOSESLOG(infolog("Error getting rcode from packet: %s", e.what()),
+                getLogger(__func__)->error(Logr::Info, e.what(), "Error getting rcode from packet"));
+    return 0;
+  }
+}
+
+void* dnsdist_ffi_dnsquestion_get_header(const dnsdist_ffi_dnsquestion_t* dnsQuestion)
+{
+  try {
+    return dnsQuestion->dq->getMutableHeader();
+  }
+  catch (const std::exception& e) {
+    VERBOSESLOG(infolog("Error getting header from packet: %s", e.what()),
+                getLogger(__func__)->error(Logr::Info, e.what(), "Error getting header from packet"));
+    return nullptr;
+  }
+}
+
+const unsigned char* dnsdist_ffi_dnsquestion_get_data(const dnsdist_ffi_dnsquestion_t* dnsQuestion)
+{
+  return dnsQuestion->dq->getData().data();
+}
+
+bool dnsdist_ffi_dnsquestion_get_header_copy(const dnsdist_ffi_dnsquestion_t* dnsQuestion, char* buffer, size_t buffer_size)
+{
+  if (dnsQuestion == nullptr || dnsQuestion->dq == nullptr || buffer == nullptr || buffer_size < sizeof(dnsheader)) {
+    return false;
+  }
+
+  try {
+    const auto aligned = dnsQuestion->dq->getHeader();
+    memcpy(buffer, aligned.get(), sizeof(dnsheader));
     return true;
   }
   catch (const std::exception& e) {
+    VERBOSESLOG(infolog("Error getting header from packet: %s", e.what()),
+                getLogger(__func__)->error(Logr::Info, e.what(), "Error getting header from packet"));
     return false;
   }
 }
 
-uint8_t dnsdist_ffi_dnsquestion_get_opcode(const dnsdist_ffi_dnsquestion_t* dq)
+bool dnsdist_ffi_dnsquestion_set_header(const dnsdist_ffi_dnsquestion_t* dnsQuestion, const char* buffer)
 {
-  return dq->dq->getHeader()->opcode;
+  if (dnsQuestion == nullptr || dnsQuestion->dq == nullptr || buffer == nullptr) {
+    return false;
+  }
+
+  try {
+    dnsQuestion->dq->editHeader([&buffer](dnsheader& header) -> bool {
+      memcpy(&header, buffer, sizeof(dnsheader));
+      return true;
+    });
+    return true;
+  }
+  catch (const std::exception& e) {
+    VERBOSESLOG(infolog("Error setting header in packet: %s", e.what()),
+                getLogger(__func__)->error(Logr::Info, e.what(), "Error setting header in packet"));
+    return false;
+  }
 }
 
-bool dnsdist_ffi_dnsquestion_get_tcp(const dnsdist_ffi_dnsquestion_t* dq)
+uint16_t dnsdist_ffi_dnsquestion_get_len(const dnsdist_ffi_dnsquestion_t* dnsQuestion)
 {
-  return dq->dq->overTCP();
+  return dnsQuestion->dq->getData().size();
 }
 
-dnsdist_ffi_protocol_type dnsdist_ffi_dnsquestion_get_protocol(const dnsdist_ffi_dnsquestion_t* dq)
+size_t dnsdist_ffi_dnsquestion_get_size(const dnsdist_ffi_dnsquestion_t* dnsQuestion)
 {
-  if (dq != nullptr) {
-    auto proto = dq->dq->getProtocol();
+  return dnsQuestion->dq->getData().size();
+}
+
+bool dnsdist_ffi_dnsquestion_set_size(dnsdist_ffi_dnsquestion_t* dnsQuestion, size_t newSize)
+{
+  try {
+    dnsQuestion->dq->getMutableData().resize(newSize);
+    return true;
+  }
+  catch (const std::exception& e) {
+    VERBOSESLOG(infolog("Error setting packet size to %d: %s", newSize, e.what()),
+                getLogger(__func__)->error(Logr::Info, e.what(), "Error setting header in packet", "size", Logging::Loggable(newSize)));
+    return false;
+  }
+}
+
+uint8_t dnsdist_ffi_dnsquestion_get_opcode(const dnsdist_ffi_dnsquestion_t* dnsQuestion)
+{
+  try {
+    return dnsQuestion->dq->getHeader()->opcode;
+  }
+  catch (const std::exception& e) {
+    VERBOSESLOG(infolog("Error getting opcode from packet: %s", e.what()),
+                getLogger(__func__)->error(Logr::Info, e.what(), "Error setting opcode from packet"));
+    return 0;
+  }
+}
+
+bool dnsdist_ffi_dnsquestion_get_tcp(const dnsdist_ffi_dnsquestion_t* dnsQuestion)
+{
+  return dnsQuestion->dq->overTCP();
+}
+
+dnsdist_ffi_protocol_type dnsdist_ffi_dnsquestion_get_protocol(const dnsdist_ffi_dnsquestion_t* dnsQuestion)
+{
+  if (dnsQuestion != nullptr) {
+    auto proto = dnsQuestion->dq->getProtocol();
     if (proto == dnsdist::Protocol::DoUDP) {
       return dnsdist_ffi_protocol_type_doudp;
     }
-    else if (proto == dnsdist::Protocol::DoTCP) {
+    if (proto == dnsdist::Protocol::DoTCP) {
       return dnsdist_ffi_protocol_type_dotcp;
     }
-    else if (proto == dnsdist::Protocol::DNSCryptUDP) {
+    if (proto == dnsdist::Protocol::DNSCryptUDP) {
       return dnsdist_ffi_protocol_type_dnscryptudp;
     }
-    else if (proto == dnsdist::Protocol::DNSCryptTCP) {
+    if (proto == dnsdist::Protocol::DNSCryptTCP) {
       return dnsdist_ffi_protocol_type_dnscrypttcp;
     }
-    else if (proto == dnsdist::Protocol::DoT) {
+    if (proto == dnsdist::Protocol::DoT) {
       return dnsdist_ffi_protocol_type_dot;
     }
-    else if (proto == dnsdist::Protocol::DoH) {
+    if (proto == dnsdist::Protocol::DoH) {
       return dnsdist_ffi_protocol_type_doh;
     }
   }
   return dnsdist_ffi_protocol_type_doudp;
 }
 
-bool dnsdist_ffi_dnsquestion_get_skip_cache(const dnsdist_ffi_dnsquestion_t* dq)
+bool dnsdist_ffi_dnsquestion_get_skip_cache(const dnsdist_ffi_dnsquestion_t* dnsQuestion)
 {
-  return dq->dq->ids.skipCache;
+  return dnsQuestion->dq->ids.skipCache;
 }
 
-bool dnsdist_ffi_dnsquestion_get_use_ecs(const dnsdist_ffi_dnsquestion_t* dq)
+bool dnsdist_ffi_dnsquestion_get_use_ecs(const dnsdist_ffi_dnsquestion_t* dnsQuestion)
 {
-  return dq->dq->useECS;
+  return dnsQuestion->dq->useECS;
 }
 
-bool dnsdist_ffi_dnsquestion_get_ecs_override(const dnsdist_ffi_dnsquestion_t* dq)
+bool dnsdist_ffi_dnsquestion_get_ecs_override(const dnsdist_ffi_dnsquestion_t* dnsQuestion)
 {
-  return dq->dq->ecsOverride;
+  return dnsQuestion->dq->ecsOverride;
 }
 
-uint16_t dnsdist_ffi_dnsquestion_get_ecs_prefix_length(const dnsdist_ffi_dnsquestion_t* dq)
+uint16_t dnsdist_ffi_dnsquestion_get_ecs_prefix_length(const dnsdist_ffi_dnsquestion_t* dnsQuestion)
 {
-  return dq->dq->ecsPrefixLength;
+  return dnsQuestion->dq->ecsPrefixLength;
 }
 
-bool dnsdist_ffi_dnsquestion_is_temp_failure_ttl_set(const dnsdist_ffi_dnsquestion_t* dq)
+bool dnsdist_ffi_dnsquestion_is_temp_failure_ttl_set(const dnsdist_ffi_dnsquestion_t* dnsQuestion)
 {
-  return dq->dq->ids.tempFailureTTL != std::nullopt;
+  return dnsQuestion->dq->ids.tempFailureTTL != std::nullopt;
 }
 
-uint32_t dnsdist_ffi_dnsquestion_get_temp_failure_ttl(const dnsdist_ffi_dnsquestion_t* dq)
+uint32_t dnsdist_ffi_dnsquestion_get_temp_failure_ttl(const dnsdist_ffi_dnsquestion_t* dnsQuestion)
 {
-  if (dq->dq->ids.tempFailureTTL) {
-    return *dq->dq->ids.tempFailureTTL;
+  if (dnsQuestion->dq->ids.tempFailureTTL) {
+    return *dnsQuestion->dq->ids.tempFailureTTL;
   }
   return 0;
 }
 
 bool dnsdist_ffi_dnsquestion_get_do(const dnsdist_ffi_dnsquestion_t* dnsQuestion)
 {
-  return (dnsdist::getEDNSZ(*dnsQuestion->dq) & EDNS_HEADER_FLAG_DO) != 0;
+  try {
+    return (dnsdist::getEDNSZ(*dnsQuestion->dq) & EDNS_HEADER_FLAG_DO) != 0;
+  }
+  catch (const std::exception& e) {
+    VERBOSESLOG(infolog("Error getting DNSSEC OK from packet: %s", e.what()),
+                getLogger(__func__)->error(Logr::Info, e.what(), "Error setting DNSSEC OK from packet"));
+    return false;
+  }
 }
 
 uint8_t dnsdist_ffi_dnsquestion_get_edns_version(const dnsdist_ffi_dnsquestion_t* dnsQuestion)
@@ -267,121 +380,141 @@ uint8_t dnsdist_ffi_dnsquestion_get_edns_extended_rcode(const dnsdist_ffi_dnsque
   return rcode ? *rcode : 0U;
 }
 
-void dnsdist_ffi_dnsquestion_get_sni(const dnsdist_ffi_dnsquestion_t* dq, const char** sni, size_t* sniSize)
+void dnsdist_ffi_dnsquestion_get_sni(const dnsdist_ffi_dnsquestion_t* dnsQuestion, const char** sni, size_t* sniSize)
 {
-  *sniSize = dq->dq->sni.size();
-  *sni = dq->dq->sni.c_str();
+  *sniSize = dnsQuestion->dq->sni.size();
+  *sni = dnsQuestion->dq->sni.c_str();
 }
 
-const char* dnsdist_ffi_dnsquestion_get_tag(const dnsdist_ffi_dnsquestion_t* dq, const char* label)
+const char* dnsdist_ffi_dnsquestion_get_tag(const dnsdist_ffi_dnsquestion_t* dnsQuestion, const char* label)
 {
   const char* result = nullptr;
 
-  if (dq != nullptr && dq->dq != nullptr && dq->dq->ids.qTag != nullptr) {
-    const auto it = dq->dq->ids.qTag->find(label);
-    if (it != dq->dq->ids.qTag->cend()) {
-      result = it->second.c_str();
+  if (dnsQuestion != nullptr && dnsQuestion->dq != nullptr && dnsQuestion->dq->ids.qTag != nullptr) {
+    const auto tagIt = dnsQuestion->dq->ids.qTag->find(label);
+    if (tagIt != dnsQuestion->dq->ids.qTag->cend()) {
+      result = tagIt->second.c_str();
     }
   }
 
   return result;
 }
 
-size_t dnsdist_ffi_dnsquestion_get_tag_raw(const dnsdist_ffi_dnsquestion_t* dq, const char* label, char* buffer, size_t bufferSize)
+size_t dnsdist_ffi_dnsquestion_get_tag_raw(const dnsdist_ffi_dnsquestion_t* dnsQuestion, const char* label, char* buffer, size_t bufferSize)
 {
-  if (dq == nullptr || dq->dq == nullptr || dq->dq->ids.qTag == nullptr || label == nullptr || buffer == nullptr || bufferSize == 0) {
+  if (dnsQuestion == nullptr || dnsQuestion->dq == nullptr || dnsQuestion->dq->ids.qTag == nullptr || label == nullptr || buffer == nullptr || bufferSize == 0) {
     return 0;
   }
 
-  const auto it = dq->dq->ids.qTag->find(label);
-  if (it == dq->dq->ids.qTag->cend()) {
+  const auto tagIt = dnsQuestion->dq->ids.qTag->find(label);
+  if (tagIt == dnsQuestion->dq->ids.qTag->cend()) {
     return 0;
   }
 
-  if (it->second.size() > bufferSize) {
+  if (tagIt->second.size() > bufferSize) {
     return 0;
   }
 
-  memcpy(buffer, it->second.c_str(), it->second.size());
-  return it->second.size();
+  memcpy(buffer, tagIt->second.c_str(), tagIt->second.size());
+  return tagIt->second.size();
 }
 
-const char* dnsdist_ffi_dnsquestion_get_http_path(dnsdist_ffi_dnsquestion_t* dq)
+const char* dnsdist_ffi_dnsquestion_get_http_path(dnsdist_ffi_dnsquestion_t* dnsQuestion)
 {
-  if (!dq->httpPath) {
-    if (dq->dq->ids.du) {
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+  if (!checkDNSQuestionType(__func__, dnsQuestion)) {
+    return nullptr;
+  }
+
+  if (!dnsQuestion->httpPath) {
+    if (dnsQuestion->dq->ids.du) {
 #if defined(HAVE_DNS_OVER_HTTPS)
-      dq->httpPath = dq->dq->ids.du->getHTTPPath();
+      dnsQuestion->httpPath = dnsQuestion->dq->ids.du->getHTTPPath();
 #endif /* HAVE_DNS_OVER_HTTPS */
     }
-    else if (dq->dq->ids.doh3u) {
+    else if (dnsQuestion->dq->ids.doh3u) {
 #if defined(HAVE_DNS_OVER_HTTP3)
-      dq->httpPath = dq->dq->ids.doh3u->getHTTPPath();
+      dnsQuestion->httpPath = dnsQuestion->dq->ids.doh3u->getHTTPPath();
 #endif /* HAVE_DNS_OVER_HTTP3 */
     }
   }
-  if (dq->httpPath) {
-    return dq->httpPath->c_str();
+  if (dnsQuestion->httpPath) {
+    return dnsQuestion->httpPath->c_str();
   }
   return nullptr;
 }
 
-const char* dnsdist_ffi_dnsquestion_get_http_query_string(dnsdist_ffi_dnsquestion_t* dq)
+const char* dnsdist_ffi_dnsquestion_get_http_query_string(dnsdist_ffi_dnsquestion_t* dnsQuestion)
 {
-  if (!dq->httpQueryString) {
-    if (dq->dq->ids.du) {
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+  if (!checkDNSQuestionType(__func__, dnsQuestion)) {
+    return nullptr;
+  }
+
+  if (!dnsQuestion->httpQueryString) {
+    if (dnsQuestion->dq->ids.du) {
 #ifdef HAVE_DNS_OVER_HTTPS
-      dq->httpQueryString = dq->dq->ids.du->getHTTPQueryString();
+      dnsQuestion->httpQueryString = dnsQuestion->dq->ids.du->getHTTPQueryString();
 #endif /* HAVE_DNS_OVER_HTTPS */
     }
-    else if (dq->dq->ids.doh3u) {
+    else if (dnsQuestion->dq->ids.doh3u) {
 #if defined(HAVE_DNS_OVER_HTTP3)
-      dq->httpQueryString = dq->dq->ids.doh3u->getHTTPQueryString();
+      dnsQuestion->httpQueryString = dnsQuestion->dq->ids.doh3u->getHTTPQueryString();
 #endif /* HAVE_DNS_OVER_HTTP3 */
     }
   }
-  if (dq->httpQueryString) {
-    return dq->httpQueryString->c_str();
+  if (dnsQuestion->httpQueryString) {
+    return dnsQuestion->httpQueryString->c_str();
   }
   return nullptr;
 }
 
-const char* dnsdist_ffi_dnsquestion_get_http_host(dnsdist_ffi_dnsquestion_t* dq)
+const char* dnsdist_ffi_dnsquestion_get_http_host(dnsdist_ffi_dnsquestion_t* dnsQuestion)
 {
-  if (!dq->httpHost) {
-    if (dq->dq->ids.du) {
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+  if (!checkDNSQuestionType(__func__, dnsQuestion)) {
+    return nullptr;
+  }
+
+  if (!dnsQuestion->httpHost) {
+    if (dnsQuestion->dq->ids.du) {
 #ifdef HAVE_DNS_OVER_HTTPS
-      dq->httpHost = dq->dq->ids.du->getHTTPHost();
+      dnsQuestion->httpHost = dnsQuestion->dq->ids.du->getHTTPHost();
 #endif /* HAVE_DNS_OVER_HTTPS */
     }
-    else if (dq->dq->ids.doh3u) {
+    else if (dnsQuestion->dq->ids.doh3u) {
 #if defined(HAVE_DNS_OVER_HTTP3)
-      dq->httpHost = dq->dq->ids.doh3u->getHTTPHost();
+      dnsQuestion->httpHost = dnsQuestion->dq->ids.doh3u->getHTTPHost();
 #endif /* HAVE_DNS_OVER_HTTP3 */
     }
   }
-  if (dq->httpHost) {
-    return dq->httpHost->c_str();
+  if (dnsQuestion->httpHost) {
+    return dnsQuestion->httpHost->c_str();
   }
   return nullptr;
 }
 
-const char* dnsdist_ffi_dnsquestion_get_http_scheme(dnsdist_ffi_dnsquestion_t* dq)
+const char* dnsdist_ffi_dnsquestion_get_http_scheme(dnsdist_ffi_dnsquestion_t* dnsQuestion)
 {
-  if (!dq->httpScheme) {
-    if (dq->dq->ids.du) {
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+  if (!checkDNSQuestionType(__func__, dnsQuestion)) {
+    return nullptr;
+  }
+
+  if (!dnsQuestion->httpScheme) {
+    if (dnsQuestion->dq->ids.du) {
 #ifdef HAVE_DNS_OVER_HTTPS
-      dq->httpScheme = dq->dq->ids.du->getHTTPScheme();
+      dnsQuestion->httpScheme = dnsQuestion->dq->ids.du->getHTTPScheme();
 #endif /* HAVE_DNS_OVER_HTTPS */
     }
-    else if (dq->dq->ids.doh3u) {
+    else if (dnsQuestion->dq->ids.doh3u) {
 #if defined(HAVE_DNS_OVER_HTTP3)
-      dq->httpScheme = dq->dq->ids.doh3u->getHTTPScheme();
+      dnsQuestion->httpScheme = dnsQuestion->dq->ids.doh3u->getHTTPScheme();
 #endif /* HAVE_DNS_OVER_HTTP3 */
     }
   }
-  if (dq->httpScheme) {
-    return dq->httpScheme->c_str();
+  if (dnsQuestion->httpScheme) {
+    return dnsQuestion->httpScheme->c_str();
   }
   return nullptr;
 }
@@ -397,140 +530,170 @@ static void fill_edns_option(const EDNSOptionViewValue& value, dnsdist_ffi_ednso
 }
 
 // returns the length of the resulting 'out' array. 'out' is not set if the length is 0
-size_t dnsdist_ffi_dnsquestion_get_edns_options(dnsdist_ffi_dnsquestion_t* dq, const dnsdist_ffi_ednsoption_t** out)
+size_t dnsdist_ffi_dnsquestion_get_edns_options(dnsdist_ffi_dnsquestion_t* dnsQuestion, const dnsdist_ffi_ednsoption_t** out)
 {
-  if (dq->dq->ednsOptions == nullptr) {
-    parseEDNSOptions(*(dq->dq));
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+  if (!checkDNSQuestionType(__func__, dnsQuestion)) {
+    return 0U;
+  }
 
-    if (dq->dq->ednsOptions == nullptr) {
+  try {
+    auto ednsOptions = parseEDNSOptions(*(dnsQuestion->dq));
+    if (!ednsOptions) {
       return 0;
     }
-  }
 
-  size_t totalCount = 0;
-  for (const auto& option : *dq->dq->ednsOptions) {
-    totalCount += option.second.values.size();
-  }
-
-  if (!dq->ednsOptionsVect) {
-    dq->ednsOptionsVect = std::make_unique<std::vector<dnsdist_ffi_ednsoption_t>>();
-  }
-  dq->ednsOptionsVect->clear();
-  dq->ednsOptionsVect->resize(totalCount);
-  size_t pos = 0;
-  for (const auto& option : *dq->dq->ednsOptions) {
-    for (const auto& entry : option.second.values) {
-      fill_edns_option(entry, dq->ednsOptionsVect->at(pos));
-      dq->ednsOptionsVect->at(pos).optionCode = option.first;
-      pos++;
+    size_t totalCount = 0;
+    for (const auto& option : *ednsOptions) {
+      totalCount += option.second.values.size();
     }
-  }
 
-  if (totalCount > 0) {
-    *out = dq->ednsOptionsVect->data();
-  }
+    if (!dnsQuestion->ednsOptionsVect) {
+      dnsQuestion->ednsOptionsVect = std::make_unique<std::vector<dnsdist_ffi_ednsoption_t>>();
+    }
+    dnsQuestion->ednsOptionsVect->clear();
+    dnsQuestion->ednsOptionsVect->resize(totalCount);
+    size_t pos = 0;
+    for (const auto& option : *ednsOptions) {
+      for (const auto& entry : option.second.values) {
+        fill_edns_option(entry, dnsQuestion->ednsOptionsVect->at(pos));
+        dnsQuestion->ednsOptionsVect->at(pos).optionCode = option.first;
+        pos++;
+      }
+    }
 
-  return totalCount;
+    if (totalCount > 0) {
+      *out = dnsQuestion->ednsOptionsVect->data();
+    }
+
+    return totalCount;
+  }
+  catch (const std::exception& e) {
+    VERBOSESLOG(infolog("Error getting EDNS options from packet: %s", e.what()),
+                getLogger(__func__)->error(Logr::Info, e.what(), "Error getting EDNS options from packet"));
+    return 0U;
+  }
+  catch (...) {
+    return 0U;
+  }
 }
 
-size_t dnsdist_ffi_dnsquestion_get_http_headers([[maybe_unused]] dnsdist_ffi_dnsquestion_t* ref, [[maybe_unused]] const dnsdist_ffi_http_header_t** out)
+size_t dnsdist_ffi_dnsquestion_get_http_headers([[maybe_unused]] dnsdist_ffi_dnsquestion_t* dnsQuestion, [[maybe_unused]] const dnsdist_ffi_http_header_t** out)
 {
 #if defined(HAVE_DNS_OVER_HTTPS) || defined(HAVE_DNS_OVER_HTTP3)
-  const auto processHeaders = [&ref](const std::unordered_map<std::string, std::string>& headers) {
-    if (headers.empty()) {
-      return;
-    }
-    ref->httpHeaders = std::make_unique<std::unordered_map<std::string, std::string>>(headers);
-    if (!ref->httpHeadersVect) {
-      ref->httpHeadersVect = std::make_unique<std::vector<dnsdist_ffi_http_header_t>>();
-    }
-    ref->httpHeadersVect->clear();
-    ref->httpHeadersVect->resize(ref->httpHeaders->size());
-    size_t pos = 0;
-    for (const auto& header : *ref->httpHeaders) {
-      ref->httpHeadersVect->at(pos).name = header.first.c_str();
-      ref->httpHeadersVect->at(pos).value = header.second.c_str();
-      ++pos;
-    }
-  };
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+  if (!checkDNSQuestionType(__func__, dnsQuestion)) {
+    return 0U;
+  }
+
+  try {
+    const auto processHeaders = [&dnsQuestion](const std::unordered_map<std::string, std::string>& headers) {
+      if (headers.empty()) {
+        return;
+      }
+      dnsQuestion->httpHeaders = std::make_unique<std::unordered_map<std::string, std::string>>(headers);
+      if (!dnsQuestion->httpHeadersVect) {
+        dnsQuestion->httpHeadersVect = std::make_unique<std::vector<dnsdist_ffi_http_header_t>>();
+      }
+      dnsQuestion->httpHeadersVect->clear();
+      dnsQuestion->httpHeadersVect->resize(dnsQuestion->httpHeaders->size());
+      size_t pos = 0;
+      for (const auto& header : *dnsQuestion->httpHeaders) {
+        dnsQuestion->httpHeadersVect->at(pos).name = header.first.c_str();
+        dnsQuestion->httpHeadersVect->at(pos).value = header.second.c_str();
+        ++pos;
+      }
+    };
 
 #if defined(HAVE_DNS_OVER_HTTPS)
-  if (ref->dq->ids.du) {
-    const auto& headers = ref->dq->ids.du->getHTTPHeaders();
-    processHeaders(headers);
-  }
+    if (dnsQuestion->dq->ids.du) {
+      const auto& headers = dnsQuestion->dq->ids.du->getHTTPHeaders();
+      processHeaders(headers);
+    }
 #endif /* HAVE_DNS_OVER_HTTPS */
 #if defined(HAVE_DNS_OVER_HTTP3)
-  if (ref->dq->ids.doh3u) {
-    const auto& headers = ref->dq->ids.doh3u->getHTTPHeaders();
-    processHeaders(headers);
-  }
+    if (dnsQuestion->dq->ids.doh3u) {
+      const auto& headers = dnsQuestion->dq->ids.doh3u->getHTTPHeaders();
+      processHeaders(headers);
+    }
 #endif /* HAVE_DNS_OVER_HTTP3 */
 
-  if (!ref->httpHeadersVect) {
-    return 0;
-  }
+    if (!dnsQuestion->httpHeadersVect) {
+      return 0U;
+    }
 
-  if (!ref->httpHeadersVect->empty()) {
-    *out = ref->httpHeadersVect->data();
+    if (!dnsQuestion->httpHeadersVect->empty()) {
+      *out = dnsQuestion->httpHeadersVect->data();
+    }
+    return dnsQuestion->httpHeadersVect->size();
   }
-  return ref->httpHeadersVect->size();
+  catch (...) {
+    return 0U;
+  }
 #else /* HAVE_DNS_OVER_HTTPS || HAVE_DNS_OVER_HTTP3 */
-  return 0;
+  return 0U;
 #endif /* HAVE_DNS_OVER_HTTPS || HAVE_DNS_OVER_HTTP3 */
 }
 
-size_t dnsdist_ffi_dnsquestion_get_tag_array(dnsdist_ffi_dnsquestion_t* dq, const dnsdist_ffi_tag_t** out)
+size_t dnsdist_ffi_dnsquestion_get_tag_array(dnsdist_ffi_dnsquestion_t* dnsQuestion, const dnsdist_ffi_tag_t** out)
 {
-  if (dq == nullptr || dq->dq == nullptr || dq->dq->ids.qTag == nullptr || dq->dq->ids.qTag->size() == 0) {
+  if (dnsQuestion == nullptr || dnsQuestion->dq == nullptr || dnsQuestion->dq->ids.qTag == nullptr || dnsQuestion->dq->ids.qTag->empty()) {
     return 0;
   }
-
-  if (!dq->tagsVect) {
-    dq->tagsVect = std::make_unique<std::vector<dnsdist_ffi_tag_t>>();
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+  if (!checkDNSQuestionType(__func__, dnsQuestion)) {
+    return 0U;
   }
-  dq->tagsVect->clear();
-  dq->tagsVect->resize(dq->dq->ids.qTag->size());
+
+  if (!dnsQuestion->tagsVect) {
+    dnsQuestion->tagsVect = std::make_unique<std::vector<dnsdist_ffi_tag_t>>();
+  }
+  dnsQuestion->tagsVect->clear();
+  dnsQuestion->tagsVect->resize(dnsQuestion->dq->ids.qTag->size());
   size_t pos = 0;
 
-  for (const auto& tag : *dq->dq->ids.qTag) {
-    auto& entry = dq->tagsVect->at(pos);
+  for (const auto& tag : *dnsQuestion->dq->ids.qTag) {
+    auto& entry = dnsQuestion->tagsVect->at(pos);
     entry.name = tag.first.c_str();
     entry.value = tag.second.c_str();
     ++pos;
   }
 
-  if (!dq->tagsVect->empty()) {
-    *out = dq->tagsVect->data();
+  if (!dnsQuestion->tagsVect->empty()) {
+    *out = dnsQuestion->tagsVect->data();
   }
 
-  return dq->tagsVect->size();
+  return dnsQuestion->tagsVect->size();
 }
 
-void dnsdist_ffi_dnsquestion_set_result(dnsdist_ffi_dnsquestion_t* dq, const char* str, size_t strSize)
+void dnsdist_ffi_dnsquestion_set_result(dnsdist_ffi_dnsquestion_t* dnsQuestion, const char* str, size_t strSize)
 {
-  dq->result = std::string(str, strSize);
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+  if (!checkDNSQuestionType(__func__, dnsQuestion)) {
+    return;
+  }
+  dnsQuestion->result = std::string(str, strSize);
 }
 
-void dnsdist_ffi_dnsquestion_set_http_response([[maybe_unused]] dnsdist_ffi_dnsquestion_t* ref, [[maybe_unused]] uint16_t statusCode, [[maybe_unused]] const char* body, [[maybe_unused]] size_t bodyLen, [[maybe_unused]] const char* contentType)
+void dnsdist_ffi_dnsquestion_set_http_response([[maybe_unused]] dnsdist_ffi_dnsquestion_t* dnsQuestion, [[maybe_unused]] uint16_t statusCode, [[maybe_unused]] const char* body, [[maybe_unused]] size_t bodyLen, [[maybe_unused]] const char* contentType)
 {
 #if defined(HAVE_DNS_OVER_HTTPS)
-  if (ref->dq->ids.du) {
+  if (dnsQuestion->dq->ids.du) {
     // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic): C API
     PacketBuffer bodyVect(body, body + bodyLen);
-    ref->dq->ids.du->setHTTPResponse(statusCode, std::move(bodyVect), contentType);
-    dnsdist::PacketMangling::editDNSHeaderFromPacket(ref->dq->getMutableData(), [](dnsheader& header) {
+    dnsQuestion->dq->ids.du->setHTTPResponse(statusCode, std::move(bodyVect), contentType);
+    dnsdist::PacketMangling::editDNSHeaderFromPacket(dnsQuestion->dq->getMutableData(), [](dnsheader& header) {
       header.qr = true;
       return true;
     });
   }
 #endif
 #if defined(HAVE_DNS_OVER_HTTP3)
-  if (ref->dq->ids.doh3u) {
+  if (dnsQuestion->dq->ids.doh3u) {
     // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic): C API
     PacketBuffer bodyVect(body, body + bodyLen);
-    ref->dq->ids.doh3u->setHTTPResponse(statusCode, std::move(bodyVect), contentType);
-    dnsdist::PacketMangling::editDNSHeaderFromPacket(ref->dq->getMutableData(), [](dnsheader& header) {
+    dnsQuestion->dq->ids.doh3u->setHTTPResponse(statusCode, std::move(bodyVect), contentType);
+    dnsdist::PacketMangling::editDNSHeaderFromPacket(dnsQuestion->dq->getMutableData(), [](dnsheader& header) {
       header.qr = true;
       return true;
     });
@@ -565,176 +728,203 @@ void dnsdist_ffi_dnsquestion_add_extended_dns_error(dnsdist_ffi_dnsquestion_t* d
   }
 }
 
-void dnsdist_ffi_dnsquestion_set_rcode(dnsdist_ffi_dnsquestion_t* dq, int rcode)
+void dnsdist_ffi_dnsquestion_set_rcode(dnsdist_ffi_dnsquestion_t* dnsQuestion, int rcode)
 {
-  dnsdist::PacketMangling::editDNSHeaderFromPacket(dq->dq->getMutableData(), [rcode](dnsheader& header) {
-    header.rcode = rcode;
-    header.qr = true;
-    return true;
-  });
+  try {
+    dnsdist::PacketMangling::editDNSHeaderFromPacket(dnsQuestion->dq->getMutableData(), [rcode](dnsheader& header) {
+      header.rcode = rcode;
+      header.qr = true;
+      return true;
+    });
+  }
+  catch (const std::exception& e) {
+    VERBOSESLOG(infolog("Error setting rcode in packet: %s", e.what()),
+                getLogger(__func__)->error(Logr::Info, e.what(), "Error setting rcode in packet"));
+  }
 }
 
-void dnsdist_ffi_dnsquestion_set_len(dnsdist_ffi_dnsquestion_t* dq, uint16_t len)
+void dnsdist_ffi_dnsquestion_set_len(dnsdist_ffi_dnsquestion_t* dnsQuestion, uint16_t len)
 {
-  dq->dq->getMutableData().resize(len);
+  try {
+    dnsQuestion->dq->getMutableData().resize(len);
+  }
+  catch (const std::exception& e) {
+    VERBOSESLOG(infolog("Error setting packet size to %d: %s", len, e.what()),
+                getLogger(__func__)->error(Logr::Info, e.what(), "Error setting packet size", "size", Logging::Loggable(len)));
+  }
 }
 
-void dnsdist_ffi_dnsquestion_set_skip_cache(dnsdist_ffi_dnsquestion_t* dq, bool skipCache)
+void dnsdist_ffi_dnsquestion_set_skip_cache(dnsdist_ffi_dnsquestion_t* dnsQuestion, bool skipCache)
 {
-  dq->dq->ids.skipCache = skipCache;
+  dnsQuestion->dq->ids.skipCache = skipCache;
 }
 
-void dnsdist_ffi_dnsquestion_set_use_ecs(dnsdist_ffi_dnsquestion_t* dq, bool useECS)
+void dnsdist_ffi_dnsquestion_set_use_ecs(dnsdist_ffi_dnsquestion_t* dnsQuestion, bool useECS)
 {
-  dq->dq->useECS = useECS;
+  dnsQuestion->dq->useECS = useECS;
 }
 
-void dnsdist_ffi_dnsquestion_set_ecs_override(dnsdist_ffi_dnsquestion_t* dq, bool ecsOverride)
+void dnsdist_ffi_dnsquestion_set_ecs_override(dnsdist_ffi_dnsquestion_t* dnsQuestion, bool ecsOverride)
 {
-  dq->dq->ecsOverride = ecsOverride;
+  dnsQuestion->dq->ecsOverride = ecsOverride;
 }
 
-void dnsdist_ffi_dnsquestion_set_ecs_prefix_length(dnsdist_ffi_dnsquestion_t* dq, uint16_t ecsPrefixLength)
+void dnsdist_ffi_dnsquestion_set_ecs_prefix_length(dnsdist_ffi_dnsquestion_t* dnsQuestion, uint16_t ecsPrefixLength)
 {
-  dq->dq->ecsPrefixLength = ecsPrefixLength;
+  dnsQuestion->dq->ecsPrefixLength = ecsPrefixLength;
 }
 
-void dnsdist_ffi_dnsquestion_set_temp_failure_ttl(dnsdist_ffi_dnsquestion_t* dq, uint32_t tempFailureTTL)
+void dnsdist_ffi_dnsquestion_set_temp_failure_ttl(dnsdist_ffi_dnsquestion_t* dnsQuestion, uint32_t tempFailureTTL)
 {
-  dq->dq->ids.tempFailureTTL = tempFailureTTL;
+  dnsQuestion->dq->ids.tempFailureTTL = tempFailureTTL;
 }
 
-void dnsdist_ffi_dnsquestion_unset_temp_failure_ttl(dnsdist_ffi_dnsquestion_t* dq)
+void dnsdist_ffi_dnsquestion_unset_temp_failure_ttl(dnsdist_ffi_dnsquestion_t* dnsQuestion)
 {
-  dq->dq->ids.tempFailureTTL = std::nullopt;
+  dnsQuestion->dq->ids.tempFailureTTL = std::nullopt;
 }
 
-void dnsdist_ffi_dnsquestion_set_tag(dnsdist_ffi_dnsquestion_t* dq, const char* label, const char* value)
+void dnsdist_ffi_dnsquestion_set_tag(dnsdist_ffi_dnsquestion_t* dnsQuestion, const char* label, const char* value)
 {
-  dq->dq->setTag(label, value);
+  dnsQuestion->dq->setTag(label, value);
 }
 
-void dnsdist_ffi_dnsquestion_set_tag_raw(dnsdist_ffi_dnsquestion_t* dq, const char* label, const char* value, size_t valueSize)
+void dnsdist_ffi_dnsquestion_unset_tag(dnsdist_ffi_dnsquestion_t* dnsQuestion, const char* label)
 {
-  dq->dq->setTag(label, std::string(value, valueSize));
+  dnsQuestion->dq->unsetTag(label);
 }
 
-void dnsdist_ffi_dnsquestion_set_requestor_id(dnsdist_ffi_dnsquestion_t* dq, const char* value, size_t valueSize)
+void dnsdist_ffi_dnsquestion_set_tag_raw(dnsdist_ffi_dnsquestion_t* dnsQuestion, const char* label, const char* value, size_t valueSize)
 {
-  if (!dq || !dq->dq || !value) {
+  dnsQuestion->dq->setTag(label, std::string(value, valueSize));
+}
+
+void dnsdist_ffi_dnsquestion_set_requestor_id(dnsdist_ffi_dnsquestion_t* dnsQuestion, const char* value, size_t valueSize)
+{
+  if (dnsQuestion == nullptr || dnsQuestion->dq == nullptr || value == nullptr) {
     return;
   }
-  if (!dq->dq->ids.d_protoBufData) {
-    dq->dq->ids.d_protoBufData = std::make_unique<InternalQueryState::ProtoBufData>();
+  if (!dnsQuestion->dq->ids.d_protoBufData) {
+    dnsQuestion->dq->ids.d_protoBufData = std::make_unique<InternalQueryState::ProtoBufData>();
   }
-  dq->dq->ids.d_protoBufData->d_requestorID = std::string(value, valueSize);
+  dnsQuestion->dq->ids.d_protoBufData->d_requestorID = std::string(value, valueSize);
 }
 
-void dnsdist_ffi_dnsquestion_set_device_id(dnsdist_ffi_dnsquestion_t* dq, const char* value, size_t valueSize)
+void dnsdist_ffi_dnsquestion_set_device_id(dnsdist_ffi_dnsquestion_t* dnsQuestion, const char* value, size_t valueSize)
 {
-  if (!dq || !dq->dq || !value) {
+  if (dnsQuestion == nullptr || dnsQuestion->dq == nullptr || value == nullptr) {
     return;
   }
-  if (!dq->dq->ids.d_protoBufData) {
-    dq->dq->ids.d_protoBufData = std::make_unique<InternalQueryState::ProtoBufData>();
+  if (!dnsQuestion->dq->ids.d_protoBufData) {
+    dnsQuestion->dq->ids.d_protoBufData = std::make_unique<InternalQueryState::ProtoBufData>();
   }
-  dq->dq->ids.d_protoBufData->d_deviceID = std::string(value, valueSize);
+  dnsQuestion->dq->ids.d_protoBufData->d_deviceID = std::string(value, valueSize);
 }
 
-void dnsdist_ffi_dnsquestion_set_device_name(dnsdist_ffi_dnsquestion_t* dq, const char* value, size_t valueSize)
+void dnsdist_ffi_dnsquestion_set_device_name(dnsdist_ffi_dnsquestion_t* dnsQuestion, const char* value, size_t valueSize)
 {
-  if (!dq || !dq->dq || !value) {
+  if (dnsQuestion == nullptr || dnsQuestion->dq == nullptr || value == nullptr) {
     return;
   }
-  if (!dq->dq->ids.d_protoBufData) {
-    dq->dq->ids.d_protoBufData = std::make_unique<InternalQueryState::ProtoBufData>();
+  if (!dnsQuestion->dq->ids.d_protoBufData) {
+    dnsQuestion->dq->ids.d_protoBufData = std::make_unique<InternalQueryState::ProtoBufData>();
   }
-  dq->dq->ids.d_protoBufData->d_deviceName = std::string(value, valueSize);
+  dnsQuestion->dq->ids.d_protoBufData->d_deviceName = std::string(value, valueSize);
 }
 
-size_t dnsdist_ffi_dnsquestion_get_trailing_data(dnsdist_ffi_dnsquestion_t* dq, const char** out)
+size_t dnsdist_ffi_dnsquestion_get_trailing_data(dnsdist_ffi_dnsquestion_t* dnsQuestion, const char** out)
 {
-  dq->trailingData = dq->dq->getTrailingData();
-  if (!dq->trailingData.empty()) {
-    *out = dq->trailingData.data();
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+  if (!checkDNSQuestionType(__func__, dnsQuestion)) {
+    return 0U;
+  }
+  dnsQuestion->trailingData = dnsQuestion->dq->getTrailingData();
+  if (!dnsQuestion->trailingData.empty()) {
+    *out = dnsQuestion->trailingData.data();
   }
 
-  return dq->trailingData.size();
+  return dnsQuestion->trailingData.size();
 }
 
-bool dnsdist_ffi_dnsquestion_set_trailing_data(dnsdist_ffi_dnsquestion_t* dq, const char* data, size_t dataLen)
+bool dnsdist_ffi_dnsquestion_set_trailing_data(dnsdist_ffi_dnsquestion_t* dnsQuestion, const char* data, size_t dataLen)
 {
-  return dq->dq->setTrailingData(std::string(data, dataLen));
+  return dnsQuestion->dq->setTrailingData(std::string(data, dataLen));
 }
 
-void dnsdist_ffi_dnsquestion_send_trap(dnsdist_ffi_dnsquestion_t* dq, const char* reason, size_t reasonLen)
+void dnsdist_ffi_dnsquestion_send_trap(dnsdist_ffi_dnsquestion_t* dnsQuestion, const char* reason, size_t reasonLen)
 {
   if (g_snmpAgent != nullptr && dnsdist::configuration::getImmutableConfiguration().d_snmpTrapsEnabled) {
-    g_snmpAgent->sendDNSTrap(*dq->dq, std::string(reason, reasonLen));
+    g_snmpAgent->sendDNSTrap(*dnsQuestion->dq, std::string(reason, reasonLen));
   }
 }
 
-void dnsdist_ffi_dnsquestion_spoof_packet(dnsdist_ffi_dnsquestion_t* dq, const char* raw, size_t len)
+void dnsdist_ffi_dnsquestion_spoof_packet(dnsdist_ffi_dnsquestion_t* dnsQuestion, const char* raw, size_t len)
 {
   // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
-  dnsdist::self_answers::generateAnswerFromRawPacket(*dq->dq, PacketBuffer(raw, raw + len));
+  dnsdist::self_answers::generateAnswerFromRawPacket(*dnsQuestion->dq, PacketBuffer(raw, raw + len));
 }
 
-void dnsdist_ffi_dnsquestion_spoof_raw(dnsdist_ffi_dnsquestion_t* dq, const dnsdist_ffi_raw_value_t* values, size_t valuesCount)
+void dnsdist_ffi_dnsquestion_spoof_raw(dnsdist_ffi_dnsquestion_t* dnsQuestion, const dnsdist_ffi_raw_value_t* values, size_t valuesCount)
 {
   std::vector<std::string> data;
   data.reserve(valuesCount);
 
   for (size_t idx = 0; idx < valuesCount; idx++) {
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
     data.emplace_back(values[idx].value, values[idx].size);
   }
 
   dnsdist::ResponseConfig config{};
-  dnsdist::self_answers::generateAnswerFromRDataEntries(*dq->dq, data, std::nullopt, config);
+  dnsdist::self_answers::generateAnswerFromRDataEntries(*dnsQuestion->dq, data, std::nullopt, config);
 }
 
-void dnsdist_ffi_dnsquestion_spoof_addrs(dnsdist_ffi_dnsquestion_t* dq, const dnsdist_ffi_raw_value_t* values, size_t valuesCount)
+void dnsdist_ffi_dnsquestion_spoof_addrs(dnsdist_ffi_dnsquestion_t* dnsQuestion, const dnsdist_ffi_raw_value_t* values, size_t valuesCount)
 {
   std::vector<ComboAddress> data;
   data.reserve(valuesCount);
 
   for (size_t idx = 0; idx < valuesCount; idx++) {
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
     if (values[idx].size == 4) {
-      sockaddr_in sin;
+      sockaddr_in sin{};
       sin.sin_family = AF_INET;
       sin.sin_port = 0;
+      // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
       memcpy(&sin.sin_addr.s_addr, values[idx].value, sizeof(sin.sin_addr.s_addr));
       data.emplace_back(&sin);
     }
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
     else if (values[idx].size == 16) {
-      sockaddr_in6 sin6;
+      sockaddr_in6 sin6{};
       sin6.sin6_family = AF_INET6;
       sin6.sin6_port = 0;
       sin6.sin6_scope_id = 0;
       sin6.sin6_flowinfo = 0;
+      // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
       memcpy(&sin6.sin6_addr.s6_addr, values[idx].value, sizeof(sin6.sin6_addr.s6_addr));
       data.emplace_back(&sin6);
     }
   }
 
   dnsdist::ResponseConfig config{};
-  dnsdist::self_answers::generateAnswerFromIPAddresses(*dq->dq, data, config);
+  dnsdist::self_answers::generateAnswerFromIPAddresses(*dnsQuestion->dq, data, config);
 }
 
-void dnsdist_ffi_dnsquestion_set_max_returned_ttl(dnsdist_ffi_dnsquestion_t* dq, uint32_t max)
+void dnsdist_ffi_dnsquestion_set_max_returned_ttl(dnsdist_ffi_dnsquestion_t* dnsQuestion, uint32_t max)
 {
-  if (dq != nullptr && dq->dq != nullptr) {
-    dq->dq->ids.ttlCap = max;
+  if (dnsQuestion != nullptr && dnsQuestion->dq != nullptr) {
+    dnsQuestion->dq->ids.ttlCap = max;
   }
 }
 
-bool dnsdist_ffi_dnsquestion_set_restartable(dnsdist_ffi_dnsquestion_t* dq)
+bool dnsdist_ffi_dnsquestion_set_restartable(dnsdist_ffi_dnsquestion_t* dnsQuestion)
 {
-  if (dq == nullptr || dq->dq == nullptr) {
+  if (dnsQuestion == nullptr || dnsQuestion->dq == nullptr) {
+    // NOLINTNEXTLINE(readability-simplify-boolean-expr)
     return false;
   }
 
-  dq->dq->ids.d_packet = std::make_unique<PacketBuffer>(dq->dq->getData());
+  dnsQuestion->dq->ids.d_packet = std::make_unique<PacketBuffer>(dnsQuestion->dq->getData());
   return true;
 }
 
@@ -745,25 +935,34 @@ size_t dnsdist_ffi_servers_list_get_count(const dnsdist_ffi_servers_list_t* list
 
 void dnsdist_ffi_servers_list_get_server(const dnsdist_ffi_servers_list_t* list, size_t idx, const dnsdist_ffi_server_t** out)
 {
-  *out = &list->ffiServers.at(idx);
+  try {
+    *out = &list->ffiServers.at(idx);
+  }
+  catch (...) {
+    *out = nullptr;
+  }
 }
 
-size_t dnsdist_ffi_servers_list_chashed(const dnsdist_ffi_servers_list_t* list, const dnsdist_ffi_dnsquestion_t* dq, size_t hash)
+size_t dnsdist_ffi_servers_list_chashed(const dnsdist_ffi_servers_list_t* list, const dnsdist_ffi_dnsquestion_t* dnsQuestion, size_t hash)
 {
-  (void)dq;
+  (void)dnsQuestion;
   auto serverPosition = chashedFromHash(list->servers, hash);
   if (!serverPosition) {
-    throw std::runtime_error("Unable to find servers in server list");
+    VERBOSESLOG(infolog("Unable to get a server in dnsdist_ffi_servers_list_chashed"),
+                getLogger(__func__)->info(Logr::Info, "Unable to get a server in dnsdist_ffi_servers_list_chashed"));
+    return std::numeric_limits<size_t>::max();
   }
   return *serverPosition;
 }
 
-size_t dnsdist_ffi_servers_list_whashed(const dnsdist_ffi_servers_list_t* list, const dnsdist_ffi_dnsquestion_t* dq, size_t hash)
+size_t dnsdist_ffi_servers_list_whashed(const dnsdist_ffi_servers_list_t* list, const dnsdist_ffi_dnsquestion_t* dnsQuestion, size_t hash)
 {
-  (void)dq;
+  (void)dnsQuestion;
   auto serverPosition = whashedFromHash(list->servers, hash);
   if (!serverPosition) {
-    throw std::runtime_error("Unable to find servers in server list");
+    VERBOSESLOG(infolog("Unable to get a server in dnsdist_ffi_servers_list_whashed"),
+                getLogger(__func__)->info(Logr::Info, "Unable to get a server in dnsdist_ffi_servers_list_whashed"));
+    return std::numeric_limits<size_t>::max();
   }
   return *serverPosition;
 }
@@ -803,53 +1002,70 @@ const char* dnsdist_ffi_server_get_name_with_addr(const dnsdist_ffi_server_t* se
   return server->server->getNameWithAddr().c_str();
 }
 
-void dnsdist_ffi_dnsresponse_set_min_ttl(dnsdist_ffi_dnsresponse_t* dr, uint32_t min)
+void dnsdist_ffi_dnsresponse_set_min_ttl(dnsdist_ffi_dnsresponse_t* dnsResponse, uint32_t min)
 {
-  dnsdist_ffi_dnsresponse_limit_ttl(dr, min, std::numeric_limits<uint32_t>::max());
+  dnsdist_ffi_dnsresponse_limit_ttl(dnsResponse, min, std::numeric_limits<uint32_t>::max());
 }
 
-void dnsdist_ffi_dnsresponse_set_max_ttl(dnsdist_ffi_dnsresponse_t* dr, uint32_t max)
+void dnsdist_ffi_dnsresponse_set_max_ttl(dnsdist_ffi_dnsresponse_t* dnsResponse, uint32_t max)
 {
-  dnsdist_ffi_dnsresponse_limit_ttl(dr, 0, max);
+  dnsdist_ffi_dnsresponse_limit_ttl(dnsResponse, 0, max);
 }
 
-void dnsdist_ffi_dnsresponse_limit_ttl(dnsdist_ffi_dnsresponse_t* dr, uint32_t min, uint32_t max)
+void dnsdist_ffi_dnsresponse_limit_ttl(dnsdist_ffi_dnsresponse_t* dnsResponse, uint32_t min, uint32_t max)
 {
-  if (dr != nullptr && dr->dr != nullptr) {
-    dnsdist::PacketMangling::restrictDNSPacketTTLs(dr->dr->getMutableData(), min, max);
+  if (dnsResponse != nullptr && dnsResponse->dr != nullptr) {
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+    if (!checkDNSResponseType(__func__, dnsResponse)) {
+      return;
+    }
+
+    dnsdist::PacketMangling::restrictDNSPacketTTLs(dnsResponse->dr->getMutableData(), min, max);
   }
 }
 
-void dnsdist_ffi_dnsresponse_set_max_returned_ttl(dnsdist_ffi_dnsresponse_t* dr, uint32_t max)
+void dnsdist_ffi_dnsresponse_set_max_returned_ttl(dnsdist_ffi_dnsresponse_t* dnsResponse, uint32_t max)
 {
-  if (dr != nullptr && dr->dr != nullptr) {
-    dr->dr->ids.ttlCap = max;
+  if (dnsResponse != nullptr && dnsResponse->dr != nullptr) {
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+    if (!checkDNSResponseType(__func__, dnsResponse)) {
+      return;
+    }
+    dnsResponse->dr->ids.ttlCap = max;
   }
 }
 
-void dnsdist_ffi_dnsresponse_clear_records_type(dnsdist_ffi_dnsresponse_t* dr, uint16_t qtype)
+void dnsdist_ffi_dnsresponse_clear_records_type(dnsdist_ffi_dnsresponse_t* dnsResponse, uint16_t qtype)
 {
-  if (dr != nullptr && dr->dr != nullptr) {
-    clearDNSPacketRecordTypes(dr->dr->getMutableData(), std::unordered_set<QType>{qtype});
+  if (dnsResponse != nullptr && dnsResponse->dr != nullptr) {
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+    if (!checkDNSResponseType(__func__, dnsResponse)) {
+      return;
+    }
+    clearDNSPacketRecordTypes(dnsResponse->dr->getMutableData(), std::unordered_set<QType>{qtype});
   }
 }
 
-bool dnsdist_ffi_dnsresponse_rebase(dnsdist_ffi_dnsresponse_t* dr, const char* initialName, size_t initialNameSize)
+bool dnsdist_ffi_dnsresponse_rebase(dnsdist_ffi_dnsresponse_t* dnsResponse, const char* initialName, size_t initialNameSize)
 {
-  if (dr == nullptr || dr->dr == nullptr || initialName == nullptr || initialNameSize == 0) {
+  if (dnsResponse == nullptr || dnsResponse->dr == nullptr || initialName == nullptr || initialNameSize == 0) {
+    return false;
+  }
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+  if (!checkDNSResponseType(__func__, dnsResponse)) {
     return false;
   }
 
   try {
     DNSName parsed(initialName, initialNameSize, 0, false);
 
-    if (!dnsdist::changeNameInDNSPacket(dr->dr->getMutableData(), dr->dr->ids.qname, parsed)) {
+    if (!dnsdist::changeNameInDNSPacket(dnsResponse->dr->getMutableData(), dnsResponse->dr->ids.qname, parsed)) {
       return false;
     }
 
     // set qname to new one
-    dr->dr->ids.qname = std::move(parsed);
-    dr->dr->ids.skipCache = true;
+    dnsResponse->dr->ids.qname = std::move(parsed);
+    dnsResponse->dr->ids.skipCache = true;
   }
   catch (const std::exception& e) {
     VERBOSESLOG(infolog("Error rebasing packet on a new DNSName: %s", e.what()),
@@ -862,19 +1078,31 @@ bool dnsdist_ffi_dnsresponse_rebase(dnsdist_ffi_dnsresponse_t* dr, const char* i
 
 bool dnsdist_ffi_dnsresponse_get_stale_cache_hit(const dnsdist_ffi_dnsresponse_t* dnsResponse)
 {
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+  if (!checkDNSResponseType(__func__, dnsResponse)) {
+    return false;
+  }
   return dnsResponse->dr->ids.staleCacheHit;
 }
 
 uint8_t dnsdist_ffi_dnsresponse_get_restart_count(const dnsdist_ffi_dnsresponse_t* dnsResponse)
 {
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+  if (!checkDNSResponseType(__func__, dnsResponse)) {
+    return 0U;
+  }
   return dnsResponse->dr->ids.restartCount;
 }
 
-bool dnsdist_ffi_dnsquestion_set_async(dnsdist_ffi_dnsquestion_t* dq, uint16_t asyncID, uint16_t queryID, uint32_t timeoutMs)
+bool dnsdist_ffi_dnsquestion_set_async(dnsdist_ffi_dnsquestion_t* dnsQuestion, uint16_t asyncID, uint16_t queryID, uint32_t timeoutMs)
 {
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+  if (!checkDNSQuestionType(__func__, dnsQuestion)) {
+    return false;
+  }
   try {
-    dq->dq->asynchronous = true;
-    return dnsdist::suspendQuery(*dq->dq, asyncID, queryID, timeoutMs);
+    dnsQuestion->dq->asynchronous = true;
+    return dnsdist::suspendQuery(*dnsQuestion->dq, asyncID, queryID, timeoutMs);
   }
   catch (const std::exception& e) {
     VERBOSESLOG(infolog("Error in dnsdist_ffi_dnsquestion_set_async: %s", e.what()),
@@ -888,18 +1116,23 @@ bool dnsdist_ffi_dnsquestion_set_async(dnsdist_ffi_dnsquestion_t* dq, uint16_t a
   return false;
 }
 
-bool dnsdist_ffi_dnsresponse_set_async(dnsdist_ffi_dnsquestion_t* dq, uint16_t asyncID, uint16_t queryID, uint32_t timeoutMs)
+bool dnsdist_ffi_dnsresponse_set_async(dnsdist_ffi_dnsresponse_t* dnsResponse, uint16_t asyncID, uint16_t queryID, uint32_t timeoutMs)
 {
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+  if (!checkDNSResponseType(__func__, dnsResponse)) {
+    return false;
+  }
+
   try {
-    dq->dq->asynchronous = true;
-    auto dr = dynamic_cast<DNSResponse*>(dq->dq);
-    if (!dr) {
+    dnsResponse->dr->asynchronous = true;
+    auto* drPtr = dnsResponse->dr;
+    if (drPtr == nullptr) {
       VERBOSESLOG(infolog("Passed a DNSQuestion instead of a DNSResponse to dnsdist_ffi_dnsresponse_set_async"),
                   getLogger(__func__)->info(Logr::Info, "Passed a DNSQuestion instead of a DNSResponse"));
       return false;
     }
 
-    return dnsdist::suspendResponse(*dr, asyncID, queryID, timeoutMs);
+    return dnsdist::suspendResponse(*drPtr, asyncID, queryID, timeoutMs);
   }
   catch (const std::exception& e) {
     VERBOSESLOG(infolog("Error in dnsdist_ffi_dnsresponse_set_async: %s", e.what()),
@@ -1073,7 +1306,7 @@ bool dnsdist_ffi_drop_from_async(uint16_t asyncID, uint16_t queryID)
     return false;
   }
 
-  struct timeval now;
+  timeval now{};
   gettimeofday(&now, nullptr);
   TCPResponse tresponse(std::move(query->query));
   sender->notifyIOError(now, std::move(tresponse));
@@ -1100,6 +1333,7 @@ bool dnsdist_ffi_set_answer_from_async(uint16_t asyncID, uint16_t queryID, const
   dnsheader_aligned alignedHeader(query->query.d_buffer.data());
   auto oldID = alignedHeader->id;
   query->query.d_buffer.clear();
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay,cppcoreguidelines-pro-bounds-pointer-arithmetic)
   query->query.d_buffer.insert(query->query.d_buffer.begin(), raw, raw + rawSize);
 
   dnsdist::PacketMangling::editDNSHeaderFromPacket(query->query.d_buffer, [oldID](dnsheader& header) {
@@ -1111,6 +1345,7 @@ bool dnsdist_ffi_set_answer_from_async(uint16_t asyncID, uint16_t queryID, const
   return dnsdist::queueQueryResumptionEvent(std::move(query));
 }
 
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays)
 static constexpr char s_lua_ffi_code[] = R"FFICodeContent(
   local ffi = require("ffi")
   local C = ffi.C
@@ -1125,6 +1360,7 @@ static constexpr char s_lua_ffi_code[] = R"FFICodeContent(
 
 const char* getLuaFFIWrappers()
 {
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
   return s_lua_ffi_code;
 }
 
@@ -1154,13 +1390,16 @@ void setupLuaFFIPerThreadContext(LuaContext& luaCtx)
 size_t dnsdist_ffi_generate_proxy_protocol_payload(const size_t addrSize, const void* srcAddr, const void* dstAddr, const uint16_t srcPort, const uint16_t dstPort, const bool tcp, const size_t valuesCount, const dnsdist_ffi_proxy_protocol_value* values, void* out, const size_t outSize)
 {
   try {
-    ComboAddress src, dst;
+    ComboAddress src;
+    ComboAddress dst;
     if (addrSize != sizeof(src.sin4.sin_addr) && addrSize != sizeof(src.sin6.sin6_addr.s6_addr)) {
       return 0;
     }
 
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
     src = makeComboAddressFromRaw(addrSize == sizeof(src.sin4.sin_addr) ? 4 : 6, reinterpret_cast<const char*>(srcAddr), addrSize);
     src.sin4.sin_port = htons(srcPort);
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
     dst = makeComboAddressFromRaw(addrSize == sizeof(dst.sin4.sin_addr) ? 4 : 6, reinterpret_cast<const char*>(dstAddr), addrSize);
     dst.sin4.sin_port = htons(dstPort);
 
@@ -1194,7 +1433,7 @@ size_t dnsdist_ffi_generate_proxy_protocol_payload(const size_t addrSize, const 
   }
 }
 
-size_t dnsdist_ffi_dnsquestion_generate_proxy_protocol_payload(const dnsdist_ffi_dnsquestion_t* dq, const size_t valuesCount, const dnsdist_ffi_proxy_protocol_value* values, void* out, const size_t outSize)
+size_t dnsdist_ffi_dnsquestion_generate_proxy_protocol_payload(const dnsdist_ffi_dnsquestion_t* dnsQuestion, const size_t valuesCount, const dnsdist_ffi_proxy_protocol_value* values, void* out, const size_t outSize)
 {
   std::vector<ProxyProtocolValue> valuesVect;
   if (valuesCount > 0) {
@@ -1205,7 +1444,7 @@ size_t dnsdist_ffi_dnsquestion_generate_proxy_protocol_payload(const dnsdist_ffi
     }
   }
 
-  std::string payload = makeProxyHeader(dq->dq->overTCP(), dq->dq->ids.origRemote, dq->dq->ids.origDest, valuesVect);
+  std::string payload = makeProxyHeader(dnsQuestion->dq->overTCP(), dnsQuestion->dq->ids.origRemote, dnsQuestion->dq->ids.origDest, valuesVect);
   if (payload.size() > outSize) {
     return 0;
   }
@@ -1236,12 +1475,13 @@ bool dnsdist_ffi_dnsquestion_add_proxy_protocol_values(dnsdist_ffi_dnsquestion_t
 
 size_t dnsdist_ffi_dnsquestion_get_proxy_protocol_values(dnsdist_ffi_dnsquestion_t* dnsQuestion, const dnsdist_ffi_proxy_protocol_value_t** out)
 {
-  if (dnsQuestion == nullptr || dnsQuestion->dq == nullptr || !dnsQuestion->dq->proxyProtocolValues) {
+  if (dnsQuestion == nullptr || dnsQuestion->dq == nullptr || !dnsQuestion->dq->proxyProtocolValues || out == nullptr) {
     return 0;
   }
 
-  if (out == nullptr) {
-    return dnsQuestion->proxyProtocolValuesVect->size();
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+  if (!checkDNSQuestionType(__func__, dnsQuestion)) {
+    return 0U;
   }
 
   dnsQuestion->proxyProtocolValuesVect = std::make_unique<std::vector<dnsdist_ffi_proxy_protocol_value_t>>(dnsQuestion->dq->proxyProtocolValues->size());
@@ -1277,6 +1517,7 @@ const char* dnsdist_ffi_domain_list_get(const dnsdist_ffi_domain_list_t* list, s
 
 void dnsdist_ffi_domain_list_free(dnsdist_ffi_domain_list_t* list)
 {
+  // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
   delete list;
 }
 
@@ -1291,6 +1532,7 @@ const char* dnsdist_ffi_address_list_get(const dnsdist_ffi_address_list_t* list,
 
 void dnsdist_ffi_address_list_free(dnsdist_ffi_address_list_t* list)
 {
+  // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
   delete list;
 }
 
@@ -1300,9 +1542,9 @@ size_t dnsdist_ffi_packetcache_get_domain_list_by_addr(const char* poolName, con
     return 0;
   }
 
-  ComboAddress ca;
+  ComboAddress caAddr;
   try {
-    ca = ComboAddress(addr);
+    caAddr = ComboAddress(addr);
   }
   catch (const std::exception& e) {
     VERBOSESLOG(infolog("Error parsing address passed to dnsdist_ffi_packetcache_get_domain_list_by_addr: %s", e.what()),
@@ -1326,8 +1568,8 @@ size_t dnsdist_ffi_packetcache_get_domain_list_by_addr(const char* poolName, con
     return 0;
   }
 
-  auto domains = pool.packetCache->getDomainsContainingRecords(ca);
-  if (domains.size() == 0) {
+  auto domains = pool.packetCache->getDomainsContainingRecords(caAddr);
+  if (domains.empty()) {
     return 0;
   }
 
@@ -1378,7 +1620,7 @@ size_t dnsdist_ffi_packetcache_get_address_list_by_domain(const char* poolName, 
   }
 
   auto addresses = pool.packetCache->getRecordsForDomain(name);
-  if (addresses.size() == 0) {
+  if (addresses.empty()) {
     return 0;
   }
 
@@ -1594,6 +1836,7 @@ const char* dnsdist_ffi_ring_entry_get_mac_address(const dnsdist_ffi_ring_entry_
 
 void dnsdist_ffi_ring_entry_list_free(dnsdist_ffi_ring_entry_list_t* list)
 {
+  // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
   delete list;
 }
 
@@ -1628,14 +1871,14 @@ size_t dnsdist_ffi_ring_get_entries(dnsdist_ffi_ring_entry_list_t** out)
 
   for (const auto& shard : g_rings.d_shards) {
     {
-      auto ql = shard->queryRing.lock();
-      for (const auto& entry : *ql) {
+      auto queryRingLock = shard->queryRing.lock();
+      for (const auto& entry : *queryRingLock) {
         addRingEntryToList(list, now, entry);
       }
     }
     {
-      auto rl = shard->respRing.lock();
-      for (const auto& entry : *rl) {
+      auto responseRingLock = shard->respRing.lock();
+      for (const auto& entry : *responseRingLock) {
         addRingEntryToList(list, now, entry);
       }
     }
@@ -1653,9 +1896,9 @@ size_t dnsdist_ffi_ring_get_entries_by_addr(const char* addr, dnsdist_ffi_ring_e
   if (out == nullptr || addr == nullptr) {
     return 0;
   }
-  ComboAddress ca;
+  ComboAddress caAddr;
   try {
-    ca = ComboAddress(addr);
+    caAddr = ComboAddress(addr);
   }
   catch (const std::exception& e) {
     VERBOSESLOG(infolog("Unable to convert address in dnsdist_ffi_ring_get_entries_by_addr: %s", e.what()),
@@ -1669,15 +1912,15 @@ size_t dnsdist_ffi_ring_get_entries_by_addr(const char* addr, dnsdist_ffi_ring_e
   }
 
   auto list = std::make_unique<dnsdist_ffi_ring_entry_list_t>();
-  struct timespec now{};
+  timespec now{};
   gettime(&now);
 
   auto compare = ComboAddress::addressOnlyEqual();
   for (const auto& shard : g_rings.d_shards) {
     {
-      auto ql = shard->queryRing.lock();
-      for (const auto& entry : *ql) {
-        if (!compare(entry.requestor, ca)) {
+      auto queryRingLock = shard->queryRing.lock();
+      for (const auto& entry : *queryRingLock) {
+        if (!compare(entry.requestor, caAddr)) {
           continue;
         }
 
@@ -1685,9 +1928,9 @@ size_t dnsdist_ffi_ring_get_entries_by_addr(const char* addr, dnsdist_ffi_ring_e
       }
     }
     {
-      auto rl = shard->respRing.lock();
-      for (const auto& entry : *rl) {
-        if (!compare(entry.requestor, ca)) {
+      auto responseRingLock = shard->respRing.lock();
+      for (const auto& entry : *responseRingLock) {
+        if (!compare(entry.requestor, caAddr)) {
           continue;
         }
 
@@ -1713,12 +1956,12 @@ size_t dnsdist_ffi_ring_get_entries_by_mac(const char* addr, dnsdist_ffi_ring_en
   return 0;
 #else
   auto list = std::make_unique<dnsdist_ffi_ring_entry_list_t>();
-  struct timespec now{};
+  timespec now{};
   gettime(&now);
 
   for (const auto& shard : g_rings.d_shards) {
-    auto ql = shard->queryRing.lock();
-    for (const auto& entry : *ql) {
+    auto queryRingLock = shard->queryRing.lock();
+    for (const auto& entry : *queryRingLock) {
       if (memcmp(addr, entry.macaddress.data(), entry.macaddress.size()) != 0) {
         continue;
       }
@@ -1747,6 +1990,7 @@ bool dnsdist_ffi_network_endpoint_new(const char* path, size_t pathSize, dnsdist
   }
   try {
     dnsdist::NetworkEndpoint endpoint(std::string(path, pathSize));
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
     *out = new dnsdist_ffi_network_endpoint_t{std::move(endpoint)};
     return true;
   }
@@ -1772,6 +2016,7 @@ bool dnsdist_ffi_network_endpoint_send(const dnsdist_ffi_network_endpoint_t* end
 
 void dnsdist_ffi_network_endpoint_free(dnsdist_ffi_network_endpoint_t* endpoint)
 {
+  // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
   delete endpoint;
 }
 
@@ -1788,6 +2033,7 @@ bool dnsdist_ffi_dnspacket_parse(const char* packet, size_t packetSize, dnsdist_
 
   try {
     dnsdist::DNSPacketOverlay overlay(std::string_view(packet, packetSize));
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
     *out = new dnsdist_ffi_dnspacket_t{std::move(overlay)};
     return true;
   }
@@ -1909,8 +2155,8 @@ size_t dnsdist_ffi_dnspacket_get_name_at_offset_raw(const char* packet, size_t p
     return storage.size();
   }
   catch (const std::exception& e) {
-    VERBOSESLOG(infolog("Error parsing DNSName via dnsdist_ffi_dnspacket_get_name_at_offset_raw: %s", e.what()),
-                getLogger(__func__)->error(Logr::Info, e.what(), "Error parsing DNS name", "packet_size", Logging::Loggable(packetSize), "offset", Logging::Loggable(offset)));
+    VERBOSESLOG(infolog("Error parsing DNSName from packet (%s) via dnsdist_ffi_dnspacket_get_name_at_offset_raw: %s", makeHexDump(std::string(packet, packetSize)), e.what()),
+                getLogger(__func__)->error(Logr::Info, e.what(), "Error parsing DNS name", "packet_size", Logging::Loggable(packetSize), "offset", Logging::Loggable(offset), "packet_bytes", Logging::Loggable(makeHexDump(std::string(packet, packetSize)))));
   }
   return 0;
 }
@@ -1988,19 +2234,25 @@ bool dnsdist_ffi_dnspacket_parse_cname_record(const char* raw, const dnsdist_ffi
     return false;
   }
 
-  DNSName parsed(raw, record.d_contentOffset + record.d_contentLength, record.d_contentOffset, true);
-  const auto& storage = parsed.getStorage();
-  memcpy(name, storage.data(), storage.size());
-  *nameSize = storage.size();
+  try {
+    DNSName parsed(raw, record.d_contentOffset + record.d_contentLength, record.d_contentOffset, true);
+    const auto& storage = parsed.getStorage();
+    memcpy(name, storage.data(), storage.size());
+    *nameSize = storage.size();
 
-  return true;
+    return true;
+  }
+  catch (const std::exception& e) {
+    VERBOSESLOG(infolog("Error parsing CNAME record: %s", e.what()),
+                getLogger(__func__)->error(Logr::Info, e.what(), "Error parsing CNAME record"));
+    return false;
+  }
 }
 
 void dnsdist_ffi_dnspacket_free(dnsdist_ffi_dnspacket_t* packet)
 {
-  if (packet != nullptr) {
-    delete packet;
-  }
+  // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
+  delete packet;
 }
 
 bool dnsdist_ffi_metric_declare(const char* name, size_t nameLen, const char* type, const char* description, const char* customName)
@@ -2379,7 +2631,7 @@ void dnsdist_ffi_svc_record_parameters_add_ipv4_hint(dnsdist_ffi_svc_record_para
     return;
   }
   try {
-    parameters->parameters.ipv4hints.emplace_back(ComboAddress(std::string(value, valueLen)));
+    parameters->parameters.ipv4hints.emplace_back(std::string(value, valueLen));
   }
   catch (const std::exception& exp) {
     SLOG(errlog("Exception in dnsdist_ffi_svc_record_parameters_add_ipv4_hint: %s", exp.what()),
@@ -2401,7 +2653,7 @@ void dnsdist_ffi_svc_record_parameters_add_ipv6_hint(dnsdist_ffi_svc_record_para
     return;
   }
   try {
-    parameters->parameters.ipv6hints.emplace_back(ComboAddress(std::string(value, valueLen)));
+    parameters->parameters.ipv6hints.emplace_back(std::string(value, valueLen));
   }
   catch (const std::exception& exp) {
     SLOG(errlog("Exception in dnsdist_ffi_svc_record_parameters_add_ipv6_hint: %s", exp.what()),
@@ -2447,6 +2699,10 @@ void dnsdist_ffi_dnsquestion_meta_begin_key([[maybe_unused]] dnsdist_ffi_dnsques
   if (dnsQuestion == nullptr || key == nullptr || keyLen == 0) {
     return;
   }
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+  if (!checkDNSQuestionType(__func__, dnsQuestion)) {
+    return;
+  }
 
   if (dnsQuestion->pbfWriter.valid()) {
     VERBOSESLOG(infolog("Error in dnsdist_ffi_dnsquestion_meta_begin_key: the previous key has not been ended"),
@@ -2467,6 +2723,10 @@ void dnsdist_ffi_dnsquestion_meta_add_str_value_to_key([[maybe_unused]] dnsdist_
   if (dnsQuestion == nullptr || value == nullptr || valueLen == 0) {
     return;
   }
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+  if (!checkDNSQuestionType(__func__, dnsQuestion)) {
+    return;
+  }
 
   if (!dnsQuestion->pbfMetaValueWriter.valid()) {
     VERBOSESLOG(infolog("Error in dnsdist_ffi_dnsquestion_meta_add_str_value_to_key: trying to add a value without starting a key"),
@@ -2484,6 +2744,10 @@ void dnsdist_ffi_dnsquestion_meta_add_int64_value_to_key([[maybe_unused]] dnsdis
   if (dnsQuestion == nullptr) {
     return;
   }
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+  if (!checkDNSQuestionType(__func__, dnsQuestion)) {
+    return;
+  }
 
   if (!dnsQuestion->pbfMetaValueWriter.valid()) {
     VERBOSESLOG(infolog("Error in dnsdist_ffi_dnsquestion_meta_add_int64_value_to_key: trying to add a value without starting a key"),
@@ -2499,6 +2763,10 @@ void dnsdist_ffi_dnsquestion_meta_end_key([[maybe_unused]] dnsdist_ffi_dnsquesti
 {
 #if !defined(DISABLE_PROTOBUF)
   if (dnsQuestion == nullptr) {
+    return;
+  }
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+  if (!checkDNSQuestionType(__func__, dnsQuestion)) {
     return;
   }
 
@@ -2528,6 +2796,11 @@ void dnsdist_ffi_dnsresponse_meta_begin_key([[maybe_unused]] dnsdist_ffi_dnsresp
     return;
   }
 
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+  if (!checkDNSResponseType(__func__, dnsResponse)) {
+    return;
+  }
+
   if (dnsResponse->pbfWriter.valid()) {
     VERBOSESLOG(infolog("Error in dnsdist_ffi_dnsresponse_meta_begin_key: the previous key has not been ended"),
                 getLogger(__func__)->info(Logr::Info, "Error ending meta key for response : the previous key has not been ended"));
@@ -2548,6 +2821,11 @@ void dnsdist_ffi_dnsresponse_meta_add_str_value_to_key([[maybe_unused]] dnsdist_
     return;
   }
 
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+  if (!checkDNSResponseType(__func__, dnsResponse)) {
+    return;
+  }
+
   if (!dnsResponse->pbfMetaValueWriter.valid()) {
     VERBOSESLOG(infolog("Error in dnsdist_ffi_dnsresponse_meta_add_str_value_to_key: trying to add a value without starting a key"),
                 getLogger(__func__)->info(Logr::Info, "Error adding meta value: the key has not been started"));
@@ -2565,6 +2843,11 @@ void dnsdist_ffi_dnsresponse_meta_add_int64_value_to_key([[maybe_unused]] dnsdis
     return;
   }
 
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+  if (!checkDNSResponseType(__func__, dnsResponse)) {
+    return;
+  }
+
   if (!dnsResponse->pbfMetaValueWriter.valid()) {
     VERBOSESLOG(infolog("Error in dnsdist_ffi_dnsresponse_meta_add_int64_value_to_key: trying to add a value without starting a key"),
                 getLogger(__func__)->info(Logr::Info, "Error adding meta value: the key has not been started"));
@@ -2579,6 +2862,11 @@ void dnsdist_ffi_dnsresponse_meta_end_key([[maybe_unused]] dnsdist_ffi_dnsrespon
 {
 #if !defined(DISABLE_PROTOBUF)
   if (dnsResponse == nullptr) {
+    return;
+  }
+
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+  if (!checkDNSResponseType(__func__, dnsResponse)) {
     return;
   }
 

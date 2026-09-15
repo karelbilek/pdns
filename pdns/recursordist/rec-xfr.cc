@@ -180,10 +180,10 @@ static shared_ptr<const SOARecordContent> loadZoneFromServer(Logr::log_t plogger
 
   ComboAddress local(localAddress);
   if (local == ComboAddress()) {
-    local = pdns::getQueryLocalAddress(primary.sin4.sin_family, 0);
+    local = pdns::getQueryLocalAddress(primary.sin4.sin_family, 0).d_address;
   }
 
-  AXFRRetriever axfr(primary, zoneName, tsigTriplet, &local, maxReceivedBytes, axfrTimeout);
+  AXFRRetriever axfr(logger, primary, zoneName, tsigTriplet, &local, maxReceivedBytes, axfrTimeout);
   unsigned int nrecords = 0;
   Resolver::res_t nop;
   vector<DNSRecord> chunk;
@@ -224,6 +224,10 @@ static shared_ptr<const SOARecordContent> loadZoneFromServer(Logr::log_t plogger
   if (!zone->dupsCheck()) {
     zone->clear();
     throw PDNSException("duplicate PTR values in catalog zone");
+  }
+  if (!soaRecordContent) {
+    zone->clear();
+    throw PDNSException("No valid SOA found in catalog zone AXFR");
   }
   logger->info(Logr::Info, "Zone load completed", "nrecords", Logging::Loggable(nrecords), "soa", Logging::Loggable(soaRecordContent->getZoneRepresentation()));
   return soaRecordContent;
@@ -327,11 +331,11 @@ bool FWCatZoneXFR::zoneTrackerIteration(const DNSName& zoneName, std::shared_ptr
 
     ComboAddress local(d_params.localAddress);
     if (local == ComboAddress()) {
-      local = pdns::getQueryLocalAddress(primary.sin4.sin_family, 0);
+      local = pdns::getQueryLocalAddress(primary.sin4.sin_family, 0).d_address;
     }
 
     try {
-      deltas = getIXFRDeltas(primary, zoneName, soaRecord, d_params.xfrTimeout, true, d_params.tsigtriplet, &local, d_params.maxReceivedMBytes);
+      deltas = getIXFRDeltas(logger, primary, zoneName, soaRecord, d_params.xfrTimeout, true, d_params.tsigtriplet, &local, d_params.maxReceivedMBytes);
 
       /* no need to try another primary */
       break;
@@ -471,7 +475,7 @@ void FWCatZoneXFR::zoneXFRTracker(ZoneXFRParams params, uint64_t configGeneratio
     oldZone = g_luaconfs.getLocal()->catalogzones.at(params.zoneIdx).d_catz;
   }
   if (!oldZone) {
-    logger->error(Logr::Error, "Unable to retrieve catalog zone from configuration", "index", Logging::Loggable(params.zoneIdx));
+    logger->info(Logr::Error, "Unable to retrieve catalog zone from configuration", "index", Logging::Loggable(params.zoneIdx));
     return;
   }
 

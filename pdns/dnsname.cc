@@ -96,8 +96,9 @@ DNSName::DNSName(const std::string_view sw)
         d_storage.append(begiter,iter);
         if(iter != pend)
           ++iter;
-        if(labellen > 63)
+        if(labellen > s_maxDNSLabelLength) {
           throwSafeRangeError("label too long to append: ", p, length);
+        }
 
         if(iter-pbegin > static_cast<ptrdiff_t>(s_maxDNSNameLength - 1)) // reserve two bytes, one for length and one for the root label
           throwSafeRangeError("name too long to append: ", p, length);
@@ -134,7 +135,7 @@ static void checkLabelLength(uint8_t length)
   if (length == 0) {
     throw std::range_error("no such thing as an empty label to append");
   }
-  if (length > 63) {
+  if (length > DNSName::s_maxDNSLabelLength) {
     throw std::range_error("label too long to append");
   }
 }
@@ -143,6 +144,8 @@ static void checkLabelLength(uint8_t length)
 size_t DNSName::parsePacketUncompressed(const pdns::views::UnsignedCharView& view, size_t pos, bool uncompress)
 {
   const size_t initialPos = pos;
+  auto existingSize = d_storage.size();
+  const size_t neededSizeForFinalLabel = /* final empty label length */ (existingSize == 0 ? 1U : 0U);
   size_t totalLength = 0;
   unsigned char labellen = 0;
 
@@ -167,23 +170,26 @@ size_t DNSName::parsePacketUncompressed(const pdns::views::UnsignedCharView& vie
       throw std::range_error("Found an invalid label length in qname (only one of the first two bits is set)");
     }
     checkLabelLength(labellen);
-    // reserve one byte for the label length
-    if (totalLength + labellen > s_maxDNSNameLength - 1) {
+
+    // reserve one byte for the label length, plus one byte for the final empty label if we were empty before
+    if ((existingSize + totalLength + labellen + 1U + neededSizeForFinalLabel) > s_maxDNSNameLength) {
       throw std::range_error("name too long to append");
     }
     if (pos + labellen >= view.size()) {
       throw std::range_error("Found an invalid label length in qname");
     }
     pos += labellen;
-    totalLength += 1 + labellen;
+    totalLength += 1U + labellen;
   }
   while (pos < view.size());
 
   if (totalLength != 0) {
-    auto existingSize = d_storage.size();
     if (existingSize > 0) {
       // remove the last label count, we are about to override it */
       --existingSize;
+    }
+    if ((existingSize + totalLength + 1U) > s_maxDNSNameLength) {
+      throw std::range_error("name too long to append");
     }
     d_storage.reserve(existingSize + totalLength + 1);
     d_storage.resize(existingSize + totalLength);
@@ -212,7 +218,7 @@ void DNSName::packetParser(const char* qpos, size_t len, size_t offset, bool unc
   pos++;
   if (labellen != 0 && pos < view.size()) {
     if (labellen < 0xc0) {
-      abort();
+      throw std::range_error("Invalid label byte during decompression ("+std::to_string(labellen)+")");
     }
 
     if (!uncompress) {
@@ -361,7 +367,7 @@ bool DNSName::isPartOf(const DNSName& parent) const
       }
       return true;
     }
-    if (static_cast<uint8_t>(*us) > 63) {
+    if (static_cast<uint8_t>(*us) > s_maxDNSLabelLength) {
       throw std::out_of_range("illegal label length in DNSName");
     }
   }
@@ -668,11 +674,19 @@ unsigned int DNSName::countLabels() const
 
 void DNSName::trimToLabels(unsigned int to)
 {
-  for (auto nlabels = countLabels(); nlabels > to; --nlabels) {
-    chopOff();
+  if (to != 0) {
+    for (auto nlabels = countLabels(); nlabels > to; --nlabels) {
+      chopOff();
+    }
+  }
+  else {
+    // If all the labels are to be removed, the result is either empty or
+    // the root zone.
+    if (!empty()) {
+      d_storage = g_rootdnsname.d_storage;
+    }
   }
 }
-
 
 size_t hash_value(DNSName const& d)
 {
@@ -916,7 +930,7 @@ std::string_view::size_type ZoneName::findVariantSeparator(std::string_view name
         ++slashes;
       }
       if ((slashes % 2) == 0) {
-	break;
+        break;
       }
     }
   }

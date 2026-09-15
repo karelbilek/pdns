@@ -342,6 +342,8 @@ int main(int argc, char** argv)
     "trace-regex",
   };
   try {
+    // needed to be able to parse (and convert to YAML) custom RPZ entries
+    reportAllTypes();
     initArguments(argc, argv, log);
     string sockname = "pdns_recursor";
 
@@ -430,7 +432,7 @@ int main(int argc, char** argv)
       ++iteration;
     }
 
-    auto timeout = arg().asNum("timeout");
+    auto timeout = arg().asNum<time_t>("timeout");
     RecursorControlChannel rccS;
     rccS.connect(arg()["socket-dir"], sockname);
     RecursorControlChannel::send(rccS.getDescriptor(), {0, std::move(command)}, timeout, fileDesc);

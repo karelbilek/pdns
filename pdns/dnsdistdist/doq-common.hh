@@ -48,10 +48,37 @@ struct QuicheParams
 {
   TLSConfig d_tlsConfig;
   std::string d_keyLogFile;
+  std::string d_qLogDir;
   uint64_t d_idleTimeout{5};
   uint64_t d_maxInFlight{65535};
   std::string d_ccAlgo{"cubic"};
   std::string d_alpn;
+};
+
+class QUICConnection
+{
+public:
+  QUICConnection(ClientState& frontend, const ComboAddress& peer, const ComboAddress& localAddr, QuicheConfig config, QuicheConnection&& conn);
+  QUICConnection(const QUICConnection&) = delete;
+  QUICConnection(QUICConnection&&) = default;
+  QUICConnection& operator=(const QUICConnection&) = delete;
+  QUICConnection& operator=(QUICConnection&&) = delete;
+  virtual ~QUICConnection();
+
+  std::shared_ptr<const std::string> getSNI();
+
+  ClientState& d_frontend;
+  ComboAddress d_peer;
+  ComboAddress d_localAddr;
+  QuicheConnection d_conn;
+  QuicheConfig d_config;
+
+  std::unordered_map<uint64_t, PacketBuffer> d_streamBuffers;
+  std::unordered_map<uint64_t, PacketBuffer> d_streamOutBuffers;
+  std::shared_ptr<const std::string> d_sni{nullptr};
+  timeval d_connectionStartTime{};
+  uint64_t d_readIOsTotal{0};
+  size_t d_queriesCount{0};
 };
 
 /* from rfc9250 section-4.3 */
@@ -92,6 +119,7 @@ void flushEgress(Socket& sock, QuicheConnection& conn, const ComboAddress& peer,
 void configureQuiche(QuicheConfig& config, const QuicheParams& params, bool isHTTP);
 bool recvAsync(Socket& socket, PacketBuffer& buffer, ComboAddress& clientAddr, ComboAddress& localAddr);
 std::string getSNIFromQuicheConnection(const QuicheConnection& conn);
+void configureQLog(const QuicheConnection& conn, const std::string& qLogDir, const ComboAddress& peer);
 };
 
 #endif

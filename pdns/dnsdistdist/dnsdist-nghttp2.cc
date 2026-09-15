@@ -79,9 +79,17 @@ public:
   void release(bool removeFromCache) override
   {
     (void)removeFromCache;
+    if (d_ioState) {
+      d_ioState.reset();
+    }
+    nghttp2_session_terminate_session(d_session.get(), NGHTTP2_NO_ERROR);
   }
 
 private:
+  /* how many bytes we are willing to keep in a buffer waiting for the socket to become writable
+     again, until we stop accepting new queries */
+  static constexpr size_t s_maxBufferedBytes = 65536U;
+
   static ssize_t send_callback(nghttp2_session* session, const uint8_t* data, size_t length, int flags, void* user_data);
   static int on_frame_recv_callback(nghttp2_session* session, const nghttp2_frame* frame, void* user_data);
   static int on_data_chunk_recv_callback(nghttp2_session* session, uint8_t flags, StreamID stream_id, const uint8_t* data, size_t len, void* user_data);
@@ -230,15 +238,21 @@ void DoHConnectionToBackend::handleTimeout(const struct timeval& now, bool write
 bool DoHConnectionToBackend::reachedMaxStreamID() const
 {
   const uint32_t maximumStreamID = (static_cast<uint32_t>(1) << 31) - 1;
-  return d_highestStreamID == maximumStreamID;
+  return d_highestStreamID >= maximumStreamID;
 }
 
 bool DoHConnectionToBackend::reachedMaxConcurrentQueries() const
 {
-  // cerr<<"Got "<<getConcurrentStreamsCount()<<" concurrent streams, max is "<<nghttp2_session_get_remote_settings(d_session.get(), NGHTTP2_SETTINGS_MAX_CONCURRENT_STREAMS)<<endl;
   if (nghttp2_session_get_remote_settings(d_session.get(), NGHTTP2_SETTINGS_MAX_CONCURRENT_STREAMS) <= getConcurrentStreamsCount()) {
     return true;
   }
+
+  /* somehow we already have a lot of data queued that we have not been able to
+     write to the outgoing socket, do not accept new queries just yet */
+  if (d_out.size() >= s_maxBufferedBytes) {
+    return true;
+  }
+
   return false;
 }
 
@@ -299,7 +313,9 @@ void DoHConnectionToBackend::queueQuery(std::shared_ptr<TCPQuerySender>& sender,
 
   PendingRequest pending;
   pending.d_query = std::move(query);
-  pending.d_sender = std::move(sender);
+  /* don't move the sender, we don't own it at this point and the caller might need it,
+     especially if we throw below */
+  pending.d_sender = sender;
 
   uint32_t tentativeStreamId = nghttp2_session_get_next_stream_id(d_session.get());
   if (tentativeStreamId == static_cast<uint32_t>(1 << 31)) {
@@ -318,7 +334,13 @@ void DoHConnectionToBackend::queueQuery(std::shared_ptr<TCPQuerySender>& sender,
     throw std::runtime_error("Stream ID collision");
   }
 
-  /* if data_prd is not NULL, it provides data which will be sent in subsequent DATA frames. In this case, a method that allows request message bodies (https://tools.ietf.org/html/rfc7231#section-4) must be specified with :method key (e.g. POST). This function does not take ownership of the data_prd. The function copies the members of the data_prd. If data_prd is NULL, HEADERS have END_STREAM set.
+  /* if data_prd is not NULL, it provides data which will be sent in subsequent DATA frames.
+     In this case, a method that allows request message bodies (https://tools.ietf.org/html/rfc7231#section-4)
+     must be specified with :method key (e.g. POST).
+     This function does not take ownership of the data_prd. The function copies the members of the data_prd.
+     If data_prd is NULL, HEADERS have END_STREAM set.
+     If you are considering moving to nghttp2_data_provider2, please be aware that this does not exist
+     in nghttp2 1.43 as shipped by Debian 11, Ubuntu 22.04 and EL 9.
    */
   nghttp2_data_provider data_provider;
 
@@ -391,20 +413,20 @@ void DoHConnectionToBackend::handleReadableIOCallback(int fd, FDMultiplexer::fun
   do {
     conn->d_inPos = 0;
     conn->d_in.resize(conn->d_in.size() + 512);
-    // cerr<<"trying to read "<<conn->d_in.size()<<endl;
     try {
       IOState newState = conn->d_handler->tryRead(conn->d_in, conn->d_inPos, conn->d_in.size(), true);
-      // cerr<<"got a "<<(int)newState<<" state and "<<conn->d_inPos<<" bytes"<<endl;
       conn->d_in.resize(conn->d_inPos);
 
       if (conn->d_inPos > 0) {
         /* we got something */
         auto readlen = nghttp2_session_mem_recv(conn->d_session.get(), conn->d_in.data(), conn->d_inPos);
-        // cerr<<"nghttp2_session_mem_recv returned "<<readlen<<endl;
         /* as long as we don't require a pause by returning nghttp2_error.NGHTTP2_ERR_PAUSE from a CB,
            all data should be consumed before returning */
-        if (readlen > 0 && static_cast<size_t>(readlen) < conn->d_inPos) {
-          throw std::runtime_error("Fatal error while passing received data to nghttp2: " + std::string(nghttp2_strerror((int)readlen)));
+        if (readlen < 0) {
+          throw std::runtime_error("Fatal error while passing received data to nghttp2: " + std::string(nghttp2_strerror(static_cast<int>(readlen))));
+        }
+        if (static_cast<size_t>(readlen) < conn->d_inPos) {
+          throw std::runtime_error("Data was not entirely processed (" + std::to_string(readlen) + " bytes out of " + std::to_string(conn->d_inPos) + ") while passing received data to nghttp2");
         }
 
         struct timeval now{
@@ -413,8 +435,10 @@ void DoHConnectionToBackend::handleReadableIOCallback(int fd, FDMultiplexer::fun
         gettimeofday(&now, nullptr);
         conn->d_lastDataReceivedTime = now;
 
-        // cerr<<"after read send"<<endl;
-        nghttp2_session_send(conn->d_session.get());
+        auto sendCode = nghttp2_session_send(conn->d_session.get());
+        if (sendCode != 0) {
+          throw std::runtime_error("Fatal error while flushing HTTP data: " + std::string(nghttp2_strerror(sendCode)));
+        }
       }
 
       if (newState == IOState::Done) {
@@ -427,7 +451,6 @@ void DoHConnectionToBackend::handleReadableIOCallback(int fd, FDMultiplexer::fun
       }
       else {
         if (newState == IOState::NeedWrite) {
-          // cerr<<"need write"<<endl;
           conn->updateIO(IOState::NeedWrite, handleReadableIOCallback);
         }
         ioGuard.release();
@@ -452,15 +475,12 @@ void DoHConnectionToBackend::handleWritableIOCallback(int fd, FDMultiplexer::fun
   }
   IOStateGuard ioGuard(conn->d_ioState);
 
-  // cerr<<"in "<<__PRETTY_FUNCTION__<<" trying to write "<<conn->d_out.size()-conn->d_outPos<<endl;
   try {
     IOState newState = conn->d_handler->tryWrite(conn->d_out, conn->d_outPos, conn->d_out.size());
-    // cerr<<"got a "<<(int)newState<<" state, "<<conn->d_out.size()-conn->d_outPos<<" bytes remaining"<<endl;
     if (newState == IOState::NeedRead) {
       conn->updateIO(IOState::NeedRead, handleWritableIOCallback);
     }
     else if (newState == IOState::Done) {
-      // cerr<<"done, buffer size was "<<conn->d_out.size()<<", pos was "<<conn->d_outPos<<endl;
       conn->d_firstWrite = false;
       conn->d_out.clear();
       conn->d_outPos = 0;
@@ -536,7 +556,7 @@ void DoHConnectionToBackend::updateIO(IOState newState, const FDMultiplexer::cal
 void DoHConnectionToBackend::watchForRemoteHostClosingConnection()
 {
   if (willBeReusable(false) && !d_healthCheckQuery) {
-    updateIO(IOState::NeedRead, handleReadableIOCallback, false);
+    updateIO(IOState::NeedRead, handleReadableIOCallback, true);
   }
 }
 
@@ -544,7 +564,7 @@ ssize_t DoHConnectionToBackend::send_callback(nghttp2_session* session, const ui
 {
   (void)session;
   (void)flags;
-  DoHConnectionToBackend* conn = reinterpret_cast<DoHConnectionToBackend*>(user_data);
+  auto* conn = static_cast<DoHConnectionToBackend*>(user_data);
   bool bufferWasEmpty = conn->d_out.empty();
   if (!conn->d_proxyProtocolPayloadSent && !conn->d_proxyProtocolPayload.empty()) {
     conn->d_out.insert(conn->d_out.end(), conn->d_proxyProtocolPayload.begin(), conn->d_proxyProtocolPayload.end());
@@ -555,9 +575,7 @@ ssize_t DoHConnectionToBackend::send_callback(nghttp2_session* session, const ui
 
   if (bufferWasEmpty) {
     try {
-      // cerr<<"in "<<__PRETTY_FUNCTION__<<" trying to write "<<conn->d_out.size()-conn->d_outPos<<endl;
       auto state = conn->d_handler->tryWrite(conn->d_out, conn->d_outPos, conn->d_out.size());
-      // cerr<<"got a "<<(int)state<<" state, "<<conn->d_out.size()-conn->d_outPos<<" bytes remaining"<<endl;
       if (state == IOState::Done) {
         conn->d_firstWrite = false;
         conn->d_out.clear();
@@ -588,9 +606,9 @@ ssize_t DoHConnectionToBackend::send_callback(nghttp2_session* session, const ui
 int DoHConnectionToBackend::on_frame_recv_callback(nghttp2_session* session, const nghttp2_frame* frame, void* user_data)
 {
   (void)session;
-  DoHConnectionToBackend* conn = reinterpret_cast<DoHConnectionToBackend*>(user_data);
-  // cerr<<"Frame type is "<<std::to_string(frame->hd.type)<<endl;
+  auto* conn = static_cast<DoHConnectionToBackend*>(user_data);
 #if 0
+  // cerr<<"Frame type is "<<std::to_string(frame->hd.type)<<endl;
   switch (frame->hd.type) {
   case NGHTTP2_HEADERS:
     cerr<<"got headers"<<endl;
@@ -619,10 +637,9 @@ int DoHConnectionToBackend::on_frame_recv_callback(nghttp2_session* session, con
   }
 
   /* is this the last frame for this stream? */
-  else if ((frame->hd.type == NGHTTP2_HEADERS || frame->hd.type == NGHTTP2_DATA) && frame->hd.flags & NGHTTP2_FLAG_END_STREAM) {
+  else if ((frame->hd.type == NGHTTP2_HEADERS || frame->hd.type == NGHTTP2_DATA) && (frame->hd.flags & NGHTTP2_FLAG_END_STREAM) != 0) {
     auto stream = conn->d_currentStreams.find(frame->hd.stream_id);
     if (stream != conn->d_currentStreams.end()) {
-      // cerr<<"Stream "<<frame->hd.stream_id<<" is now finished"<<endl;
       stream->second.d_finished = true;
       ++conn->d_queries;
 
@@ -663,8 +680,7 @@ int DoHConnectionToBackend::on_data_chunk_recv_callback(nghttp2_session* session
 {
   (void)session;
   (void)flags;
-  DoHConnectionToBackend* conn = reinterpret_cast<DoHConnectionToBackend*>(user_data);
-  // cerr<<"Got data of size "<<len<<" for stream "<<stream_id<<endl;
+  auto* conn = static_cast<DoHConnectionToBackend*>(user_data);
   auto stream = conn->d_currentStreams.find(stream_id);
   if (stream == conn->d_currentStreams.end()) {
     VERBOSESLOG(infolog("Unable to match the stream ID %d to a known one!", stream_id),
@@ -710,13 +726,12 @@ int DoHConnectionToBackend::on_data_chunk_recv_callback(nghttp2_session* session
 int DoHConnectionToBackend::on_stream_close_callback(nghttp2_session* session, StreamID stream_id, uint32_t error_code, void* user_data)
 {
   (void)session;
-  DoHConnectionToBackend* conn = reinterpret_cast<DoHConnectionToBackend*>(user_data);
+  auto* conn = static_cast<DoHConnectionToBackend*>(user_data);
 
   if (error_code == 0) {
     return 0;
   }
 
-  // cerr << "Stream " << stream_id << " closed with error_code=" << error_code << endl;
   conn->d_connectionDied = true;
   ++conn->d_ds->tcpDiedReadingResponse;
 
@@ -733,20 +748,24 @@ int DoHConnectionToBackend::on_stream_close_callback(nghttp2_session* session, S
   auto request = std::move(stream->second);
   conn->d_currentStreams.erase(stream->first);
 
-  // cerr<<"Query has "<<request.d_query.d_downstreamFailures<<" failures, backend limit is "<<conn->d_ds->d_retries<<endl;
   if (request.d_query.d_downstreamFailures < conn->d_ds->d_config.d_retries) {
-    // cerr<<"in "<<__PRETTY_FUNCTION__<<", looking for a connection to send a query of size "<<request.d_query.d_buffer.size()<<endl;
     ++request.d_query.d_downstreamFailures;
-    auto downstream = t_downstreamDoHConnectionsManager.getConnectionToDownstream(conn->d_mplexer, conn->d_ds, now, std::string(conn->d_proxyProtocolPayload));
-    downstream->queueQuery(request.d_sender, std::move(request.d_query));
+    try {
+      auto downstream = t_downstreamDoHConnectionsManager.getConnectionToDownstream(conn->d_mplexer, conn->d_ds, now, std::string(conn->d_proxyProtocolPayload));
+      downstream->queueQuery(request.d_sender, std::move(request.d_query));
+    }
+    catch (const std::exception& exp) {
+      ++conn->d_ds->tcpDiedSendingQuery;
+      VERBOSESLOG(infolog("Failed to retry DoH query after stream close: %s", exp.what()),
+                  conn->getLogger()->error(Logr::Info, exp.what(), "Failed to retry DoH query after stream close"));
+      conn->handleResponseError(std::move(request), now);
+    }
   }
   else {
     conn->handleResponseError(std::move(request), now);
   }
 
-  // cerr<<"we now have "<<conn->getConcurrentStreamsCount()<<" concurrent connections"<<endl;
   if (conn->isIdle()) {
-    // cerr<<"stopping IO"<<endl;
     conn->stopIO();
     conn->watchForRemoteHostClosingConnection();
   }
@@ -758,13 +777,10 @@ int DoHConnectionToBackend::on_header_callback(nghttp2_session* session, const n
 {
   (void)session;
   (void)flags;
-  DoHConnectionToBackend* conn = reinterpret_cast<DoHConnectionToBackend*>(user_data);
+  auto* conn = static_cast<DoHConnectionToBackend*>(user_data);
 
   const std::string status(":status");
   if (frame->hd.type == NGHTTP2_HEADERS && frame->headers.cat == NGHTTP2_HCAT_RESPONSE) {
-    // cerr<<"got header for "<<frame->hd.stream_id<<":"<<endl;
-    // cerr<<"- "<<std::string(reinterpret_cast<const char*>(name), namelen)<<endl;
-    // cerr<<"- "<<std::string(reinterpret_cast<const char*>(value), valuelen)<<endl;
     if (namelen == status.size() && memcmp(status.data(), name, status.size()) == 0) {
       auto stream = conn->d_currentStreams.find(frame->hd.stream_id);
       if (stream == conn->d_currentStreams.end()) {
@@ -791,12 +807,13 @@ int DoHConnectionToBackend::on_header_callback(nghttp2_session* session, const n
 int DoHConnectionToBackend::on_error_callback(nghttp2_session* session, int lib_error_code, const char* msg, size_t len, void* user_data)
 {
   (void)session;
-  DoHConnectionToBackend* conn = reinterpret_cast<DoHConnectionToBackend*>(user_data);
+  const auto* conn = static_cast<const DoHConnectionToBackend*>(user_data);
   VERBOSESLOG(infolog("Error in HTTP/2 connection: %s (%d)", std::string(msg, len), lib_error_code),
               conn->getLogger()->error(Logr::Info, std::string(msg, len), "Error in HTTP/2 connection", "nghttp2.error_code", Logging::Loggable(lib_error_code)));
 
-  conn->d_connectionDied = true;
-  ++conn->d_ds->tcpDiedReadingResponse;
+  /* nothing to do except logging here, the library will take
+     care of closing the offending stream if possible, or the whole
+     connection if needed. */
 
   return 0;
 }
@@ -839,23 +856,23 @@ DoHConnectionToBackend::DoHConnectionToBackend(const std::shared_ptr<DownstreamS
 
   callbacks.reset();
 
-  nghttp2_settings_entry iv[] = {
+  const std::array settings{
     /* rfc7540 section-8.2.2:
        "Advertising a SETTINGS_MAX_CONCURRENT_STREAMS value of zero disables
        server push by preventing the server from creating the necessary
        streams."
     */
-    {NGHTTP2_SETTINGS_MAX_CONCURRENT_STREAMS, 0},
-    {NGHTTP2_SETTINGS_ENABLE_PUSH, 0},
+    nghttp2_settings_entry{NGHTTP2_SETTINGS_MAX_CONCURRENT_STREAMS, 0},
+    nghttp2_settings_entry{NGHTTP2_SETTINGS_ENABLE_PUSH, 0},
     /* we might want to make the initial window size configurable, but 16M is a large enough default */
-    {NGHTTP2_SETTINGS_INITIAL_WINDOW_SIZE, 16 * 1024 * 1024}};
+    nghttp2_settings_entry{NGHTTP2_SETTINGS_INITIAL_WINDOW_SIZE, 16 * 1024 * 1024}};
   /* client 24 bytes magic string will be sent by nghttp2 library */
-  int rv = nghttp2_submit_settings(d_session.get(), NGHTTP2_FLAG_NONE, iv, sizeof(iv) / sizeof(*iv));
-  if (rv != 0) {
+  auto value = nghttp2_submit_settings(d_session.get(), NGHTTP2_FLAG_NONE, settings.data(), settings.size());
+  if (value != 0) {
     d_connectionDied = true;
     ++d_ds->tcpDiedSendingQuery;
-    VERBOSESLOG(infolog("Could not submit SETTINGS: %s", nghttp2_strerror(rv)),
-                ConnectionToBackend::getLogger()->error(Logr::Info, nghttp2_strerror(rv), "Could not submit SETTINGS"));
+    VERBOSESLOG(infolog("Could not submit SETTINGS: %s", nghttp2_strerror(value)),
+                ConnectionToBackend::getLogger()->error(Logr::Info, nghttp2_strerror(value), "Could not submit SETTINGS"));
     return;
   }
 }
@@ -863,7 +880,7 @@ DoHConnectionToBackend::DoHConnectionToBackend(const std::shared_ptr<DownstreamS
 static void handleCrossProtocolQuery(int pipefd, FDMultiplexer::funcparam_t& param)
 {
   (void)pipefd;
-  auto threadData = boost::any_cast<DoHClientThreadData*>(param);
+  auto* threadData = boost::any_cast<DoHClientThreadData*>(param);
 
   std::unique_ptr<CrossProtocolQuery> cpq{nullptr};
   try {

@@ -90,6 +90,9 @@ void ZoneData::parseDRForCache(DNSRecord& dnsRecord)
   if (dnsRecord.d_class != QClass::IN) {
     return;
   }
+  if (!dnsRecord.d_name.isPartOf(d_zone)) {
+    return;
+  }
   const auto key = pair(dnsRecord.d_name, dnsRecord.d_type);
 
   dnsRecord.d_ttl += d_now;
@@ -143,10 +146,10 @@ pdns::ZoneMD::Result ZoneData::getByAXFR(const RecZoneToCache::Config& config, p
   const TSIGTriplet tsigTriplet = config.d_tt;
   ComboAddress local = config.d_local;
   if (local == ComboAddress()) {
-    local = pdns::getQueryLocalAddress(primary.sin4.sin_family, 0);
+    local = pdns::getQueryLocalAddress(primary.sin4.sin_family, 0).d_address;
   }
 
-  AXFRRetriever axfr(primary, d_zone, tsigTriplet, &local, maxReceivedBytes, axfrTimeout);
+  AXFRRetriever axfr(d_log, primary, d_zone, tsigTriplet, &local, maxReceivedBytes, axfrTimeout);
   Resolver::res_t nop;
   vector<DNSRecord> chunk;
   time_t axfrStart = time(nullptr);
@@ -155,7 +158,7 @@ pdns::ZoneMD::Result ZoneData::getByAXFR(const RecZoneToCache::Config& config, p
   // coverity[store_truncates_time_t]
   while (axfr.getChunk(nop, &chunk, (axfrStart + axfrTimeout - axfrNow)) != 0) {
     for (auto& dnsRecord : chunk) {
-      if (config.d_zonemd != pdns::ZoneMD::Config::Ignore) {
+      if (config.d_zonemd != pdns::ZoneMD::Config::Ignore || config.d_dnssec != pdns::ZoneMD::Config::Ignore) {
         zonemd.readRecord(dnsRecord);
       }
       parseDRForCache(dnsRecord);
@@ -202,7 +205,7 @@ static std::vector<std::string> getURL([[maybe_unused]] const RecZoneToCache::Co
 #ifdef HAVE_LIBCURL
   MiniCurl miniCurl;
   ComboAddress local = config.d_local;
-  std::string reply = miniCurl.getURL(config.d_sources.at(0), nullptr, local == ComboAddress() ? nullptr : &local, static_cast<int>(config.d_timeout), false, true);
+  std::string reply = miniCurl.getURL(config.d_sources.at(0), nullptr, local == ComboAddress() ? nullptr : &local, static_cast<int>(config.d_timeout), nullptr, false, true);
   if (config.d_maxReceivedBytes > 0 && reply.size() > config.d_maxReceivedBytes) {
     // We should actually detect this *during* the GET
     throw std::runtime_error("Retrieved data exceeds maxReceivedBytes");

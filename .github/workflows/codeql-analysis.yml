@@ -22,6 +22,9 @@ permissions: # least privileges, see https://docs.github.com/en/actions/using-wo
 # merging the results for all processed files to a YAML file. Finally clang-tidy.py converts the YAML output to GitHub annotations
 # (GitHub only supports 10 of these per job, the rest are not displayed) and to GitHub markdown step summary (which has no such limits).
 
+env:
+  BUILDER_VERSION: '0.0.0-git1'
+
 jobs:
   analyze:
     name: Analyze
@@ -62,7 +65,7 @@ jobs:
     steps:
     - uses: PowerDNS/pdns/set-ubuntu-mirror@meta
     - name: Checkout repository
-      uses: actions/checkout@v5
+      uses: actions/checkout@v7
       with:
         # We must fetch at least the immediate parents so that if this is
         # a pull request then we can checkout the head.
@@ -70,13 +73,14 @@ jobs:
         persist-credentials: false
     - uses: actions/setup-python@v6
       with:
-        python-version: '3.11'
+        python-version: '3.13'
 
     # Initializes the CodeQL tools for scanning.
     - name: Initialize CodeQL
       uses: github/codeql-action/init@v4
       with:
         languages: ${{ matrix.language }}
+        build-mode: manual
         queries: +security-and-quality
         # TODO: go through +security-and-quality (400 alerts) once, then see if we can upgrade to it
 
@@ -156,34 +160,35 @@ jobs:
     - name: Install python yaml
       run: |
         pip install pyyaml
-    - name: Autoreconf dnsdist
-      if: matrix.product == 'dnsdist'
-      working-directory: ./pdns/dnsdistdist/
-      run: |
-        inv ci-autoconf
     - run: inv ci-install-rust $REPO_HOME
       if: matrix.product == 'dnsdist'
       working-directory: ./pdns/dnsdistdist/
     - run: inv ci-build-and-install-quiche $REPO_HOME
       if: matrix.product == 'dnsdist'
       working-directory: ./pdns/dnsdistdist/
+    - name: install pip build dependencies
+      if: matrix.product == 'dnsdist'
+      uses: ./.github/actions/pip-build-dependencies
+      with:
+        venv-parent: ${{ env.REPO_HOME }}
+        working-directory: .
     - name: Configure dnsdist
       if: matrix.product == 'dnsdist'
       working-directory: ./pdns/dnsdistdist/
       run: |
-        inv ci-dnsdist-configure full autotools ''
+        inv ci-dnsdist-configure full build
     - name: Build dnsdist
       if: matrix.product == 'dnsdist'
       working-directory: ./pdns/dnsdistdist/
       run: |
-        inv ci-dnsdist-make-bear autotools
+        inv ci-dnsdist-run-ninja build
     - run: ln -s ../../.clang-tidy.full .clang-tidy
       if: matrix.product == 'dnsdist'
       working-directory: ./pdns/dnsdistdist/
     - name: Run clang-tidy for dnsdist
       if: matrix.product == 'dnsdist'
       working-directory: ./pdns/dnsdistdist/
-      run: git diff --no-prefix -U0 HEAD^..HEAD | /usr/bin/python3 ../../.github/scripts/git-filter.py --product dnsdist | /usr/bin/python3 ../../.github/scripts/clang-tidy-diff.py -clang-tidy-binary /usr/bin/clang-tidy-${CLANG_VERSION} -extra-arg=-ferror-limit=0 -p0 -export-fixes clang-tidy-dnsdist.yml
+      run: git diff --no-prefix -U0 HEAD^..HEAD | /usr/bin/python3 ../../.github/scripts/git-filter.py --product dnsdist --database build | /usr/bin/python3 ../../.github/scripts/clang-tidy-diff.py -clang-tidy-binary /usr/bin/clang-tidy-${CLANG_VERSION} -extra-arg=-ferror-limit=0 -p0 -export-fixes clang-tidy-dnsdist.yml
     - name: Print clang-tidy fixes YAML for dnsdist
       if: matrix.product == 'dnsdist'
       working-directory: ./pdns/dnsdistdist/
@@ -211,28 +216,29 @@ jobs:
     - run: inv ci-install-rust $REPO_HOME
       if: matrix.product == 'rec'
       working-directory: ./pdns/recursordist/
-    - name: Autoreconf rec
+    - name: install pip build dependencies
       if: matrix.product == 'rec'
-      working-directory: ./pdns/recursordist/
-      run: |
-        inv ci-autoconf
+      uses: ./.github/actions/pip-build-dependencies
+      with:
+        venv-parent: ${{ env.REPO_HOME }}
+        working-directory: .
     - name: Configure rec
       if: matrix.product == 'rec'
       working-directory: ./pdns/recursordist/
       run: |
-        inv ci-rec-configure full
+        inv ci-rec-configure full build
     - name: Build rec
       if: matrix.product == 'rec'
       working-directory: ./pdns/recursordist/
       run: |
-        CONCURRENCY=4 inv ci-rec-make-bear
+        CONCURRENCY=4 inv ci-rec-run-ninja build
     - run: ln -s ../../.clang-tidy.full .clang-tidy
       if: matrix.product == 'rec'
       working-directory: ./pdns/recursordist/
     - name: Run clang-tidy for rec
       if: matrix.product == 'rec'
       working-directory: ./pdns/recursordist/
-      run: git diff --no-prefix -U0 HEAD^..HEAD | /usr/bin/python3 ../../.github/scripts/git-filter.py --product rec | /usr/bin/python3 ../../.github/scripts/clang-tidy-diff.py -clang-tidy-binary /usr/bin/clang-tidy-${CLANG_VERSION} -extra-arg=-ferror-limit=0 -p0 -export-fixes clang-tidy-rec.yml
+      run: git diff --no-prefix -U0 HEAD^..HEAD | /usr/bin/python3 ../../.github/scripts/git-filter.py --product rec --database build | /usr/bin/python3 ../../.github/scripts/clang-tidy-diff.py -clang-tidy-binary /usr/bin/clang-tidy-${CLANG_VERSION} -extra-arg=-ferror-limit=0 -p0 -export-fixes clang-tidy-rec.yml
     - name: Print clang-tidy fixes YAML for rec
       if: matrix.product == 'rec'
       working-directory: ./pdns/recursordist/
@@ -285,8 +291,27 @@ jobs:
     if: ${{ github.event_name == 'pull_request' }}
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v5
+      uses: actions/checkout@v7
       with:
         fetch-depth: 2
         persist-credentials: false
     - run: if [[ "$(file -i --dereference $(git diff --name-only HEAD^..HEAD -- . :^fuzzing/corpus) | grep binary | grep -v 'image/' | grep -v 'inode/x-empty' | grep -v 'inode/directory' | grep -v '^modules/lmdbbackend/test-assets/' | grep -v '^website/docs.powerdns.com/website/fonts/' | grep -v '^website/docs.powerdns.com/website/img/' | grep -v '^modules/tinydnsbackend/data.cdb' | tee /dev/stderr)" != "" ]]; then exit 1; fi
+
+  check-python-formatting:
+    runs-on: ubuntu-22.04
+    name: Check formatting of Python scripts
+    if: ${{ github.event_name == 'pull_request' }}
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v7
+      with:
+        fetch-depth: 0
+        persist-credentials: false
+    - name: Check Python formatting
+      uses: astral-sh/ruff-action@v4.1.0
+      with:
+        args: 'format --check --diff'
+    - name: Check method variables
+      uses: astral-sh/ruff-action@v4.1.0
+      with:
+        args: 'check --select N805'

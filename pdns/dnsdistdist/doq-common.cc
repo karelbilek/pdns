@@ -26,6 +26,9 @@
 
 #ifdef HAVE_DNS_OVER_QUIC
 
+#include "dnsdist.hh"
+#include "dnsdist-concurrent-connections.hh"
+
 #if 0
 #define DEBUGLOG_ENABLED
 #define DEBUGLOG(x) std::cerr << x << std::endl;
@@ -154,12 +157,11 @@ static void sendFromTo(Socket& sock, const ComboAddress& peer, const ComboAddres
     return;
   }
 
-  try {
-    sendMsgWithOptions(sock.getHandle(), buffer.data(), buffer.size(), &peer, &local, 0, 0);
-  }
-  catch (const std::exception& exp) {
-    VERBOSESLOG(infolog("Error while sending QUIC datagram of size %d from %s to %s: %s", buffer.size(), local.toStringWithPort(), peer.toStringWithPort(), exp.what()),
-                dnsdist::logging::getTopLogger("quic-send-from-to")->error(Logr::Info, exp.what(), "Error while sending QUIC datagram", "datagram_size", Logging::Loggable(buffer.size()), "source.address", Logging::Loggable(local), "client.address", Logging::Loggable(peer)));
+  auto ret = sendMsgWithOptions(sock.getHandle(), buffer.data(), buffer.size(), &peer, &local, 0, 0);
+
+  if (!ret.has_value()) {
+    VERBOSESLOG(infolog("Error while sending QUIC datagram of size %d from %s to %s: %s", buffer.size(), local.toStringWithPort(), peer.toStringWithPort(), stringerror(ret.error())),
+                dnsdist::logging::getTopLogger("quic-send-from-to")->error(Logr::Info, ret.error(), "Error while sending QUIC datagram", "datagram_size", Logging::Loggable(buffer.size()), "source.address", Logging::Loggable(local), "client.address", Logging::Loggable(peer)));
   }
 }
 
@@ -348,6 +350,68 @@ std::string getSNIFromQuicheConnection([[maybe_unused]] const QuicheConnection& 
 #endif /* HAVE_QUICHE_CONN_SERVER_NAME */
   return {};
 }
+
+void configureQLog([[maybe_unused]] const QuicheConnection& conn, [[maybe_unused]] const std::string& qLogDir, [[maybe_unused]] const ComboAddress& peer)
+{
+#ifdef HAVE_QUICHE_CONN_SET_QLOG_PATH
+  const unsigned char* trace_id = nullptr;
+  size_t trace_id_len = 0;
+  quiche_conn_trace_id(conn.get(), &trace_id, &trace_id_len);
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast): std::string's API
+  auto path = (qLogDir + "/" + std::string(reinterpret_cast<const char*>(trace_id), trace_id_len)) + ".qlog";
+  auto description = "peer_ip=" + peer.toString();
+  if (!quiche_conn_set_qlog_path(conn.get(), path.c_str(), "", description.c_str())) {
+    VERBOSESLOG(infolog("QLOG creation failed for connection from $s", peer.toStringWithPort()),
+                dnsdist::logging::getTopLogger("quic-qlog")->info(Logr::Info, "QLOG creation failed", "client.address", Logging::Loggable(peer)));
+  }
+#endif
 }
 
+QUICConnection::QUICConnection(ClientState& frontend, const ComboAddress& peer, const ComboAddress& localAddr, QuicheConfig config, QuicheConnection&& conn) :
+  d_frontend(frontend), d_peer(peer), d_localAddr(localAddr), d_conn(std::move(conn)), d_config(std::move(config))
+{
+  auto concurrentConnections = ++d_frontend.tcpCurrentConnections;
+  if (concurrentConnections > d_frontend.tcpMaxConcurrentConnections.load()) {
+    d_frontend.tcpMaxConcurrentConnections.store(concurrentConnections);
+  }
+}
+
+QUICConnection::~QUICConnection()
+{
+  try {
+    /* do not account if we have been moved! */
+    if (d_conn) {
+      --d_frontend.tcpCurrentConnections;
+
+      dnsdist::IncomingConcurrentTCPConnectionsManager::accountClosedTCPConnection(d_peer);
+
+      timeval now{};
+      gettimeofday(&now, nullptr);
+      auto diff = now - d_connectionStartTime;
+      d_frontend.updateTCPMetrics(d_queriesCount, (diff.tv_sec * 1000) + (diff.tv_usec / 1000), d_queriesCount > 0 ? d_readIOsTotal / d_queriesCount : d_readIOsTotal);
+
+      if (!quiche_conn_is_resumed(d_conn.get())) {
+        ++d_frontend.tlsNewSessions;
+        dnsdist::IncomingConcurrentTCPConnectionsManager::accountTLSNewSession(d_peer);
+      }
+      else {
+        ++d_frontend.tlsResumptions;
+        dnsdist::IncomingConcurrentTCPConnectionsManager::accountTLSResumedSession(d_peer);
+      }
+    }
+  }
+  catch (...) {
+    /* in theory it might raise an exception, and we cannot allow it to be uncaught in a dtor */
+  }
+}
+
+std::shared_ptr<const std::string> QUICConnection::getSNI()
+{
+  if (!d_sni) {
+    d_sni = std::make_shared<const std::string>(getSNIFromQuicheConnection(d_conn));
+  }
+  return d_sni;
+}
+
+}
 #endif

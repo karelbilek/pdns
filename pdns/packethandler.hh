@@ -23,11 +23,13 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include "protozero.hh"
 #include "ueberbackend.hh"
 #include "dnspacket.hh"
 #include "packetcache.hh"
 #include "dnsseckeeper.hh"
 #include "lua-auth4.hh"
+#include "pdns/logging.hh"
 
 #include "namespaces.hh"
 
@@ -54,7 +56,7 @@ class PacketHandler
 public:
   std::unique_ptr<DNSPacket> doQuestion(DNSPacket&); //!< hand us a DNS packet with a question, we give you an answer
   std::unique_ptr<DNSPacket> question(DNSPacket&); //!< hand us a DNS packet with a question, we give you an answer
-  PacketHandler(); 
+  PacketHandler(Logr::log_t slog); 
   ~PacketHandler(); // defined in packethandler.cc, and does --count
   static int numRunning(){return s_count;}; //!< Returns the number of running PacketHandlers. Called by Distributor
  
@@ -65,10 +67,12 @@ public:
   static NetmaskGroup s_allowNotifyFrom;
   static set<string> s_forwardNotify;
   static bool s_SVCAutohints;
+  static bool s_NAPTRprocessing;
   static const std::shared_ptr<CDNSKEYRecordContent> s_deleteCDNSKEYContent;
   static const std::shared_ptr<CDSRecordContent> s_deleteCDSContent;
 
 private:
+  std::unique_ptr<DNSPacket> doQuestionInner(DNSPacket&); //!< hand us a DNS packet with a question, we give you an answer
   int tryAutoPrimary(const DNSPacket& p);
   int processNotify(const DNSPacket& );
   void addRootReferral(DNSPacket& r);
@@ -80,6 +84,7 @@ private:
   bool addCDS(DNSPacket& p, std::unique_ptr<DNSPacket>& r);
   bool addNSEC3PARAM(const DNSPacket& p, std::unique_ptr<DNSPacket>& r);
   void doAdditionalProcessing(DNSPacket& p, std::unique_ptr<DNSPacket>& r);
+  void doAdditionalNAPTRProcessing(DNSPacket& p, const DNSZoneRecord& rr, std::unordered_set<DNSName>& lookup, vector<DNSZoneRecord>& extraRecords);
   DNSName doAdditionalServiceProcessing(const DNSName &firstTarget, const uint16_t &qtype, std::unique_ptr<DNSPacket>& r, vector<DNSZoneRecord>& extraRecords);
 
   //! Get all IPv4 or IPv6 addresses (based on |qtype|) for |target|.
@@ -88,6 +93,8 @@ private:
   void addNSEC(DNSPacket& p, std::unique_ptr<DNSPacket>& r, const DNSName &target, const DNSName &wildcard, int mode);
   bool getNSEC3Hashes(bool narrow, const std::string& hashed, bool decrement, DNSName& unhashed, std::string& before, std::string& after, int mode=0);
   void addNSEC3(DNSPacket& p, std::unique_ptr<DNSPacket>& r, const DNSName &target, const DNSName &wildcard, const NSEC3PARAMRecordContent& nsec3param, bool narrow, int mode);
+  void computeNSECbitmap1(NSECBitmap& bitmap);
+  void computeNSECbitmap2(NSECBitmap& bitmap, const DNSName& name);
   void emitNSEC(std::unique_ptr<DNSPacket>& r, const DNSName& name, const DNSName& next, int mode);
   void emitNSEC3(DNSPacket& p, std::unique_ptr<DNSPacket>& r, const NSEC3PARAMRecordContent &ns3prc, const DNSName& name, const string& namehash, const string& nexthash, int mode);
   int processUpdate(DNSPacket& p);
@@ -140,9 +147,9 @@ private:
   bool d_dnssec{false};
   SOAData d_sd;
   std::unique_ptr<AuthLua4> d_pdl;
-  std::unique_ptr<AuthLua4> d_update_policy_lua;
   std::unique_ptr<AuthLua4> s_LUA;
-  UeberBackend B; // every thread an own instance
+  std::shared_ptr<Logr::Logger> d_slog;
+  UeberBackend B; // every thread has its own instance
   DNSSECKeeper d_dk; // B is shared with DNSSECKeeper
 };
 

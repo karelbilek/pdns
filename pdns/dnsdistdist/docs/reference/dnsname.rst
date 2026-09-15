@@ -35,24 +35,22 @@ Functions and methods of a ``DNSName``
   A ``DNSName`` object represents a name in the DNS.
   It is returned by several functions and has several functions to programmatically interact with it.
 
-  .. method:: DNSName:chopOff() -> bool
+  .. method:: chopOff() -> bool
 
     Removes the left-most label and returns ``true``.
     ``false`` is returned if no label was removed
 
-  .. method:: DNSName:countLabels() -> int
+  .. method:: countLabels() -> int
 
     Returns the number of DNSLabels in the name
 
-  .. method:: DNSName:isPartOf(name) -> bool
+  .. method:: isPartOf(name) -> bool
 
     Returns true if the DNSName is part of the DNS tree of ``name``.
 
     :param DNSName name: The name to check against
 
-  .. method:: DNSName:makeRelative(name) -> DNSName
-
-    .. versionadded:: 1.8.0
+  .. method:: makeRelative(name) -> DNSName
 
     Provided that the current name is part of the supplied name, returns a new DNSName
     composed only of the labels that are below the supplied name (ie making www.powerdns.com
@@ -61,38 +59,37 @@ Functions and methods of a ``DNSName``
 
     :param DNSName name: The name to make us relative against
 
-  .. method:: DNSName:toDNSString() -> string
+  .. method:: toDNSString() -> string
 
     Returns a wire format form of the DNSName, suitable for usage in :func:`SpoofRawAction`.
 
-  .. method:: DNSName:toString() -> string
+  .. method:: toString() -> string
               DNSName:tostring() -> string
 
     Returns a human-readable form of the DNSName.
 
-  .. method:: DNSName:toStringNoDot() -> string
-
-    .. versionadded:: 1.8.0
+  .. method:: toStringNoDot() -> string
 
     Returns a human-readable form of the DNSName, without the trailing dot.
 
-  .. method:: DNSName:wirelength() -> int
+  .. method:: wirelength() -> int
 
     Returns the length in bytes of the DNSName as it would be on the wire.
 
-  .. method:: DNSName:append(labels: [DNSName,string])
+  .. method:: append(labels: [DNSName,string])
 
     .. versionadded:: 2.2.0
 
     Append ``labels`` to the DNSName. ``labels`` can be a string or DNSName containing one or more labels.
 
-    .. codeblock:: lua
+    .. code-block:: lua
+
       local n = newDNSName("example.com")
       n:append("example") -- n is now "example.com.example"
       local other_name = newDNSName("foobar.invalid")
       n:append(other_name) -- n is now "example.com.example.foobar.invalid")
 
-  .. method:: DNSName:prepend(labels: [DNSName,string])
+  .. method:: prepend(labels: [DNSName,string])
 
     .. versionadded:: 2.2.0
 

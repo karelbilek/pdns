@@ -12,7 +12,6 @@
 #include "test-syncres_cc.hh"
 #include "recpacketcache.hh"
 
-GlobalStateHolder<LuaConfigItems> g_luaconfs;
 GlobalStateHolder<SuffixMatchNode> g_xdnssec;
 GlobalStateHolder<SuffixMatchNode> g_dontThrottleNames;
 GlobalStateHolder<NetmaskGroup> g_dontThrottleNetmasks;
@@ -33,6 +32,10 @@ ArgvMap& arg()
 BaseLua4::~BaseLua4() = default;
 
 void BaseLua4::getFeatures(Features& /* features */)
+{
+}
+
+void BaseLua4::prepareContext()
 {
 }
 
@@ -117,14 +120,6 @@ bool primeHints(time_t now)
   }
   g_recCache->replace(now, g_rootdnsname, QType(QType::NS), nsset, vector<std::shared_ptr<const RRSIGRecordContent>>(), {}, false, g_rootdnsname); // and stuff in the cache
   return true;
-}
-
-LuaConfigItems::LuaConfigItems()
-{
-  for (const auto& dsRecord : rootDSs) {
-    auto ds = std::dynamic_pointer_cast<DSRecordContent>(DSRecordContent::make(dsRecord));
-    dsAnchors[g_rootdnsname].insert(*ds);
-  }
 }
 
 /* Some helpers functions */
@@ -239,13 +234,12 @@ void initSR(std::unique_ptr<SyncRes>& sr, bool dnssec, bool debug, time_t fakeNo
     now.tv_usec = 0;
   }
   else {
-    Utility::gettimeofday(&now, 0);
+    gettimeofday(&now, nullptr);
   }
 
   initSR(debug);
 
   sr = std::make_unique<SyncRes>(now);
-  sr->setDoEDNS0(true);
   if (dnssec) {
     sr->setDoDNSSEC(dnssec);
   }
@@ -493,11 +487,12 @@ void addNSEC3NarrowRecordToLW(const DNSName& domain, const DNSName& zone, const 
 
 void generateKeyMaterial(const DNSName& name, unsigned int algo, uint8_t digest, testkeysset_t& keys)
 {
-  auto dcke = std::shared_ptr<DNSCryptoKeyEngine>(DNSCryptoKeyEngine::make(algo));
+  auto log = g_slog->withName("testrunner");
+  auto dcke = std::shared_ptr<DNSCryptoKeyEngine>(DNSCryptoKeyEngine::make(log, algo));
   dcke->create((algo <= 10) ? 2048 : dcke->getBits());
   DNSSECPrivateKey dpk;
   dpk.setKey(dcke, 256);
-  DSRecordContent ds = makeDSFromDNSKey(name, dpk.getDNSKEY(), digest);
+  DSRecordContent ds = makeDSFromDNSKey(log, name, dpk.getDNSKEY(), digest);
   keys[name] = std::pair<DNSSECPrivateKey, DSRecordContent>(dpk, ds);
 }
 

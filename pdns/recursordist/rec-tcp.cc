@@ -23,7 +23,6 @@
 #include "rec-main.hh"
 
 #include "arguments.hh"
-#include "logger.hh"
 #include "mplexer.hh"
 #include "uuid-utils.hh"
 
@@ -73,17 +72,15 @@ static thread_local std::unique_ptr<tcpClientCounts_t> t_tcpClientCounts = std::
 
 static void handleRunningTCPQuestion(int fileDesc, FDMultiplexer::funcparam_t& var);
 
-#if 0
+#define REC_DEBUG_TCP 0 // NOLINT(cppcoreguidelines-macro-usage)
+#if REC_DEBUG_TCP
 #define TCPLOG(tcpsock, x)                                 \
   do {                                                     \
     cerr << []() { timeval t; gettimeofday(&t, nullptr); return t.tv_sec % 10  + t.tv_usec/1000000.0; }() << " FD " << (tcpsock) << ' ' << x; \
   } while (0)
 #else
-// We do not define this as empty since that produces a duplicate case label warning from clang-tidy
 #define TCPLOG(pid, x) /* NOLINT(cppcoreguidelines-macro-usage) */ \
-  while (false) {                                                  \
-    cerr << x; /* NOLINT(bugprone-macro-parentheses) */            \
-  }
+  ; // empty
 #endif
 
 std::atomic<uint32_t> TCPConnection::s_currentConnections;
@@ -118,6 +115,7 @@ static void terminateTCPConnection(int fileDesc)
     t_fdm->removeReadFD(fileDesc);
   }
   catch (const FDMultiplexerException& fde) {
+    ; //empty
   }
 }
 
@@ -152,7 +150,7 @@ static void sendErrorOverTCP(std::unique_ptr<DNSComboWriter>& comboWriter, int r
   header.cd = comboWriter->d_mdp.d_header.cd;
   header.rcode = rcode;
 
-  sendResponseOverTCP(comboWriter, packet);
+  sendResponseOverTCP(comboWriter, packet, g_slogtcpin);
 }
 
 void finishTCPReply(std::unique_ptr<DNSComboWriter>& comboWriter, bool hadError, bool updateInFlight)
@@ -177,12 +175,13 @@ void finishTCPReply(std::unique_ptr<DNSComboWriter>& comboWriter, bool hadError,
       t_fdm->removeReadFD(comboWriter->d_socket);
     }
     catch (FDMultiplexerException&) {
+      ; // empty
     }
     comboWriter->d_socket = -1;
     return;
   }
 
-  Utility::gettimeofday(&g_now, nullptr); // needs to be updated
+  gettimeofday(&g_now, nullptr); // needs to be updated
   struct timeval ttd = g_now;
 
   // If we cross from max to max-1 in flight requests, the fd was not listened to, add it back
@@ -289,12 +288,12 @@ static void doProcessTCPQuestion(std::unique_ptr<DNSComboWriter>& comboWriter, s
 {
   RecThreadInfo::self().incNumberOfDistributedQueries();
   struct timeval start{};
-  Utility::gettimeofday(&start, nullptr);
+  gettimeofday(&start, nullptr);
 
   DNSName qname;
   uint16_t qtype = 0;
   uint16_t qclass = 0;
-  bool needEDNSParse = false;
+  bool needEDNSParse = g_useIncomingECS;
   string requestorId;
   string deviceId;
   string deviceName;
@@ -369,7 +368,7 @@ static void doProcessTCPQuestion(std::unique_ptr<DNSComboWriter>& comboWriter, s
         }
         catch (const MOADNSException& moadnsexception) {
           if (g_logCommonErrors) {
-            g_slogtcpin->error(moadnsexception.what(), "Error parsing a query packet for tag determination", "qname", Logging::Loggable(qname), "exception", Logging::Loggable("MOADNSException"));
+            g_slogtcpin->error(Logr::Error, moadnsexception.what(), "Error parsing a query packet for tag determination", "qname", Logging::Loggable(qname), "exception", Logging::Loggable("MOADNSException"));
           }
         }
         catch (const std::exception& stdException) {
@@ -414,14 +413,14 @@ static void doProcessTCPQuestion(std::unique_ptr<DNSComboWriter>& comboWriter, s
   if (comboWriter->d_mdp.d_header.qr) {
     t_Counters.at(rec::Counter::ignoredCount)++;
     if (g_logCommonErrors) {
-      g_slogtcpin->info(Logr::Error, "Ignoring answer from TCP client on server socket", "remote", Logging::Loggable(comboWriter->getRemote()));
+      g_slogtcpin->info(Logr::Error, "Ignoring answer from TCP client on server socket", "remote", Logging::Loggable(comboWriter->d_remote), "source", Logging::Loggable(comboWriter->d_source));
     }
     return;
   }
   if (comboWriter->d_mdp.d_header.opcode != static_cast<unsigned>(Opcode::Query) && comboWriter->d_mdp.d_header.opcode != static_cast<unsigned>(Opcode::Notify)) {
     t_Counters.at(rec::Counter::ignoredCount)++;
     if (g_logCommonErrors) {
-      g_slogtcpin->info(Logr::Error, "Ignoring unsupported opcode from TCP client", "remote", Logging::Loggable(comboWriter->getRemote()), "opcode", Logging::Loggable(Opcode::to_s(comboWriter->d_mdp.d_header.opcode)));
+      g_slogtcpin->info(Logr::Error, "Ignoring unsupported opcode from TCP client", "remote", Logging::Loggable(comboWriter->d_remote), "source", Logging::Loggable(comboWriter->d_source), "opcode", Logging::Loggable(Opcode::to_s(comboWriter->d_mdp.d_header.opcode)));
     }
     sendErrorOverTCP(comboWriter, RCode::NotImp);
     tcpGuard.keep();
@@ -430,7 +429,7 @@ static void doProcessTCPQuestion(std::unique_ptr<DNSComboWriter>& comboWriter, s
   if (dnsheader->qdcount == 0U) {
     t_Counters.at(rec::Counter::emptyQueriesCount)++;
     if (g_logCommonErrors) {
-      g_slogtcpin->info(Logr::Error, "Ignoring empty (qdcount == 0) query on server socket", "remote", Logging::Loggable(comboWriter->getRemote()));
+      g_slogtcpin->info(Logr::Error, "Ignoring empty (qdcount == 0) query on server socket", "remote", Logging::Loggable(comboWriter->d_remote), "source", Logging::Loggable(comboWriter->d_source));
     }
     sendErrorOverTCP(comboWriter, RCode::NotImp);
     tcpGuard.keep();
@@ -458,7 +457,7 @@ static void doProcessTCPQuestion(std::unique_ptr<DNSComboWriter>& comboWriter, s
          but it means that the hash would not be computed. If some script decides at a later time to mark back the answer
          as cacheable we would cache it with a wrong tag, so better safe than sorry. */
       auto match = comboWriter->d_eventTrace.add(RecEventTrace::PCacheCheck);
-      bool cacheHit = checkForCacheHit(qnameParsed, comboWriter->d_tag, conn->data, qname, qtype, qclass, g_now, response, comboWriter->d_qhash, pbData, true, comboWriter->d_source, comboWriter->d_mappedSource);
+      bool cacheHit = checkForCacheHit(qnameParsed, comboWriter->d_tag, conn->data, qname, qtype, qclass, g_now, response, comboWriter->d_qhash, pbData, true, comboWriter->d_source, comboWriter->d_mappedSource, comboWriter->d_ecsFound, comboWriter->d_ednssubnet);
       comboWriter->d_eventTrace.add(RecEventTrace::PCacheCheck, cacheHit, false, match);
 
       if (cacheHit) {
@@ -469,10 +468,10 @@ static void doProcessTCPQuestion(std::unique_ptr<DNSComboWriter>& comboWriter, s
         }
 
         auto answerMatch = comboWriter->d_eventTrace.add(RecEventTrace::AnswerSent);
-        bool hadError = sendResponseOverTCP(comboWriter, response);
+        bool hadError = sendResponseOverTCP(comboWriter, response, g_slogtcpin);
         finishTCPReply(comboWriter, hadError, false);
         struct timeval now{};
-        Utility::gettimeofday(&now, nullptr);
+        gettimeofday(&now, nullptr);
         uint64_t spentUsec = uSec(now - start);
         t_Counters.at(rec::Histogram::cumulativeAnswers)(spentUsec);
         comboWriter->d_eventTrace.add(RecEventTrace::AnswerSent, 0, false, answerMatch);
@@ -513,13 +512,13 @@ static void doProcessTCPQuestion(std::unique_ptr<DNSComboWriter>& comboWriter, s
       t_fdm->removeReadFD(fileDesc); // should no longer awake ourselves when there is data to read
     }
     else {
-      Utility::gettimeofday(&g_now, nullptr); // needed?
+      gettimeofday(&g_now, nullptr); // needed?
       struct timeval ttd = g_now;
       t_fdm->setReadTTD(fileDesc, ttd, g_tcpTimeout);
     }
     tcpGuard.keep();
     traceScope.close(0);
-    g_multiTasker->makeThread(startDoResolve, comboWriter.release()); // deletes dc
+    t_multiTasker->makeThread(startDoResolve, comboWriter.release()); // deletes dc
   } // good query
 }
 
@@ -558,7 +557,7 @@ static void handleRunningTCPQuestion(int fileDesc, FDMultiplexer::funcparam_t& v
          the connection was received over UDP or TCP if needed */
       bool tcp = false;
       bool proxy = false;
-      size_t used = parseProxyHeader(conn->data, proxy, conn->d_source, conn->d_destination, tcp, conn->proxyProtocolValues);
+      ssize_t used = parseProxyHeader(conn->data, proxy, conn->d_source, conn->d_destination, tcp, conn->proxyProtocolValues);
       if (used <= 0) {
         if (g_logCommonErrors) {
           g_slogtcpin->info(Logr::Error, "Unable to parse proxy protocol header in packet from TCP client", "remote", Logging::Loggable(conn->d_remote));
@@ -716,7 +715,7 @@ void handleNewTCPQuestion(int fileDesc, [[maybe_unused]] FDMultiplexer::funcpara
     closeSock(rec::Counter::tcpOverflow, "Error closing TCP socket after an overflow drop");
     return;
   }
-  if (g_multiTasker->numProcesses() >= g_maxMThreads) {
+  if (t_multiTasker->numProcesses() >= g_maxMThreads) {
     closeSock(rec::Counter::overCapacityDrops, "Error closing TCP socket after an over capacity drop");
     return;
   }
@@ -765,7 +764,7 @@ void handleNewTCPQuestion(int fileDesc, [[maybe_unused]] FDMultiplexer::funcpara
   }
 
   timeval ttd{};
-  Utility::gettimeofday(&ttd, nullptr);
+  gettimeofday(&ttd, nullptr);
   ttd.tv_sec += g_tcpTimeout;
 
   t_fdm->addReadFD(tcpConn->getFD(), handleRunningTCPQuestion, tcpConn, &ttd);
@@ -871,7 +870,7 @@ static void TCPIOHandlerIO(int fileDesc, FDMultiplexer::funcparam_t& var)
           pid->inMSG.resize(pid->inPos); // old content (if there) + new bytes read, only relevant for the inIncompleteOkay case
           newstate = IOState::Done;
           TCPIOHandlerStateChange(pid->lowState, newstate, pid);
-          g_multiTasker->sendEvent(pid, &pid->inMSG);
+          t_multiTasker->sendEvent(pid, &pid->inMSG);
           return;
         }
         break;
@@ -887,7 +886,7 @@ static void TCPIOHandlerIO(int fileDesc, FDMultiplexer::funcparam_t& var)
       TCPLOG(pid->tcpsock, "read exception..." << e.what() << endl);
       PacketBuffer empty;
       TCPIOHandlerStateChange(pid->lowState, newstate, pid);
-      g_multiTasker->sendEvent(pid, &empty); // this conveys error status
+      t_multiTasker->sendEvent(pid, &empty); // this conveys error status
       return;
     }
     break;
@@ -902,10 +901,10 @@ static void TCPIOHandlerIO(int fileDesc, FDMultiplexer::funcparam_t& var)
       case IOState::Done: {
         TCPLOG(pid->tcpsock, "tryWrite: Done" << endl);
         TCPIOHandlerStateChange(pid->lowState, newstate, pid);
-        g_multiTasker->sendEvent(pid, &pid->outMSG); // send back what we sent to convey everything is ok
+        t_multiTasker->sendEvent(pid, &pid->outMSG); // send back what we sent to convey everything is ok
         return;
       }
-      case IOState::NeedRead:
+      case IOState::NeedRead: // NOLINT(bugprone-branch-clone) (if !TCPLOGGing)
         TCPLOG(pid->tcpsock, "tryWrite: NeedRead" << endl);
         break;
       case IOState::NeedWrite:
@@ -921,7 +920,7 @@ static void TCPIOHandlerIO(int fileDesc, FDMultiplexer::funcparam_t& var)
       TCPLOG(pid->tcpsock, "write exception..." << e.what() << endl);
       PacketBuffer sent;
       TCPIOHandlerStateChange(pid->lowState, newstate, pid);
-      g_multiTasker->sendEvent(pid, &sent); // we convey error status by sending empty string
+      t_multiTasker->sendEvent(pid, &sent); // we convey error status by sending empty string
       return;
     }
     break;
@@ -994,7 +993,7 @@ LWResult::Result asendtcp(const PacketBuffer& data, shared_ptr<TCPIOHandler>& ha
   TCPIOHandlerStateChange(IOState::Done, state, pident);
 
   PacketBuffer packet;
-  int ret = g_multiTasker->waitEvent(pident, &packet, g_networkTimeoutMsec);
+  int ret = t_multiTasker->waitEvent(pident, &packet, g_networkTimeoutMsec);
   TCPLOG(pident->tcpsock, "asendtcp waitEvent returned " << ret << ' ' << packet.size() << '/' << data.size() << ' ');
   if (ret == 0) {
     TCPLOG(pident->tcpsock, "timeout" << endl);
@@ -1064,7 +1063,7 @@ LWResult::Result arecvtcp(PacketBuffer& data, const size_t len, shared_ptr<TCPIO
   // Will set pident->lowState
   TCPIOHandlerStateChange(IOState::Done, state, pident);
 
-  int ret = g_multiTasker->waitEvent(pident, &data, authWaitTimeMSec(g_multiTasker));
+  int ret = t_multiTasker->waitEvent(pident, &data, authWaitTimeMSec(t_multiTasker));
   TCPLOG(pident->tcpsock, "arecvtcp " << ret << ' ' << data.size() << ' ');
   if (ret == 0) {
     TCPLOG(pident->tcpsock, "timeout" << endl);
@@ -1100,7 +1099,7 @@ unsigned int makeTCPServerSockets(deferredAdd_t& deferredAdds, std::set<int>& tc
 #ifdef TCP_DEFER_ACCEPT
   auto first = true;
 #endif
-  const uint16_t defaultLocalPort = ::arg().asNum("local-port");
+  const auto defaultLocalPort = ::arg().asNum<uint16_t>("local-port");
   const vector<string> defaultVector = {"127.0.0.1", "::1"};
   const auto configIsDefault = localAddresses == defaultVector;
 

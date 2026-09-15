@@ -36,16 +36,6 @@
 
 const bool TCPIOHandler::s_disableConnectForUnitTests = true;
 
-bool checkDNSCryptQuery(const ClientState& cs, PacketBuffer& query, std::unique_ptr<DNSCryptQuery>& dnsCryptQuery, time_t now, bool tcp)
-{
-  (void)cs;
-  (void)query;
-  (void)dnsCryptQuery;
-  (void)now;
-  (void)tcp;
-  return false;
-}
-
 bool checkQueryHeaders(const struct dnsheader& dnsHeader, ClientState& clientState)
 {
   (void)dnsHeader;
@@ -59,7 +49,7 @@ uint64_t uptimeOfProcess(const std::string& str)
   return 0;
 }
 
-void handleResponseSent(const InternalQueryState& ids, int udiff, const ComboAddress& client, const ComboAddress& backend, unsigned int size, const dnsheader& cleartextDH, dnsdist::Protocol protocol, bool fromBackend)
+void handleResponseSent(InternalQueryState& ids, double udiff, const ComboAddress& client, const ComboAddress& backend, unsigned int size, const dnsheader& cleartextDH, dnsdist::Protocol protocol, bool fromBackend)
 {
   (void)ids;
   (void)udiff;
@@ -71,7 +61,7 @@ void handleResponseSent(const InternalQueryState& ids, int udiff, const ComboAdd
   (void)fromBackend;
 }
 
-void handleResponseSent(const DNSName& qname, const QType& qtype, int udiff, const ComboAddress& client, const ComboAddress& backend, unsigned int size, const dnsheader& cleartextDH, dnsdist::Protocol outgoingProtocol, dnsdist::Protocol incomingProtocol, bool fromBackend)
+void handleResponseSent(DNSName&& qname, const QType& qtype, double udiff, const ComboAddress& client, const ComboAddress& backend, unsigned int size, const dnsheader& cleartextDH, dnsdist::Protocol outgoingProtocol, dnsdist::Protocol incomingProtocol, bool fromBackend)
 {
   (void)qname;
   (void)qtype;
@@ -561,7 +551,7 @@ BOOST_FIXTURE_TEST_CASE(test_IncomingConnection_SelfAnswered, TestFixture)
 {
   const auto tcpRecvTimeout = dnsdist::configuration::getCurrentRuntimeConfiguration().d_tcpRecvTimeout;
   auto local = getBackendAddress("1", 80);
-  ClientState localCS(local, true, false, 0, "", {}, true);
+  ClientState localCS(local, true, false, 0, "", {}, true, false);
   auto tlsCtx = std::make_shared<MockupTLSCtx>();
   localCS.tlsFrontend = std::make_shared<TLSFrontend>(tlsCtx);
 
@@ -823,7 +813,7 @@ BOOST_FIXTURE_TEST_CASE(test_IncomingConnectionWithProxyProtocol_SelfAnswered, T
 {
   const auto tcpRecvTimeout = dnsdist::configuration::getCurrentRuntimeConfiguration().d_tcpRecvTimeout;
   auto local = getBackendAddress("1", 80);
-  ClientState localCS(local, true, false, 0, "", {}, true);
+  ClientState localCS(local, true, false, 0, "", {}, true, false);
   auto tlsCtx = std::make_shared<MockupTLSCtx>();
   localCS.tlsFrontend = std::make_shared<TLSFrontend>(tlsCtx);
 
@@ -967,7 +957,7 @@ BOOST_FIXTURE_TEST_CASE(test_IncomingConnectionWithProxyProtocol_SelfAnswered, T
 BOOST_FIXTURE_TEST_CASE(test_IncomingConnection_BackendNoOOOR, TestFixture)
 {
   auto local = getBackendAddress("1", 80);
-  ClientState localCS(local, true, false, 0, "", {}, true);
+  ClientState localCS(local, true, false, 0, "", {}, true, false);
   auto tlsCtx = std::make_shared<MockupTLSCtx>();
   localCS.tlsFrontend = std::make_shared<TLSFrontend>(tlsCtx);
 
@@ -1939,7 +1929,7 @@ BOOST_FIXTURE_TEST_CASE(test_IncomingConnectionOOOR_BackendOOOR, TestFixture)
 {
   const auto tcpRecvTimeout = dnsdist::configuration::getCurrentRuntimeConfiguration().d_tcpRecvTimeout;
   auto local = getBackendAddress("1", 80);
-  ClientState localCS(local, true, false, 0, "", {}, true);
+  ClientState localCS(local, true, false, 0, "", {}, true, false);
   /* enable out-of-order on the front side */
   localCS.d_maxInFlightQueriesPerConn = 65536;
 
@@ -4179,7 +4169,7 @@ BOOST_FIXTURE_TEST_CASE(test_IncomingConnectionOOOR_BackendNotOOOR, TestFixture)
 {
   const auto tcpRecvTimeout = dnsdist::configuration::getCurrentRuntimeConfiguration().d_tcpRecvTimeout;
   auto local = getBackendAddress("1", 80);
-  ClientState localCS(local, true, false, 0, "", {}, true);
+  ClientState localCS(local, true, false, 0, "", {}, true, false);
   /* enable out-of-order on the front side */
   localCS.d_maxInFlightQueriesPerConn = 65536;
 
@@ -4472,7 +4462,7 @@ BOOST_FIXTURE_TEST_CASE(test_IncomingConnectionOOOR_BackendNotOOOR, TestFixture)
 BOOST_FIXTURE_TEST_CASE(test_Pipelined_Queries_Immediate_Responses, TestFixture)
 {
   auto local = getBackendAddress("1", 80);
-  ClientState localCS(local, true, false, 0, "", {}, true);
+  ClientState localCS(local, true, false, 0, "", {}, true, false);
   auto tlsCtx = std::make_shared<MockupTLSCtx>();
   localCS.tlsFrontend = std::make_shared<TLSFrontend>(tlsCtx);
 

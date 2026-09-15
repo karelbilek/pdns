@@ -8,8 +8,30 @@ Please upgrade to the PowerDNS Authoritative Server 4.0.0 from 3.4.2+.
 See the `3.X <https://doc.powerdns.com/3/authoritative/upgrading/>`__
 upgrade notes if your version is older than 3.4.2.
 
-5.0.0 to master
+5.1.x to master
 ---------------
+
+Cryptographic library requirements
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Vestigial (and probably by now not sufficient enough) support for building with
+very old OpenSSL (or compatible) libraries, not providing the OpenSSL 1.1.0
+API, has been removed. No operating system aged less than 10 years should be
+affected by this, but we're mentioning it, just in case.
+
+NAPTR additional answers
+^^^^^^^^^^^^^^^^^^^^^^^^
+
+Since version 5.0, the information of the `a` and `s` NAPTR records are added to the additional answers section. This behaviour can be disabled by setting :ref:`setting-naptr-additional-processing` to `no`.
+
+5.0.x to 5.1.x
+--------------
+
+Cross origin requests
+^^^^^^^^^^^^^^^^^^^^^
+
+The embedded webserver now no longer includes a ``access-control-allow-origin: *`` header by default.
+See :ref:`setting-webserver-cross-origin-request-header`.
 
 zone display
 ^^^^^^^^^^^^
@@ -24,6 +46,34 @@ Record data sent through the API will now be normalized to be closer to their
 actual zone representation.
 As a result of this change, reading back these records may show a different
 representation than expected.
+
+TSIG key updates using PostgreSQL
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The default value of the ``set-tsig-key-query`` query used to update TSIG
+keys, for the :doc:`PostgreSQL <backends/generic-postgresql>` backend, has been
+updated to be able to perform key replacement, rather than failing, when an
+existing key with the given algorithm exists.
+
+This updated query relies upon functionality only made available from
+PostgreSQL version 9.5 onwards.
+
+If you are using an older version, the old query can be restored using::
+
+  gpgsql-set-tsig-key-query=insert into tsigkeys (name,algorithm,secret) values($1,$2,$3)
+
+but it is advised to upgrade to a supported version of PostgreSQL whenever
+possible.
+
+LUA record updates no longer allowed by default
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Modifications of :doc:`LUA records <lua-records/index>`, either from AXFR/IXFR,
+DNS Update, or the API, are now only allowed if the new
+:ref:`setting-enable-lua-record-updates` configuration setting is set to
+``yes``.
+Its default value being ``no``, a configuration update will be
+necessary when upgrading to 5.1 in order to allow such updates.
 
 4.9.0 to 5.0.0
 --------------

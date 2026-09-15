@@ -437,7 +437,7 @@ static uint64_t dumpAggressiveNSECCache(int fileDesc)
   fprintf(filePtr.get(), "; aggressive NSEC cache dump follows\n;\n");
 
   struct timeval now{};
-  Utility::gettimeofday(&now, nullptr);
+  gettimeofday(&now, nullptr);
   return g_aggressiveNSECCache->dumpToFile(filePtr, now);
 }
 
@@ -1027,7 +1027,7 @@ static Answer setMaxPacketCacheEntries(ArgIterator begin, ArgIterator end)
   }
 }
 
-static RecursorControlChannel::Answer setAggrNSECCacheSize(ArgIterator begin, ArgIterator end)
+static RecursorControlChannel::Answer setMaxAggrNSECCacheSize(ArgIterator begin, ArgIterator end)
 {
   if (end - begin != 1) {
     return {1, "Need to supply new aggressive NSEC cache size\n"};
@@ -2121,6 +2121,7 @@ RecursorControlChannel::Answer luaconfig(bool broadcast)
     // We might have a lua config file, but also process dynamic YAML parts if applicable, currently those are:
     // - the OT trace conditions
     // - the outgoing TLS config
+    // - keepWarm entries
     try {
       if (yamlstat == pdns::settings::rec::YamlSettingsStatus::OK) {
         // YAML read above succeeded
@@ -2128,6 +2129,9 @@ RecursorControlChannel::Answer luaconfig(bool broadcast)
         LuaConfigItems dummyLuaConfig; // we do not use the converted from YAML LuaConfigItems, but the "real thing"
         pdns::settings::rec::fromBridgeStructToLuaConfig(settings, dummyLuaConfig, dummyProxyMapping, conditions);
         TCPOutConnectionManager::setupOutgoingTLSConfigTables(settings);
+        lci.keepWarm = dummyLuaConfig.keepWarm;
+        auto generation = g_luaconfs.getLocal()->generation;
+        lci.generation = generation + 1;
       }
       if (!::arg()["lua-config-file"].empty()) {
         loadRecursorLuaConfig(::arg()["lua-config-file"], proxyMapping, lci); // will bump generation
@@ -2379,9 +2383,9 @@ RecursorControlChannel::Answer RecursorControlParser::getAnswer(int socket, cons
     {"get-proxymapping-stats", doGetProxyMappingStats},
     {"get-remotelogger-stats", getRemoteLoggerStats},
     {"list-dnssec-algos", [](ArgIterator, ArgIterator) -> Answer {
-       return {0, DNSCryptoKeyEngine::listSupportedAlgoNames()};
+       return {0, DNSCryptoKeyEngine::listSupportedAlgoNames(g_slog->withName("control"))};
      }},
-    {"set-aggr-nsec-cache-size", setAggrNSECCacheSize},
+    {"set-max-aggr-nsec-cache-size", setMaxAggrNSECCacheSize},
   };
 
   if (const auto entry = commands.find(cmd); entry != commands.end()) {

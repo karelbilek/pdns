@@ -36,6 +36,7 @@ class DNSPacket;
 #include <iostream>
 #include <sys/socket.h>
 #include <dirent.h>
+#include "arguments.hh"
 #include "misc.hh"
 #include "qtype.hh"
 #include "dns.hh"
@@ -46,6 +47,7 @@ class DNSPacket;
 #include "iputils.hh"
 #include "sha.hh"
 #include "auth-catalogzone.hh"
+#include "logr.hh"
 
 class DNSBackend;
 struct SOAData;
@@ -474,10 +476,7 @@ public:
   virtual bool searchRecords(const string& pattern, size_t maxResults, vector<DNSResourceRecord>& result);
 
   //! Search for comments, returns true if search was done successfully.
-  virtual bool searchComments(const string& /* pattern */, size_t /* maxResults */, vector<Comment>& /* result */)
-  {
-    return false;
-  }
+  virtual bool searchComments(const string& /* pattern */, size_t /* maxResults */, vector<Comment>& /* result */);
 
   virtual void viewList(vector<string>& /* result */)
   {
@@ -538,7 +537,14 @@ public:
 protected:
   bool mustDo(const string& key);
   const string& getArg(const string& key);
-  int getArgAsNum(const string& key);
+
+  template <typename T = int>
+  T getArgAsNum(const string& key)
+  {
+    return arg().asNum<T>(d_prefix + "-" + key);
+  }
+
+  std::shared_ptr<Logr::Logger> d_slog;
 
 private:
   string d_prefix;
@@ -568,6 +574,7 @@ private:
 class BackendMakerClass
 {
 public:
+  BackendMakerClass(Logr::log_t slog);
   void report(std::unique_ptr<BackendFactory>&& backendFactory);
   void launch(const string& instr);
   vector<std::unique_ptr<DNSBackend>> all(bool metadataOnly = false);
@@ -581,9 +588,10 @@ private:
   using d_repository_t = map<string, std::unique_ptr<BackendFactory>>;
   d_repository_t d_repository;
   vector<pair<string, string>> d_instances;
+  static std::shared_ptr<Logr::Logger> s_slog;
 };
 
-extern BackendMakerClass& BackendMakers();
+extern BackendMakerClass& BackendMakers(Logr::log_t slog = nullptr);
 
 //! Exception that can be thrown by a DNSBackend to indicate a failure
 class DBException : public PDNSException

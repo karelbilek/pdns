@@ -22,7 +22,11 @@ void AuthLua4::postPrepareContext() {
   d_lw->writeFunction("resolve", [](const std::string& qname, uint16_t qtype) {
       std::vector<DNSZoneRecord> ret;
       std::unordered_map<int, DNSResourceRecord> luaResult;
-      stubDoResolve(DNSName(qname), qtype, ret);
+      std::shared_ptr<Logr::Logger> slog;
+      if (g_slogStructured) {
+        slog = g_slog->withName("lua");
+      }
+      stubDoResolve(slog, DNSName(qname), qtype, ret);
       int i = 0;
       for(const auto &row: ret) {
         luaResult[++i] = DNSResourceRecord::fromWire(row.dr);
@@ -71,8 +75,8 @@ void AuthLua4::postPrepareContext() {
 
 
 /* update policy */
-  d_lw->registerFunction<DNSName(UpdatePolicyQuery::*)()>("getQName", [](UpdatePolicyQuery& upq) { return upq.qname; });
-  d_lw->registerFunction<DNSName(UpdatePolicyQuery::*)()>("getZoneName", [](UpdatePolicyQuery& upq) { return upq.zonename; });
+  d_lw->registerFunction<DNSName(UpdatePolicyQuery::*)()>("getQName", [](UpdatePolicyQuery& upq) -> const DNSName& { return upq.qname; });
+  d_lw->registerFunction<DNSName(UpdatePolicyQuery::*)()>("getZoneName", [](UpdatePolicyQuery& upq) -> const DNSName& { return upq.zonename; });
   d_lw->registerFunction<uint16_t(UpdatePolicyQuery::*)()>("getQType", [](UpdatePolicyQuery& upq) { return upq.qtype; });
   d_lw->registerFunction<ComboAddress(UpdatePolicyQuery::*)()>("getLocal", [](UpdatePolicyQuery& upq) { return upq.local; });
   d_lw->registerFunction<ComboAddress(UpdatePolicyQuery::*)()>("getRemote", [](UpdatePolicyQuery& upq) { return upq.remote; });
@@ -124,7 +128,7 @@ bool AuthLua4::axfrfilter(const ComboAddress& remote, const DNSName& zone, const
       }
       rec.setContent(boost::get<std::string>(map.at("content")));
 
-      out.push_back(rec);
+      out.push_back(std::move(rec));
     }
   }
   catch (const std::exception& e) {

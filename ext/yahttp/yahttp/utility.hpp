@@ -381,8 +381,8 @@ namespace YaHTTP {
       strstr_map_t parameter_map;
       while (pos != std::string::npos) {
         // find next parameter start
-        std::string::size_type nextpos = parameters.find("&", pos);
-        std::string::size_type delim = parameters.find("=", pos);
+        std::string::size_type nextpos = parameters.find('&', pos);
+        std::string::size_type delim = parameters.find('=', pos);
         if (delim > nextpos) {
           delim = nextpos;
         }

@@ -84,6 +84,10 @@ public:
   bool commitTransaction() override;
   bool abortTransaction() override;
   bool feedRecord(const DNSResourceRecord& r, const DNSName& ordername, bool ordernameIsNSEC3 = false) override;
+  bool feedComment(const Comment& c) override;
+  bool listComments(domainid_t domain_id) override;
+  bool getComment(Comment& comment) override;
+
   bool feedEnts(domainid_t domain_id, map<DNSName, bool>& nonterm) override;
   bool feedEnts3(domainid_t domain_id, const DNSName& domain, map<DNSName, bool>& nonterm, const NSEC3PARAMRecordContent& ns3prc, bool narrow) override;
   bool replaceRRSet(domainid_t domain_id, const DNSName& qname, const QType& qt, const vector<DNSResourceRecord>& rrset) override;
@@ -213,6 +217,9 @@ private:
     static domainid_t getDomainID(const string_view& key)
     {
       uint32_t ret;
+      if (key.size() < sizeof(ret)) {
+        throw std::out_of_range("LMDB key is too short to hold a domain id");
+      }
       memcpy(&ret, &key[0], sizeof(ret));
       return static_cast<domainid_t>(ntohl(ret));
     }
@@ -222,6 +229,9 @@ private:
       /* www.ds9a.nl -> nl0ds9a0www0
          root -> 0   <- we need this to keep lmdb happy
          nl -> nl0 */
+      if (key.size() < 4 + sizeof(uint16_t)) {
+        throw std::out_of_range("LMDB key is too short to hold a name");
+      }
       DNSName ret;
       auto iter = key.cbegin() + 4;
       auto end = key.cend() - 2;
@@ -245,6 +255,9 @@ private:
     static QType getQType(const string_view& key)
     {
       uint16_t ret;
+      if (key.size() < sizeof(ret)) {
+        throw std::out_of_range("LMDB key is too short to hold a qtype");
+      }
       memcpy(&ret, &key[key.size() - 2], sizeof(ret));
       return QType(ntohs(ret));
     }
@@ -264,6 +277,14 @@ public:
     unsigned int flags{0};
     bool active{true};
     bool published{true};
+  };
+  // Transient DomainInfo data, not necessarily synchronized with the
+  // database.
+  // All the fields exist with the exact same types in DomainInfo.
+  struct TransientDomainInfo
+  {
+    time_t last_check{};
+    uint32_t notified_serial{};
   };
   class LMDBResourceRecord : public DNSResourceRecord
   {
@@ -294,12 +315,15 @@ private:
                    index_on<TSIGKey, DNSName, &TSIGKey::name>>
     ttsig_t;
 
+  using tdomain_extra_t = TypedDBI<TransientDomainInfo, nullindex_t>;
+
   int d_asyncFlag;
 
   struct RecordsDB
   {
     shared_ptr<MDBEnv> env;
-    MDBDbi dbi;
+    MDBDbi rdbi; // records
+    MDBDbi cdbi; // comments
   };
 
   struct RecordsROTransaction
@@ -327,6 +351,7 @@ private:
   shared_ptr<ttsig_t> d_ttsig;
   MDBDbi d_tnetworks;
   MDBDbi d_tviews;
+  shared_ptr<tdomain_extra_t> d_tdomains_extra; // may be unset if no split domain data
 
   shared_ptr<RecordsROTransaction> d_rotxn; // for lookup and list
   shared_ptr<RecordsRWTransaction> d_rwtxn; // for feedrecord within begin/aborttransaction
@@ -336,12 +361,15 @@ private:
   std::shared_ptr<RecordsROTransaction> getRecordsROTransaction(domainid_t id, const std::shared_ptr<LMDBBackend::RecordsRWTransaction>& rwtxn = nullptr);
   bool genChangeDomain(const ZoneName& domain, const std::function<void(DomainInfo&)>& func);
   bool genChangeDomain(domainid_t id, const std::function<void(DomainInfo&)>& func);
+  bool genChangeTransientDomain(domainid_t id, const std::function<void(DomainInfo&)>& func);
   static void deleteDomainRecords(RecordsRWTransaction& txn, const std::string& match, QType qtype = QType::ANY);
 
   bool findDomain(const ZoneName& domain, DomainInfo& info) const;
   bool findDomain(domainid_t domainid, DomainInfo& info) const;
   void consolidateDomainInfo(DomainInfo& info) const;
+  void updateDomainInfo(const DomainInfo& info);
   void writeDomainInfo(const DomainInfo& info);
+  void writeTransientDomainInfo(const DomainInfo& info);
 
   void setLastCheckTime(domainid_t domain_id, time_t last_check);
 
@@ -360,16 +388,11 @@ private:
   static void deleteNSEC3RecordPair(const std::shared_ptr<RecordsRWTransaction>& txn, domainid_t domain_id, const DNSName& qname);
   void writeNSEC3RecordPair(const std::shared_ptr<RecordsRWTransaction>& txn, domainid_t domain_id, const DNSName& qname, const DNSName& ordername);
 
+  std::pair<std::string, std::string> serializeComment(const Comment& c);
+
   string directBackendCmd_list(std::vector<string>& argv);
 
-  // Transient DomainInfo data, not necessarily synchronized with the
-  // database.
-  struct TransientDomainInfo
-  {
-    time_t last_check{};
-    uint32_t notified_serial{};
-  };
-  // Cache of DomainInfo notified_serial values
+  // Cache of TransientDomainInfo
   class TransientDomainInfoCache : public boost::noncopyable
   {
   public:
@@ -404,7 +427,11 @@ private:
     // database contents at cursor
     MDBOutVal val;
     // whether to include disabled records in the results
-    bool includedisabled;
+    bool includedisabled{false};
+    // whether we are doing comments (false=records, true=comments)
+    bool comments{false};
+    // comment found by last call to getInternal
+    Comment comment;
 
     void reset()
     {
@@ -413,6 +440,7 @@ private:
       rrset.clear();
       rrsetpos = 0;
       cursor.reset();
+      // comments bool explicitly not reset here, so getInternal can note absence the right way
     }
   } d_lookupstate;
 
@@ -423,6 +451,7 @@ private:
   bool d_handle_dups;
   bool d_views;
   bool d_write_notification_update;
+  bool d_split_domains_table;
   DTime d_dtime; // used only for logging
   uint64_t d_mapsize_main;
   uint64_t d_mapsize_shards;

@@ -4,8 +4,8 @@ Running and Configuring dnsdist
 dnsdist is meant to run as a daemon.
 As such, distribution native packages know how to stop/start themselves using operating system services.
 
-It is configured with a configuration file called ``dnsdist.yml``
-The default path to this file is determined by the ``SYSCONFDIR`` variable during compilation.
+It is configured with a configuration file called ``dnsdist.yml``. If that file does not exist, :program:`dnsdist` will attempt to fall back to a ``dnsdist.conf`` file, expecting a configuration in ``Lua`` instead of ``YAML``.
+The default path to these files is determined by the ``SYSCONFDIR`` variable during compilation.
 Most likely this path is ``/etc/dnsdist``,  ``/etc`` or ``/usr/local/etc/``, dnsdist will tell you on startup which file it reads.
 
 dnsdist is designed to (re)start almost instantly.
@@ -40,9 +40,9 @@ Before 1.7.0, which introduced TCP fallback, that meant that there was a potenti
 
 In addition to TCP fallback for DoH, 1.7.0 introduced three new notions:
 
- * TCP-only backends, for which queries will always forwarded over a TCP connection (see the `tcpOnly` parameter of :func:`newServer`)
- * DNS over HTTPS backends, for which queries are forwarded over a DNS over HTTPS connection (see the `dohPath` parameter of :func:`newServer`)
- * and DNS over TLS backends, for which queries are forwarded over a DNS over TLS connection (see the `tls` parameter of :func:`newServer`)
+* TCP-only backends, for which queries will always forwarded over a TCP connection (see the `tcpOnly` parameter of :func:`newServer`)
+* DNS over HTTPS backends, for which queries are forwarded over a DNS over HTTPS connection (see the `dohPath` parameter of :func:`newServer`)
+* and DNS over TLS backends, for which queries are forwarded over a DNS over TLS connection (see the `tls` parameter of :func:`newServer`)
 
 To sum it up:
 

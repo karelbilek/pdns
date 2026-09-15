@@ -14,7 +14,7 @@ TinyDNS Backend
 * Search: since version 5.1.0
 * Views: No
 * API: Read-only
-* Multiple Instances: Yes
+* :ref:`Multiple instances <setting-launch>`: Yes
 * Zone caching: Yes
 * Module name: tinydns
 * Launch: ``tinydns``
@@ -150,10 +150,14 @@ number of links to tools/cgi-scripts that allow you to create records.
 useful record building scripts on his
 `djbdnsRecordBuilder <https://andersbrownworth.com/projects/sysadmin/djbdnsRecordBuilder/>`__.
 
-PowerDNS and TinyDNS handle wildcards differently. Looking up
-foo.www.example.com with the below records on TinyDNS will return
-198.51.100.1, PowerDNS will return NXDOMAIN. According to :rfc:`4592` \*.example.com should only
-match subdomains in under example.com, not \*.\*.example.com. This
+PowerDNS and TinyDNS handle wildcards differently.
+PowerDNS treats defined domains as masking sibling wildcards.
+Whereas TinyDNS does *not* treat defined domains as masking sibling wildcards.
+For the below records, both will return ``198.51.100.1``
+for ``alpha.beta.example.com`` as there's no defined ``beta.example.com``.
+But looking up ``foo.www.example.com`` on TinyDNS will return
+``198.51.100.1``, PowerDNS will return NXDOMAIN. According to :rfc:`4592` \*.example.com should only
+match subdomains under example.com, not \*.\*.example.com. This
 compatibility issue is `noted on the axfr-get page for the djbdns
 suite <https://cr.yp.to/djbdns/axfr-get.html>`__.
 
@@ -161,6 +165,18 @@ suite <https://cr.yp.to/djbdns/axfr-get.html>`__.
 
     *.example.com     A 198.51.100.1
     www.example.com   A 198.51.100.1
+
+
+PowerDNS and TinyDNS also handle name server records (the dot-prefixed lines in
+data files) differently. In TinyDNS it is possible to apply location
+restrictions to dot lines and the restrictions are respected accordingly.
+In PowerDNS, any location-restricted dot line (and its accompanying SOA record)
+is simply ignored, causing PowerDNS to not assume authority over the
+corresponding zone. This happens because in PowerDNS, internal SOA lookups
+are performed without knowledge about the source of the query.
+If you want to apply location restrictions to zones, apply the location
+restrictions on the rest of the zone data, but not on the name server line
+(dot-prefixed line), or disable :ref:`setting-tinydns-locations`.
 
 Compiling the TinyDNS backend requires you to have
 `tinycdb <https://www.corpit.ru/mjt/tinycdb.html>`__ version 0.77.

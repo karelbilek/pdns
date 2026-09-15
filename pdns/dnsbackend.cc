@@ -25,7 +25,6 @@
 #endif
 #include "utility.hh"
 #include "dnsbackend.hh"
-#include "arguments.hh"
 #include "ueberbackend.hh"
 #include "logger.hh"
 
@@ -60,11 +59,6 @@ bool DNSBackend::mustDo(const string& key)
 const string& DNSBackend::getArg(const string& key)
 {
   return arg()[d_prefix + "-" + key];
-}
-
-int DNSBackend::getArgAsNum(const string& key)
-{
-  return arg().asNum(d_prefix + "-" + key);
 }
 
 // Default API lookup has no support for disabled records and simply wraps lookup()
@@ -109,6 +103,42 @@ bool DNSBackend::searchRecords(const string& pattern, size_t maxResults, vector<
   return true;
 }
 
+// Default search logic, for backends which can enumerate their comments.
+bool DNSBackend::searchComments(const string& pattern, size_t maxResults, vector<Comment>& result)
+{
+  // We depend upon working list(), but also getAllDomains(), which is why we
+  // are checking explicitly for CAP_SEARCH in addition to CAP_LIST - the
+  // default getAllDomains() implementation below is not safe to use here.
+  if ((getCapabilities() & (CAP_LIST | CAP_SEARCH)) != (CAP_LIST | CAP_SEARCH)) {
+    return false;
+  }
+
+  SimpleMatch simpleMatch(pattern, true);
+  std::vector<DomainInfo> domains;
+  getAllDomains(&domains, false, true);
+  for (const auto& info : domains) {
+    if (!listComments(info.id)) {
+      return false;
+    }
+    Comment comment;
+    while (getComment(comment)) {
+      if (maxResults == 0) {
+        // No need to look any further
+        lookupEnd();
+        break;
+      }
+      if (simpleMatch.match(comment.qname) || simpleMatch.match(comment.content)) {
+        result.emplace_back(comment);
+        --maxResults;
+      }
+    }
+    if (maxResults == 0) {
+      break;
+    }
+  }
+  return true;
+}
+
 void BackendFactory::declare(const string& suffix, const string& param, const string& explanation, const string& value)
 {
   string fullname = d_name + suffix + "-" + param;
@@ -121,9 +151,18 @@ const string& BackendFactory::getName() const
   return d_name;
 }
 
-BackendMakerClass& BackendMakers()
+std::shared_ptr<Logr::Logger> BackendMakerClass::s_slog;
+
+BackendMakerClass::BackendMakerClass(Logr::log_t slog)
 {
-  static BackendMakerClass bmc;
+  if (s_slog == nullptr && slog != nullptr) {
+    s_slog = slog;
+  }
+}
+
+BackendMakerClass& BackendMakers(Logr::log_t slog)
+{
+  static BackendMakerClass bmc(slog);
   return bmc;
 }
 
@@ -151,14 +190,16 @@ vector<string> BackendMakerClass::getModules()
 
 void BackendMakerClass::load_all()
 {
-  auto directoryError = pdns::visit_directory(arg()["module-dir"], []([[maybe_unused]] ino_t inodeNumber, const std::string_view& name) {
+  const auto& directory = arg()["module-dir"];
+  auto directoryError = pdns::visit_directory(directory, []([[maybe_unused]] ino_t inodeNumber, const std::string_view& name) {
     if (boost::starts_with(name, "lib") && name.size() > 13 && boost::ends_with(name, "backend.so")) {
       load(std::string(name));
     }
     return true;
   });
   if (directoryError) {
-    g_log << Logger::Error << "Unable to open module directory '" << arg()["module-dir"] << "': " << *directoryError << endl;
+    SLOG(g_log << Logger::Error << "Unable to open module directory '" << directory << "': " << *directoryError << endl,
+         s_slog->error(Logr::Error, *directoryError, "Unable to open module directory", "directory", Logging::Loggable(directory)));
   }
 }
 
@@ -166,26 +207,32 @@ void BackendMakerClass::load(const string& module)
 {
   bool res = false;
 
-  g_log << Logger::Debug << "BackendMakerClass: module = " << module << endl;
-  g_log << Logger::Debug << "BackendMakerClass: module-dir = " << arg()["module-dir"] << endl;
+  const auto& moduleDir = arg()["module-dir"];
+  SLOG(g_log << Logger::Debug << "BackendMakerClass: module = " << module << endl
+             << Logger::Debug << "BackendMakerClass: module-dir = " << moduleDir << endl,
+       s_slog->info(Logr::Debug, "BackendMakerClass", "module-dir", Logging::Loggable(moduleDir), "module", Logging::Loggable(module)));
   if (module.find('.') == string::npos) {
-    auto modulePath = arg()["module-dir"] + "/lib" + module + "backend.so";
-    g_log << Logger::Debug << "BackendMakerClass: Loading '" << modulePath << "'" << endl;
+    auto modulePath = moduleDir + "/lib" + module + "backend.so";
+    SLOG(g_log << Logger::Debug << "BackendMakerClass: Loading '" << modulePath << "'" << endl,
+         s_slog->info(Logr::Debug, "BackendMakerClass: loading", "file", Logging::Loggable(modulePath)));
     res = UeberBackend::loadmodule(modulePath);
   }
   else if (module[0] == '/' || (module[0] == '.' && module[1] == '/') || (module[0] == '.' && module[1] == '.')) {
     // Absolute path, Current path or Parent path
-    g_log << Logger::Debug << "BackendMakerClass: Loading '" << module << "'" << endl;
+    SLOG(g_log << Logger::Debug << "BackendMakerClass: Loading '" << module << "'" << endl,
+         s_slog->info(Logr::Debug, "BackendMakerClass: loading", "file", Logging::Loggable(module)));
     res = UeberBackend::loadmodule(module);
   }
   else {
-    auto modulePath = arg()["module-dir"] + "/" + module;
-    g_log << Logger::Debug << "BackendMakerClass: Loading '" << modulePath << "'" << endl;
+    auto modulePath = moduleDir + "/" + module;
+    SLOG(g_log << Logger::Debug << "BackendMakerClass: Loading '" << modulePath << "'" << endl,
+         s_slog->info(Logr::Debug, "BackendMakerClass: loading", "file", Logging::Loggable(module)));
     res = UeberBackend::loadmodule(modulePath);
   }
 
   if (!res) {
-    g_log << Logger::Error << "DNSBackend unable to load module in " << module << endl;
+    SLOG(g_log << Logger::Error << "DNSBackend unable to load module in " << module << endl,
+         s_slog->info(Logr::Error, "DNSBackend unable to load module", "module", Logging::Loggable(module)));
     exit(1);
   }
 }
@@ -254,14 +301,16 @@ vector<std::unique_ptr<DNSBackend>> BackendMakerClass::all(bool metadataOnly)
     }
   }
   catch (const PDNSException& ae) {
-    g_log << Logger::Error << "Caught an exception instantiating a backend (" << current << "): " << ae.reason << endl;
-    g_log << Logger::Error << "Cleaning up" << endl;
+    SLOG(g_log << Logger::Error << "Caught an exception instantiating a backend (" << current << "): " << ae.reason << endl
+               << Logger::Error << "Cleaning up" << endl,
+         s_slog->error(Logr::Error, ae.reason, "Caught an exception instantiating a backend, cleaning up", "backend", Logging::Loggable(current)));
     ret.clear();
     throw;
   }
   catch (...) {
     // and cleanup
-    g_log << Logger::Error << "Caught an exception instantiating a backend (" << current << "), cleaning up" << endl;
+    SLOG(g_log << Logger::Error << "Caught an exception instantiating a backend (" << current << "), cleaning up" << endl,
+         s_slog->info(Logr::Error, "Caught an exception instantiating a backend, cleaning up", "backend", Logging::Loggable(current)));
     ret.clear();
     throw;
   }
@@ -374,7 +423,8 @@ bool DNSBackend::getBeforeAndAfterNames(domainid_t domainId, const ZoneName& zon
 void DNSBackend::getAllDomains(vector<DomainInfo>* /* domains */, bool /* getSerial */, bool /* include_disabled */)
 {
   if (g_zoneCache.isEnabled()) {
-    g_log << Logger::Error << "One of the backends does not support zone caching. Put zone-cache-refresh-interval=0 in the config file to disable this cache." << endl;
+    SLOG(g_log << Logger::Error << "One of the backends does not support zone caching. Put zone-cache-refresh-interval=0 in the config file to disable this cache." << endl,
+         d_slog->info(Logr::Error, "One of the backends does not support zone caching. Put zone-cache-refresh-interval=0 in the configuration file to disable this cache."));
     exit(1);
   }
 }
@@ -421,7 +471,7 @@ void fillSOAData(const string& content, SOAData& soaData)
     pdns::checked_stoi_into(soaData.expire, parts.at(5));
     pdns::checked_stoi_into(soaData.minimum, parts.at(6));
   }
-  catch (const std::out_of_range& oor) {
-    throw PDNSException("Out of range exception parsing '" + content + "'");
+  catch (const std::logic_error& exc) {
+    throw PDNSException("exception parsing '" + content + "': " + exc.what());
   }
 }

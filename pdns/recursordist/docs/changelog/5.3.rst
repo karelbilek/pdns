@@ -4,6 +4,86 @@ Changelogs for 5.3.X
 Before upgrading, it is advised to read the :doc:`../upgrade`.
 
 .. changelog::
+  :version: 5.3.10
+  :released: 6th of August 2026
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17851
+    :tickets: 17835
+
+    Do not index past the address for byte-aligned prefixes.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17848
+    :tickets: 17797, 17790
+
+    Account for the existing content when parsing labels.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17843
+    :tickets: 17772, 17786
+
+    Fix disabling algo 8 also disables DS digest 2.
+
+.. changelog::
+  :version: 5.3.9
+  :released: 22nd of July 2026
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17756
+
+    Fix PowerDNS Security Advisory 2026-10 for PowerDNS Recursor: Multiple Issues
+
+.. changelog::
+  :version: 5.3.8
+  :released: 25th of June 2026
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17594
+
+    Fix PowerDNS Security Advisory 2026-08 for PowerDNS Recursor: Multiple Issues
+
+.. changelog::
+  :version: 5.3.7
+  :released: 3rd of June 2026
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17487
+    :tickets: 17396
+
+    snmp-agent: Fix a memory leak.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17317
+    :tickets: 17252
+
+    Increase entry count in unit test so we hit the 8192 byte limit on 32 bit systems too.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17302
+    :tickets: 16993
+
+    Fix serialization of cached authority record.
+
+.. changelog::
+  :version: 5.3.6
+  :released: 22nd of April 2026
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17194,17197,17199,17201,17203,17205
+
+    Fix PowerDNS Security Advisory 2026-03 for PowerDNS Recursor: Multiple Issues
+
+.. changelog::
   :version: 5.3.5
   :released: 9th of February 2026
 

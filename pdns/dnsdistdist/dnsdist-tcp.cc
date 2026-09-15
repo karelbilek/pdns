@@ -28,6 +28,7 @@
 #include "dnsdist.hh"
 #include "dnsdist-concurrent-connections.hh"
 #include "dnsdist-dnsparser.hh"
+#include "dnsdist-dnscrypt.hh"
 #include "dnsdist-ecs.hh"
 #include "dnsdist-edns.hh"
 #include "dnsdist-nghttp2-in.hh"
@@ -254,7 +255,7 @@ void IncomingTCPConnectionState::handleResponseSent(TCPResponse& currentResponse
 
   const auto& backend = currentResponse.d_connection ? currentResponse.d_connection->getDS() : currentResponse.d_ds;
   if (!currentResponse.d_idstate.selfGenerated && backend) {
-    const auto& ids = currentResponse.d_idstate;
+    auto& ids = currentResponse.d_idstate;
     auto udiff = ids.queryRealTime.udiff();
     VERBOSESLOG(infolog("Got answer from %s, relayed to %s (%s, %d bytes), took %d us", backend->d_config.remote.toStringWithPort(), ids.origRemote.toStringWithPort(), getProtocol().toString(), sentBytes, udiff),
                 ids.getLogger(getLogger())->info(Logr::Info, "Relayed response to client", "backend.name", Logging::Loggable(backend->getName()), "backend.address", Logging::Loggable(backend->d_config.remote), "dns.response.size", Logging::Loggable(sentBytes), "dns.response.latency_us", Logging::Loggable(udiff), "dns.response.rcode", Logging::Loggable(currentResponse.d_cleartextDH.rcode)));
@@ -266,8 +267,8 @@ void IncomingTCPConnectionState::handleResponseSent(TCPResponse& currentResponse
     ::handleResponseSent(ids, udiff, ids.origRemote, backend->d_config.remote, static_cast<unsigned int>(sentBytes), currentResponse.d_cleartextDH, backendProtocol, true);
   }
   else {
-    const auto& ids = currentResponse.d_idstate;
-    ::handleResponseSent(ids, 0, ids.origRemote, ComboAddress(), static_cast<unsigned int>(currentResponse.d_buffer.size()), currentResponse.d_cleartextDH, ids.protocol, false);
+    auto& ids = currentResponse.d_idstate;
+    ::handleResponseSent(ids, 0., ids.origRemote, ComboAddress(), static_cast<unsigned int>(currentResponse.d_buffer.size()), currentResponse.d_cleartextDH, ids.protocol, false);
   }
 
   currentResponse.d_buffer.clear();
@@ -474,23 +475,8 @@ IOState IncomingTCPConnectionState::sendResponse(const struct timeval& now, TCPR
   }
 }
 
-void IncomingTCPConnectionState::terminateClientConnection()
+void IncomingTCPConnectionState::waitUntilAsyncOperationsAreDone()
 {
-  DEBUGLOG("terminating client connection");
-  d_queuedResponses.clear();
-  /* we have already released idle connections that could be reused,
-     we don't care about the ones still waiting for responses */
-  for (auto& backend : d_ownedConnectionsToBackend) {
-    for (auto& conn : backend.second) {
-      conn->release(true);
-    }
-  }
-  d_ownedConnectionsToBackend.clear();
-
-  /* meaning we will no longer be 'active' when the backend
-     response or timeout comes in */
-  d_ioState.reset();
-
   /* if we do have remaining async descriptors associated with this TLS
      connection, we need to defer the destruction of the TLS object until
      the engine has reported back, otherwise we have a use-after-free.. */
@@ -510,6 +496,26 @@ void IncomingTCPConnectionState::terminateClientConnection()
       }
     }
   }
+}
+
+void IncomingTCPConnectionState::terminateClientConnection()
+{
+  DEBUGLOG("terminating client connection");
+  d_queuedResponses.clear();
+  /* we have already released idle connections that could be reused,
+     we don't care about the ones still waiting for responses */
+  for (auto& backend : d_ownedConnectionsToBackend) {
+    for (auto& conn : backend.second) {
+      conn->release(true);
+    }
+  }
+  d_ownedConnectionsToBackend.clear();
+
+  /* meaning we will no longer be 'active' when the backend
+     response or timeout comes in */
+  d_ioState.reset();
+
+  waitUntilAsyncOperationsAreDone();
 }
 
 void IncomingTCPConnectionState::queueResponse(std::shared_ptr<IncomingTCPConnectionState>& state, const struct timeval& now, TCPResponse&& response, bool fromBackend)
@@ -816,7 +822,7 @@ IncomingTCPConnectionState::QueryProcessingResult IncomingTCPConnectionState::ha
     ids.d_streamID = *streamID;
   }
 
-  auto dnsCryptResponse = checkDNSCryptQuery(*d_ci.cs, query, ids.dnsCryptQuery, ids.queryRealTime.d_start.tv_sec, true);
+  auto dnsCryptResponse = dnsdist::dnscrypt::checkDNSCryptQuery(*d_ci.cs, query, ids.dnsCryptQuery, ids.queryRealTime.d_start.tv_sec, true);
   if (dnsCryptResponse) {
     TCPResponse response;
     d_state = State::idle;
@@ -1252,6 +1258,7 @@ void IncomingTCPConnectionState::handleIO()
     if (maxConnectionDurationReached(dnsdist::configuration::getCurrentRuntimeConfiguration().d_maxTCPConnectionDuration, now)) {
       VERBOSESLOG(infolog("Terminating TCP connection from %s because it reached the maximum TCP connection duration", d_ci.remote.toStringWithPort()),
                   getLogger()->info(Logr::Info, "Terminating TCP connection because it reached the maximum TCP connection duration"));
+      ++d_ci.cs->tcpMaxDurationReached;
       // will be handled by the ioGuard
       // handleNewIOState(state, IOState::Done, fd, handleIOCallback);
       return;

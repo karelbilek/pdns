@@ -42,6 +42,9 @@ dnsdist is also available in `FreeBSD ports <https://www.freshports.org/dns/dnsd
 Installing from Source
 ----------------------
 
+.. versionchanged:: 2.2.0
+   Support for autotools and make have been removed, use the ``meson`` instructions.
+
 In order to compile dnsdist, a modern compiler with C++ 2017 support, a Python 3 interpreter with the ``YAML`` module, and either GNU make or ``meson`` with ``ninja`` are required.
 dnsdist depends on the following libraries:
 
@@ -76,48 +79,43 @@ Release tarballs are available `from the downloads site <https://downloads.power
 
 The release tarballs have detached PGP signatures, signed by one of these PGP keys:
 
-* `FBAE 0323 821C 7706 A5CA 151B DCF5 13FA 7EED 19F3 <https://pgp.mit.edu/pks/lookup?op=get&search=0xDCF513FA7EED19F3>`_
-* `D630 0CAB CBF4 69BB E392 E503 A208 ED4F 8AF5 8446 <https://pgp.mit.edu/pks/lookup?op=get&search=0xA208ED4F8AF58446>`_
-* `16E1 2866 B773 8C73 976A 5743 6FFC 3343 9B0D 04DF <https://pgp.mit.edu/pks/lookup?op=get&search=0x6FFC33439B0D04DF>`_
-* `990C 3D0E AC7C 275D C6B1 8436 EACA B90B 1963 EC2B <https://pgp.mit.edu/pks/lookup?op=get&search=0xEACAB90B1963EC2B>`_
+* `FBAE 0323 821C 7706 A5CA 151B DCF5 13FA 7EED 19F3 <https://keyserver.ubuntu.com/pks/lookup?fingerprint=on&op=index&search=DCF513FA7EED19F3>`_
+* `D630 0CAB CBF4 69BB E392 E503 A208 ED4F 8AF5 8446 <https://keyserver.ubuntu.com/pks/lookup?fingerprint=on&op=index&search=A208ED4F8AF58446>`_
+* `16E1 2866 B773 8C73 976A 5743 6FFC 3343 9B0D 04DF <https://keyserver.ubuntu.com/pks/lookup?fingerprint=on&op=index&search=6FFC33439B0D04DF>`_
+* `990C 3D0E AC7C 275D C6B1 8436 EACA B90B 1963 EC2B <https://keyserver.ubuntu.com/pks/lookup?fingerprint=on&op=index&search=EACAB90B1963EC2B>`_
 
 There is a PGP keyblock with these keys available on `https://dnsdist.org/_static/dnsdist-keyblock.asc <https://dnsdist.org/_static/dnsdist-keyblock.asc>`__.
 
 Older (1.0.x) releases can also be signed with one of the following keys:
 
-* `1628 90D0 689D D12D D33E 4696 1C5E E990 D2E7 1575 <https://pgp.mit.edu/pks/lookup?op=get&search=0x1C5EE990D2E71575>`_
-* `B76C D467 1C09 68BA A87D E61C 5E50 715B F2FF E1A7 <https://pgp.mit.edu/pks/lookup?op=get&search=0x5E50715BF2FFE1A7>`_
+* `1628 90D0 689D D12D D33E 4696 1C5E E990 D2E7 1575 <https://keyserver.ubuntu.com/pks/lookup?fingerprint=on&op=index&search=1C5EE990D2E71575>`_
+* `B76C D467 1C09 68BA A87D E61C 5E50 715B F2FF E1A7 <https://keyserver.ubuntu.com/pks/lookup?fingerprint=on&op=index&search=5E50715BF2FFE1A7>`_
 
-To compile from tarball:
+To compile from tarball using make (until version 2.2.0):
 
 * Untar the tarball and ``cd`` into the source directory
 * Run ``./configure``
 * Run ``make`` or ``gmake`` (on BSD)
+
+To compile from tarball using meson:
+
+* Untar the tarball and ``cd`` into the source directory
+* Run ``meson setup build``
+* Run ``meson compile -C build``
 
 From git
 ~~~~~~~~
 
 To compile from git, these additional dependencies are required:
 
-* GNU `Autoconf <https://www.gnu.org/software/autoconf/autoconf.html>`_
-* GNU `Automake <https://www.gnu.org/software/automake/>`_
 * `Ragel <https://www.colm.net/open-source/ragel/>`_
 
-dnsdist source code lives in the `PowerDNS git repository <https://github.com/PowerDNS/pdns>`_ but is independent of PowerDNS.
+:program:`dnsdist` source code lives in the `PowerDNS git repository <https://github.com/PowerDNS/pdns>`_ but is independent of PowerDNS.
 
-::
+.. code-block:: sh
 
   git clone https://github.com/PowerDNS/pdns.git
   cd pdns/pdns/dnsdistdist
-  autoreconf -i
-  ./configure
-  make
-
-Using meson
-~~~~~~~~~~~
-
-dnsdist can also be compiled with ``meson`` and ``ninja``. For example::
-
   meson setup build
   meson compile -C build
 

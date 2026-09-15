@@ -2,6 +2,216 @@ Changelogs for 4.9.x
 ====================
 
 .. changelog::
+  :version: 4.9.17
+  :released: 6th of August 2026
+
+  This is release 4.9.17 of the Authoritative Server.
+  It contains bug fixes, as well as a security fix.
+
+  Please review the :doc:`Upgrade Notes <../upgrading>` before upgrading from versions < 4.9.x.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17841
+    :tickets: 17835
+
+    iputils: do not index past the address for byte-aligned prefixes
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17837
+    :tickets: 17824
+
+    geoipbackend: create DNSSEC key files with mode 0600
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17813
+    :tickets: 17774
+
+    more lmdb stability
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17820
+    :tickets: 17797
+
+    Account for the existing content when parsing labels
+
+.. changelog::
+  :version: 4.9.16
+  :released: 25th of June 2026
+
+  This is release 4.9.16 of the Authoritative Server.
+  It contains a security fix only.
+
+  Please review the :doc:`Upgrade Notes <../upgrading>` before upgrading from versions < 4.9.x.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17591
+
+    Fix PowerDNS Security Advisory 2026-07 for PowerDNS Authoritative Server
+
+.. changelog::
+  :version: 4.9.15
+  :released: 20th of May 2026
+
+  This is release 4.9.15 of the Authoritative Server.
+  It contains bug fixes and security fixes.
+
+  Please review the :doc:`Upgrade Notes <../upgrading>` before upgrading from versions < 4.9.x.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17444
+
+    Fix PowerDNS Security Advisory 2026-06 for PowerDNS Authoritative Server: Multiple Issues
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17295
+    :tickets: 17284
+
+    use less inefficient code in web server
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17293
+    :tickets: 17240
+
+    harden xfr*BitInt writers
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17260
+    :tickets: 16636
+
+    perform axfr immediately when creating an autosecondary domain
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17262
+    :tickets: 16731
+
+    web: stricter control of statistics rings changes
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17265
+    :tickets: 16831
+
+    stricter handing of the Lua DNS update policy
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17267
+    :tickets: 17000
+
+    correctly delete ENT records from the API
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17269
+    :tickets: 17126
+
+    lua: one more bad case of createForward
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17271
+    :tickets: 17130
+
+    minor pdns_control bugfixes
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17272
+    :tickets: 17149
+
+    webserver: correctly split the basic authorization cookie
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17274
+    :tickets: 17152
+
+    fixes to AXFR in Bind backend
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17276
+    :tickets: 17155
+
+    dnsupdate handling buglet
+
+.. changelog::
+  :version: 4.9.14
+  :released: 22th of April 2026
+
+  This is release 4.9.14 of the Authoritative Server.
+  It contains security fixes only.
+
+  Please review the :doc:`Upgrade Notes <../upgrading>` before upgrading from versions < 4.9.x.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17192
+
+    Fix PowerDNS Security Advisory 2026-05 for PowerDNS Authoritative Server: Multiple Issues
+
+.. changelog::
+  :version: 4.9.13
+  :released: 20th of February 2026
+
+  This is release 4.9.13 of the Authoritative Server.
+  It contains bug fixes only.
+
+  Please review the :doc:`Upgrade Notes <../upgrading>` before upgrading from versions < 4.9.x.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 16877
+
+    fix stupid logic error in lmdb-write-update-notification=no
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 16875
+
+    Stricter timestamp checks
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 16873
+
+    Correctly compute public key exponent length when larger than 255.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 16788
+
+    lmdb: be sure to abort pending transactions in the correct order.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 16789
+
+    Wrap SSql pointers in a unique pointer earlier
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 16686
+
+    fix geoip_mmdb backend MMDB_open error handling
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 16684
+
+    more robustness in createReverse*
+
+.. changelog::
   :version: 4.9.12
   :released: 11th of December 2025
 

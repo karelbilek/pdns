@@ -267,7 +267,7 @@ private:
         }
         catch (const std::exception& e) {
           SLOG(infolog("Error parsing the status header for stream ID %d: %s", frame->hd.stream_id, e.what()),
-               dnsdist::logging::getTopLogger("nghttp2-incoming-unit-tests")->error(e.what(), "Error parsing the status header for stream", "http.stream_id", Logging::Loggable(frame->hd.stream_id)));
+               dnsdist::logging::getTopLogger("nghttp2-incoming-unit-tests")->error(Logr::Info, e.what(), "Error parsing the status header for stream", "http.stream_id", Logging::Loggable(frame->hd.stream_id)));
           return NGHTTP2_ERR_CALLBACK_FAILURE;
         }
       }
@@ -512,7 +512,7 @@ private:
 BOOST_FIXTURE_TEST_CASE(test_IncomingConnection_SelfAnswered, TestFixture)
 {
   auto local = getBackendAddress("1", 80);
-  ClientState localCS(local, true, false, 0, "", {}, true);
+  ClientState localCS(local, true, false, 0, "", {}, true, false);
   localCS.dohFrontend = std::make_shared<DOHFrontend>(std::make_shared<MockupTLSCtx>());
   localCS.dohFrontend->d_urls.insert("/dns-query");
 
@@ -701,7 +701,7 @@ BOOST_FIXTURE_TEST_CASE(test_IncomingConnection_SelfAnswered, TestFixture)
 BOOST_FIXTURE_TEST_CASE(test_IncomingConnection_BackendTimeout, TestFixture)
 {
   auto local = getBackendAddress("1", 80);
-  ClientState localCS(local, true, false, 0, "", {}, true);
+  ClientState localCS(local, true, false, 0, "", {}, true, false);
   localCS.dohFrontend = std::make_shared<DOHFrontend>(std::make_shared<MockupTLSCtx>());
   localCS.dohFrontend->d_urls.insert("/dns-query");
 
@@ -774,7 +774,7 @@ BOOST_FIXTURE_TEST_CASE(test_IncomingConnection_BackendTimeout, TestFixture)
 BOOST_FIXTURE_TEST_CASE(test_IncomingConnection_ClientTimeout_BackendTimeout, TestFixture)
 {
   auto local = getBackendAddress("1", 80);
-  ClientState localCS(local, true, false, 0, "", {}, true);
+  ClientState localCS(local, true, false, 0, "", {}, true, false);
   localCS.dohFrontend = std::make_shared<DOHFrontend>(std::make_shared<MockupTLSCtx>());
   localCS.dohFrontend->d_urls.insert("/dns-query");
 

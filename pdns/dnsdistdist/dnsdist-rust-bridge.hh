@@ -9,6 +9,32 @@ class DNSRule;
 
 #include "rust/cxx.h"
 
+/* the following replaces the default handling of exceptions
+   thrown from C++ code called from Rust. It is necessary because
+   some of our legacy code uses the special PDNSException that does
+   not inherit from std::exception
+*/
+#include "pdnsexception.hh"
+
+namespace rust::behavior
+{
+
+template <typename Try, typename Fail>
+static void trycatch(Try&& func, Fail&& fail) noexcept
+{
+  try {
+    func();
+  }
+  catch (const std::exception& exp) {
+    fail(exp.what());
+  }
+  catch (const PDNSException& exp) {
+    fail(exp.reason);
+  }
+}
+
+}
+
 namespace dnsdist::rust::settings
 {
 
@@ -32,13 +58,17 @@ struct DNSResponseActionWrapper
 
 struct ProtobufLoggerConfiguration;
 struct DnstapLoggerConfiguration;
+struct OtlpLoggerConfiguration;
 struct KeyValueStoresConfiguration;
+struct MmdbConfiguration;
 struct NetmaskGroupConfiguration;
 struct TimedIpSetConfiguration;
 
 void registerProtobufLogger(const ProtobufLoggerConfiguration& config);
 void registerDnstapLogger(const DnstapLoggerConfiguration& config);
+void registerOtlpLogger(const OtlpLoggerConfiguration& config);
 void registerKVSObjects(const KeyValueStoresConfiguration& config);
+void registerMMDBObjects(const ::rust::Vec<MmdbConfiguration>& config);
 void registerNMGObjects(const ::rust::Vec<NetmaskGroupConfiguration>& nmgs);
 void registerTimedIPSetObjects(const ::rust::Vec<TimedIpSetConfiguration>& sets);
 

@@ -272,6 +272,31 @@ IncomingHTTP2Connection::IncomingHTTP2Connection(ConnectionInfo&& connectionInfo
   sess = nullptr;
 }
 
+static void addDateHeader(PacketBuffer& out)
+{
+  static const std::string dateformat("Date: %a, %d %h %Y %T GMT\r\n");
+  timebuf_t date_header{};
+  struct tm tmval{};
+  time_t timestamp = time(nullptr);
+  // apparently someone might be crazy enough to change the locale using Lua (why?)
+  // so we have to do extra work just in case
+  auto* posixLocale = newlocale(LC_ALL_MASK, "POSIX", nullptr);
+  if (posixLocale == nullptr) {
+    return;
+  }
+  try {
+    size_t date_header_written = strftime_l(date_header.data(), date_header.size(), dateformat.data(), gmtime_r(&timestamp, &tmval), posixLocale);
+
+    if (date_header_written > 0 && date_header_written <= date_header.size()) {
+      out.insert(out.end(), date_header.begin(), date_header.begin() + date_header_written);
+    }
+  }
+  catch (...) {
+  }
+
+  freelocale(posixLocale);
+}
+
 bool IncomingHTTP2Connection::checkALPN()
 {
   constexpr std::array<uint8_t, 2> h2ALPN{'h', '2'};
@@ -285,19 +310,13 @@ bool IncomingHTTP2Connection::checkALPN()
     ++d_ci.cs->dohFrontend->d_http1Stats.d_nbQueries;
   }
 
-  static const std::string data0("HTTP/1.1 400 Bad Request\r\nConnection: Close\r\n");
+  static const std::string data0("HTTP/1.1 505 HTTP Version Not Supported\r\nConnection: Close\r\n");
+  d_out.insert(d_out.end(), data0.begin(), data0.end());
 
-  std::array<char, 40> data1{};
-  static const std::string dateformat("Date: %a, %d %h %Y %T GMT\r\n");
-  struct tm tmval{};
-  time_t timestamp = time(nullptr);
-  size_t len = strftime(data1.data(), data1.size(), dateformat.data(), gmtime_r(&timestamp, &tmval));
-  assert(len != 0);
+  addDateHeader(d_out);
 
   static const std::string data2("\r\n<html><body>This server implements RFC 8484 - DNS Queries over HTTP, and requires HTTP/2 in accordance with section 5.2 of the RFC.</body></html>\r\n");
 
-  d_out.insert(d_out.end(), data0.begin(), data0.end());
-  d_out.insert(d_out.end(), data1.begin(), data1.begin() + len);
   d_out.insert(d_out.end(), data2.begin(), data2.end());
   writeToSocket(false);
 
@@ -338,6 +357,7 @@ IOState IncomingHTTP2Connection::handleHandshake(const struct timeval& now)
     if (d_handler.isTLS()) {
       if (!checkALPN()) {
         d_connectionDied = true;
+        ++d_ci.cs->tcpBadALPN;
         stopIO();
         return iostate;
       }
@@ -387,6 +407,7 @@ void IncomingHTTP2Connection::handleIO()
     if (maxConnectionDurationReached(dnsdist::configuration::getCurrentRuntimeConfiguration().d_maxTCPConnectionDuration, now)) {
       VERBOSESLOG(infolog("Terminating DoH connection from %s because it reached the maximum TCP connection duration", d_ci.remote.toStringWithPort()),
                   getLogger()->info(Logr::Info, "Terminating DoH connection because it reached the maximum TCP connection duration", "max_tcp_connection_duration", Logging::Loggable(dnsdist::configuration::getCurrentRuntimeConfiguration().d_maxTCPConnectionDuration)));
+      ++d_ci.cs->tcpMaxDurationReached;
       stopIO();
       d_connectionClosing = true;
       return;
@@ -429,6 +450,7 @@ void IncomingHTTP2Connection::handleIO()
         }
       }
       else if (status == ProxyProtocolResult::Error) {
+        ++d_ci.cs->tcpBadProxyProtocol;
         d_connectionDied = true;
         stopIO();
         return;
@@ -454,7 +476,11 @@ void IncomingHTTP2Connection::handleIO()
       - if we have NeedRead, or nghttp2_session_want_read, wait until the socket
         becomes readable and call handleReadableIOCallback
     */
-    if (hasPendingWrite()) {
+    if (iostate == IOState::Async) {
+      /* the callback will be ignored in that specific case */
+      updateIO(IOState::Async, handleReadableIOCallback);
+    }
+    else if (hasPendingWrite()) {
       updateIO(IOState::NeedWrite, handleWritableIOCallback);
     }
     else if (iostate == IOState::NeedWrite) {
@@ -487,6 +513,7 @@ void IncomingHTTP2Connection::handleIO()
   catch (const std::exception& e) {
     VERBOSESLOG(infolog("Exception when processing IO for incoming DoH connection from %s: %s", d_ci.remote.toStringWithPort(), e.what()),
                 getLogger()->error(Logr::Info, e.what(), "Exception when processing IO for incoming DoH connection"));
+    ++d_ci.cs->tcpDiedDuringProcessing;
     d_connectionDied = true;
     stopIO();
   }
@@ -500,6 +527,7 @@ void IncomingHTTP2Connection::writeToSocket(bool socketReady)
 
     if (newState == IOState::Done) {
       d_pendingWrite = false;
+      d_lastIOBlocked = false; // setting this does matter, because it is used in IncomingTCPConnectionState::queueResponse
       d_out.clear();
       d_outPos = 0;
       if (active() && !d_connectionClosing) {
@@ -517,7 +545,7 @@ void IncomingHTTP2Connection::writeToSocket(bool socketReady)
   catch (const std::exception& e) {
     VERBOSESLOG(infolog("Exception while trying to write (%s) to HTTP client connection to %s: %s", (socketReady ? "ready" : "send"), d_ci.remote.toStringWithPort(), e.what()),
                 getLogger()->error(Logr::Info, e.what(), "Exception while trying to write to DoH client connection", "socket_ready", Logging::Loggable(socketReady ? "ready" : "send")));
-    handleIOError();
+    handleIOError(ErrorContext::ErrorWhileWritingToClient);
   }
 }
 
@@ -674,7 +702,13 @@ void IncomingHTTP2Connection::notifyIOError(const struct timeval& now, TCPRespon
 
 bool IncomingHTTP2Connection::sendResponse(IncomingHTTP2Connection::StreamID streamID, IncomingHTTP2Connection::PendingQuery& context, uint16_t responseCode, const HeadersMap& customResponseHeaders, const std::string& contentType, bool addContentType)
 {
-  /* if data_prd is not NULL, it provides data which will be sent in subsequent DATA frames. In this case, a method that allows request message bodies (https://tools.ietf.org/html/rfc7231#section-4) must be specified with :method key (e.g. POST). This function does not take ownership of the data_prd. The function copies the members of the data_prd. If data_prd is NULL, HEADERS have END_STREAM set.
+  /* if data_prd is not NULL, it provides data which will be sent in subsequent DATA frames.
+     In this case, a method that allows request message bodies (https://tools.ietf.org/html/rfc7231#section-4)
+     must be specified with :method key (e.g. POST).
+     This function does not take ownership of the data_prd. The function copies the members of the data_prd.
+     If data_prd is NULL, HEADERS have END_STREAM set.
+     If you are considering moving to nghttp2_data_provider2, please be aware that this does not exist
+     in nghttp2 1.43 as shipped by Debian 11, Ubuntu 22.04 and EL 9.
    */
   nghttp2_data_provider data_provider;
 
@@ -828,15 +862,16 @@ bool IncomingHTTP2Connection::sendResponse(IncomingHTTP2Connection::StreamID str
   return true;
 }
 
-static void processForwardedForHeader(std::shared_ptr<const Logr::Logger> logger, const std::unique_ptr<HeadersMap>& headers, ComboAddress& remote)
+static std::optional<ComboAddress> processForwardedForHeader(std::shared_ptr<const Logr::Logger> logger, const std::unique_ptr<HeadersMap>& headers, const ComboAddress& remote)
 {
+  std::optional<ComboAddress> result{std::nullopt};
   if (!headers) {
-    return;
+    return result;
   }
 
   auto headerIt = headers->find(s_xForwardedForHeaderName);
   if (headerIt == headers->end()) {
-    return;
+    return result;
   }
 
   std::string_view value = headerIt->second;
@@ -851,8 +886,7 @@ static void processForwardedForHeader(std::shared_ptr<const Logr::Logger> logger
         value = value.substr(pos);
       }
     }
-    auto newRemote = ComboAddress(std::string(value));
-    remote = newRemote;
+    result.emplace(std::string(value));
   }
   catch (const std::exception& e) {
     VERBOSESLOG(infolog("Invalid X-Forwarded-For header ('%s') received from %s : %s", std::string(value), remote.toStringWithPort(), e.what()),
@@ -862,6 +896,7 @@ static void processForwardedForHeader(std::shared_ptr<const Logr::Logger> logger
     VERBOSESLOG(infolog("Invalid X-Forwarded-For header ('%s') received from %s : %s", std::string(value), remote.toStringWithPort(), e.reason),
                 logger->error(Logr::Info, e.reason, "Invalid X-Forwarded-For header received", "http.request.header.x-forwarded-for", Logging::Loggable(value)));
   }
+  return result;
 }
 
 void IncomingHTTP2Connection::handleIncomingQuery(IncomingHTTP2Connection::PendingQuery&& query, IncomingHTTP2Connection::StreamID streamID)
@@ -887,7 +922,13 @@ void IncomingHTTP2Connection::handleIncomingQuery(IncomingHTTP2Connection::Pendi
   ++d_ci.cs->dohFrontend->d_http2Stats.d_nbQueries;
 
   if (d_ci.cs->dohFrontend->d_trustForwardedForHeader) {
-    processForwardedForHeader(dnsdist::logging::doVerboseLogging() ? getLogger() : std::shared_ptr<const Logr::Logger>(), query.d_headers, d_proxiedRemote);
+    auto xForwardedForRemote = processForwardedForHeader(dnsdist::logging::doVerboseLogging() ? getLogger() : std::shared_ptr<const Logr::Logger>(), query.d_headers, d_ci.remote);
+    if (xForwardedForRemote) {
+      d_proxiedRemote = std::move(*xForwardedForRemote);
+    }
+    else {
+      d_proxiedRemote = d_ci.remote;
+    }
 
     /* second ACL lookup based on the updated address */
     if (!dnsdist::configuration::getCurrentRuntimeConfiguration().d_ACL.match(d_proxiedRemote)) {
@@ -900,6 +941,16 @@ void IncomingHTTP2Connection::handleIncomingQuery(IncomingHTTP2Connection::Pendi
 
     if (!d_ci.cs->dohFrontend->d_keepIncomingHeaders) {
       query.d_headers.reset();
+    }
+  }
+  else if (!d_ci.cs->dohFrontend->d_earlyACLDrop) {
+    /* ONLY ACL lookup because the early check was skipped  */
+    if (!dnsdist::configuration::getCurrentRuntimeConfiguration().d_ACL.match(d_proxiedRemote)) {
+      ++dnsdist::metrics::g_stats.aclDrops;
+      VERBOSESLOG(infolog("Query from %s (%s) (DoH) dropped because of ACL", d_ci.remote.toStringWithPort(), d_proxiedRemote.toStringWithPort()),
+                  getLogger()->info(Logr::Info, "Dropping DoH query because of ACL"));
+      handleImmediateResponse(403, "DoH query not allowed because of ACL");
+      return;
     }
   }
 
@@ -1160,6 +1211,12 @@ int IncomingHTTP2Connection::on_header_callback(nghttp2_session* session, const 
       if (!query.d_headers) {
         query.d_headers = std::make_unique<HeadersMap>();
       }
+      if (query.d_headers->size() >= dnsdist::doh::MAX_INCOMING_HTTP_HEADERS) {
+        /* be nice but not too nice */
+        VERBOSESLOG(infolog("Too many incoming DoH headers"),
+                    conn->getLogger()->info(Logr::Info, "Too many incoming DoH headers"));
+        return NGHTTP2_ERR_CALLBACK_FAILURE;
+      }
       // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast): nghttp2 API
       query.d_headers->insert({std::string(reinterpret_cast<const char*>(name), nameLen), std::string(valueView)});
     }
@@ -1193,14 +1250,14 @@ int IncomingHTTP2Connection::on_data_chunk_recv_callback(nghttp2_session* sessio
 int IncomingHTTP2Connection::on_error_callback(nghttp2_session* session, int lib_error_code, const char* msg, size_t len, void* user_data)
 {
   (void)session;
-  auto* conn = static_cast<IncomingHTTP2Connection*>(user_data);
+  const auto* conn = static_cast<const IncomingHTTP2Connection*>(user_data);
 
   VERBOSESLOG(infolog("Error in HTTP/2 connection from %s: %s (%d)", conn->d_ci.remote.toStringWithPort(), std::string(msg, len), lib_error_code),
               conn->getLogger()->error(Logr::Info, std::string(msg, len), "Error on DoH connection", "nghttp2.error_code", Logging::Loggable(lib_error_code)));
-  conn->d_connectionClosing = true;
-  conn->d_needFlush = true;
-  nghttp2_session_terminate_session(conn->d_session.get(), NGHTTP2_NO_ERROR);
 
+  /* nothing to do except logging here, the library will take
+     care of closing the offending stream if possible, or the whole
+     connection if needed. */
   return 0;
 }
 
@@ -1222,6 +1279,7 @@ IOState IncomingHTTP2Connection::readHTTPData()
 
     if (got > 0) {
       /* we got something */
+      d_lastIOBlocked = false; // setting this does matter, because it is used in IncomingTCPConnectionState::queueResponse
       auto readlen = nghttp2_session_mem_recv(d_session.get(), d_in.data(), d_in.size());
       /* as long as we don't require a pause by returning nghttp2_error.NGHTTP2_ERR_PAUSE from a CB,
          all data should be consumed before returning */
@@ -1229,13 +1287,16 @@ IOState IncomingHTTP2Connection::readHTTPData()
         throw std::runtime_error("Fatal error while passing received data to nghttp2: " + std::string(nghttp2_strerror((int)readlen)));
       }
 
-      nghttp2_session_send(d_session.get());
+      auto sendCode = nghttp2_session_send(d_session.get());
+      if (sendCode != 0) {
+        throw std::runtime_error("Fatal error while flushing HTTP data: " + std::string(nghttp2_strerror(sendCode)));
+      }
     }
   }
   catch (const std::exception& e) {
     VERBOSESLOG(infolog("Exception while trying to read from HTTP client connection to %s: %s", d_ci.remote.toStringWithPort(), e.what()),
                 getLogger()->error(Logr::Info, e.what(), "Exception while trying to read from DoH client connection"));
-    handleIOError();
+    handleIOError(ErrorContext::ErrorWhileReadingFromClient);
     return IOState::Done;
   }
   return newState;
@@ -1258,6 +1319,7 @@ void IncomingHTTP2Connection::stopIO()
   if (d_ioState) {
     d_ioState->reset();
   }
+  waitUntilAsyncOperationsAreDone();
 }
 
 uint32_t IncomingHTTP2Connection::getConcurrentStreamsCount() const
@@ -1333,8 +1395,18 @@ void IncomingHTTP2Connection::updateIO(IOState newState, const FDMultiplexer::ca
   }
 }
 
-void IncomingHTTP2Connection::handleIOError()
+void IncomingHTTP2Connection::handleIOError(ErrorContext context)
 {
+  if (context == ErrorContext::ErrorWhileReadingFromClient) {
+    ++d_ci.cs->tcpDiedReadingQuery;
+  }
+  else if (context == ErrorContext::ErrorWhileWritingToClient) {
+    ++d_ci.cs->tcpDiedSendingResponse;
+  }
+  else {
+    ++d_ci.cs->tcpDiedDuringProcessing;
+  }
+
   d_connectionDied = true;
   d_out.clear();
   d_outPos = 0;

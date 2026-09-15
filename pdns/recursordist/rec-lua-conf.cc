@@ -68,6 +68,7 @@ bool operator==(const ProtobufExportConfig& configA, const ProtobufExportConfig&
   return configA.exportTypes          == configB.exportTypes       &&
          configA.servers              == configB.servers           &&
          configA.maxQueuedEntries     == configB.maxQueuedEntries  &&
+         configA.stalledWriteTimeout  == configB.stalledWriteTimeout &&
          configA.timeout              == configB.timeout           &&
          configA.reconnectWaitTime    == configB.reconnectWaitTime &&
          configA.asyncConnect         == configB.asyncConnect      &&
@@ -75,7 +76,10 @@ bool operator==(const ProtobufExportConfig& configA, const ProtobufExportConfig&
          configA.logQueries           == configB.logQueries        &&
          configA.logResponses         == configB.logResponses      &&
          configA.taggedOnly           == configB.taggedOnly        &&
-         configA.logMappedFrom        == configB.logMappedFrom;
+         configA.logMappedFrom        == configB.logMappedFrom     &&
+         configA.frame4               == configB.frame4            &&
+         configA.strategy             == configB.strategy
+    ;
   // clang-format on
 }
 
@@ -175,6 +179,31 @@ static void parseRPZParameters(const rpzOptions_t& have, RPZTrackerParams& param
 
 using protobufOptions_t = std::unordered_map<std::string, boost::variant<bool, uint64_t, std::string, std::vector<std::pair<int, std::string>>>>;
 
+const std::array<std::string, 4> ProtobufExportConfig::strategyNames = {
+  "All",
+  "RoundRobin",
+  "FirstAvailable",
+  "Hashed",
+};
+
+ProtobufExportConfig::Strategy ProtobufExportConfig::strategyFromString(const std::string& strategy)
+{
+  const auto* res = std::find(ProtobufExportConfig::strategyNames.begin(), strategyNames.end(), strategy);
+  if (res == ProtobufExportConfig::strategyNames.end()) {
+    throw runtime_error("Unknown strategy name " + strategy);
+  }
+  return static_cast<ProtobufExportConfig::Strategy>(res - ProtobufExportConfig::strategyNames.begin());
+}
+
+std::string ProtobufExportConfig::toString(ProtobufExportConfig::Strategy strategy)
+{
+  auto index = static_cast<size_t>(strategy);
+  if (index >= strategyNames.size()) {
+    return "?";
+  }
+  return strategyNames.at(index);
+}
+
 static void parseProtobufOptions(const std::optional<protobufOptions_t>& vars, ProtobufExportConfig& config)
 {
   if (!vars) {
@@ -212,6 +241,19 @@ static void parseProtobufOptions(const std::optional<protobufOptions_t>& vars, P
 
   if (have.count("logMappedFrom") != 0) {
     config.logMappedFrom = boost::get<bool>(have.at("logMappedFrom"));
+  }
+
+  if (have.count("frame4") != 0) {
+    config.frame4 = boost::get<bool>(have.at("frame4"));
+  }
+
+  if (have.count("strategy") != 0) {
+    const auto& strategy = boost::get<string>(have.at("strategy"));
+    config.strategy = ProtobufExportConfig::strategyFromString(strategy);
+  }
+
+  if (have.count("stalledWriteTimeout") != 0) {
+    config.stalledWriteTimeout = boost::get<uint64_t>(have.at("stalledWriteTimeout"));
   }
 
   if (have.count("exportTypes") != 0) {
@@ -334,6 +376,10 @@ static void rpzPrimary(LuaConfigItems& lci, const boost::variant<string, std::ve
       if (have.count("dumpFile") != 0) {
         params.dumpZoneFileName = boost::get<std::string>(have.at("dumpFile"));
       }
+
+      if (have.count("wipePacketCache") != 0) {
+        params.wipePacketCache = boost::get<bool>(have.at("wipePacketCache"));
+      }
     }
 
     if (params.zoneXFRParams.localAddress != ComboAddress()) {
@@ -351,7 +397,7 @@ static void rpzPrimary(LuaConfigItems& lci, const boost::variant<string, std::ve
     lci.d_slog->error(Logr::Error, e.what(), "Exception configuring 'rpzPrimary'", "exception", Logging::Loggable("std::exception"));
   }
   catch (const PDNSException& e) {
-    lci.d_slog->error(Logr::Error, e.reason, "Exception configuring 'rpzPrimary'", Logging::Loggable("PDNSException"));
+    lci.d_slog->error(Logr::Error, e.reason, "Exception configuring 'rpzPrimary'", "exception", Logging::Loggable("PDNSException"));
   }
 }
 
@@ -387,6 +433,7 @@ public:
 void loadRecursorLuaConfig(const std::string& fname, ProxyMapping& proxyMapping, LuaConfigItems& newLuaConfig) // NOLINT(readability-function-cognitive-complexity)
 {
   LuaConfigItems lci;
+  lci.keepWarm = newLuaConfig.keepWarm;
   if (g_slog) {
     lci.d_slog = g_slog->withName("luaconfig");
   }
@@ -651,10 +698,10 @@ void loadRecursorLuaConfig(const std::string& fname, ProxyMapping& proxyMapping,
         parseProtobufOptions(vars, lci.outgoingProtobufExportConfig);
       }
       catch (std::exception& e) {
-        lci.d_slog->error(Logr::Error, "Exception while starting outgoing protobuf logger", "exception", Logging::Loggable("std::exception"));
+        lci.d_slog->error(Logr::Error, e.what(), "Exception while starting outgoing protobuf logger", "exception", Logging::Loggable("std::exception"));
       }
       catch (PDNSException& e) {
-        lci.d_slog->error(Logr::Error, "Exception while starting outgoing protobuf logger", "exception", Logging::Loggable("PDNSException"));
+        lci.d_slog->error(Logr::Error, e.reason, "Exception while starting outgoing protobuf logger", "exception", Logging::Loggable("PDNSException"));
       }
     }
     else {
@@ -687,14 +734,14 @@ void loadRecursorLuaConfig(const std::string& fname, ProxyMapping& proxyMapping,
         parseFrameStreamOptions(vars, lci.frameStreamExportConfig);
       }
       catch (std::exception& e) {
-        lci.d_slog->error(Logr::Error, "Exception reading config for dnstap framestream logger", "exception", Logging::Loggable("std::exception"));
+        lci.d_slog->error(Logr::Error, e.what(), "Exception reading config for dnstap framestream logger", "exception", Logging::Loggable("std::exception"));
       }
       catch (PDNSException& e) {
-        lci.d_slog->error(Logr::Error, "Exception reading config for dnstap framestream logger", "exception", Logging::Loggable("PDNSException"));
+        lci.d_slog->error(Logr::Error, e.reason, "Exception reading config for dnstap framestream logger", "exception", Logging::Loggable("PDNSException"));
       }
     }
     else {
-      lci.d_slog->info(Logr::Error,  "Only one dnstapFrameStreamServer() directive can be configured",  "existing", Logging::Loggable(lci.frameStreamExportConfig.servers.at(0)));
+      lci.d_slog->info(Logr::Error, "Only one dnstapFrameStreamServer() directive can be configured",  "existing", Logging::Loggable(lci.frameStreamExportConfig.servers.at(0)));
     }
   });
   // NOLINTNEXTLINE(performance-unnecessary-value-param) Lua wrapper does not handle optional &
@@ -720,14 +767,14 @@ void loadRecursorLuaConfig(const std::string& fname, ProxyMapping& proxyMapping,
         parseFrameStreamOptions(vars, lci.nodFrameStreamExportConfig);
       }
       catch (std::exception& e) {
-        lci.d_slog->error(Logr::Error, "Exception reading config for dnstap NOD framestream logger", "exception", Logging::Loggable("std::exception"));
+        lci.d_slog->error(Logr::Error, e.what(), "Exception reading config for dnstap NOD framestream logger", "exception", Logging::Loggable("std::exception"));
       }
       catch (PDNSException& e) {
-        lci.d_slog->error(Logr::Error, "Exception reading config for dnstap NOD framestream logger", "exception", Logging::Loggable("PDNSException"));
+        lci.d_slog->error(Logr::Error, e.reason, "Exception reading config for dnstap NOD framestream logger", "exception", Logging::Loggable("PDNSException"));
       }
     }
     else {
-      lci.d_slog->info(Logr::Error,  "Only one dnstapNODFrameStreamServer() directive can be configured",  "existing", Logging::Loggable(lci.nodFrameStreamExportConfig.servers.at(0)));
+      lci.d_slog->info(Logr::Error, "Only one dnstapNODFrameStreamServer() directive can be configured",  "existing", Logging::Loggable(lci.nodFrameStreamExportConfig.servers.at(0)));
     }
   });
 #endif /* HAVE_FSTRM */

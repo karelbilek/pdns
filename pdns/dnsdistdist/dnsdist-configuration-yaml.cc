@@ -25,6 +25,10 @@
 #include <vector>
 
 #include "dnsdist-configuration-yaml.hh"
+#include "dnsdist-configuration.hh"
+#include "logging.hh"
+#include "logr.hh"
+#include "mmdb.hh"
 
 #if defined(HAVE_YAML_CONFIGURATION)
 #include "base64.hh"
@@ -42,7 +46,9 @@
 #include "dnsdist-web.hh"
 #include "dnsdist-xsk.hh"
 #include "fstrm_logger.hh"
+#include "otlp_logger.hh"
 #include "iputils.hh"
+#include "mmdb.hh"
 #include "remote_logger.hh"
 #include "remote_logger_pool.hh"
 #include "xsk.hh"
@@ -68,7 +74,7 @@ struct Context
 
 using XSKMap = std::vector<std::shared_ptr<XskSocket>>;
 
-using RegisteredTypes = std::variant<std::shared_ptr<DNSDistPacketCache>, std::shared_ptr<dnsdist::rust::settings::DNSSelector>, std::shared_ptr<dnsdist::rust::settings::DNSActionWrapper>, std::shared_ptr<dnsdist::rust::settings::DNSResponseActionWrapper>, std::shared_ptr<NetmaskGroup>, std::shared_ptr<KeyValueStore>, std::shared_ptr<KeyValueLookupKey>, std::shared_ptr<RemoteLoggerInterface>, std::shared_ptr<ServerPolicy>, std::shared_ptr<TimedIPSetRule>, std::shared_ptr<XSKMap>>;
+using RegisteredTypes = std::variant<std::shared_ptr<DNSDistPacketCache>, std::shared_ptr<dnsdist::rust::settings::DNSSelector>, std::shared_ptr<dnsdist::rust::settings::DNSActionWrapper>, std::shared_ptr<dnsdist::rust::settings::DNSResponseActionWrapper>, std::shared_ptr<NetmaskGroup>, std::shared_ptr<KeyValueStore>, std::shared_ptr<KeyValueLookupKey>, std::shared_ptr<RemoteLoggerInterface>, std::shared_ptr<ServerPolicy>, std::shared_ptr<TimedIPSetRule>, std::shared_ptr<XSKMap>, std::shared_ptr<MMDB>>;
 static LockGuarded<std::unordered_map<std::string, RegisteredTypes>> s_registeredTypesMap;
 static std::atomic<bool> s_inConfigCheckMode;
 static std::atomic<bool> s_inClientMode;
@@ -267,6 +273,7 @@ static TLSConfig getTLSConfigFromRustIncomingTLS([[maybe_unused]] const Context&
   }
   out.d_ciphers = std::string(incomingTLSConfig.ciphers);
   out.d_ciphers13 = std::string(incomingTLSConfig.ciphers_tls_13);
+  out.d_ecdheCurves = std::string(incomingTLSConfig.ecdhe_curves);
 #if defined(HAVE_LIBSSL)
   out.d_minTLSVersion = libssl_tls_version_from_string(std::string(incomingTLSConfig.minimum_version));
 #else /* HAVE_LIBSSL */
@@ -338,6 +345,7 @@ static bool handleTLSConfiguration(const Context& context, const dnsdist::rust::
     frontend->d_quicheParams.d_maxInFlight = bind.doq.max_concurrent_queries_per_connection;
     frontend->d_quicheParams.d_idleTimeout = bind.quic.idle_timeout;
     frontend->d_quicheParams.d_keyLogFile = std::string(bind.tls.key_log_file);
+    frontend->d_quicheParams.d_qLogDir = std::string(bind.quic.qlog_dir);
     frontend->d_quicheParams.d_ccAlgo = std::string(bind.quic.congestion_control_algorithm);
     frontend->d_internalPipeBufferSize = bind.quic.internal_pipe_buffer_size;
     state.doqFrontend = std::move(frontend);
@@ -350,8 +358,26 @@ static bool handleTLSConfiguration(const Context& context, const dnsdist::rust::
     frontend->d_quicheParams.d_tlsConfig = std::move(tlsConfig);
     frontend->d_quicheParams.d_idleTimeout = bind.quic.idle_timeout;
     frontend->d_quicheParams.d_keyLogFile = std::string(bind.tls.key_log_file);
+    frontend->d_quicheParams.d_qLogDir = std::string(bind.quic.qlog_dir);
     frontend->d_quicheParams.d_ccAlgo = std::string(bind.quic.congestion_control_algorithm);
     frontend->d_internalPipeBufferSize = bind.quic.internal_pipe_buffer_size;
+
+    if (!bind.doh.responses_map.empty()) {
+      auto newMap = std::make_shared<std::vector<std::shared_ptr<DOHResponseMapEntry>>>();
+      for (const auto& responsesMap : bind.doh.responses_map) {
+        std::optional<std::unordered_map<std::string, std::string>> headers;
+        if (!responsesMap.headers.empty()) {
+          headers = std::unordered_map<std::string, std::string>();
+          for (const auto& header : responsesMap.headers) {
+            headers->emplace(boost::to_lower_copy(std::string(header.key)), std::string(header.value));
+          }
+        }
+        auto entry = std::make_shared<DOHResponseMapEntry>(std::string(responsesMap.expression), responsesMap.status, PacketBuffer(responsesMap.content.begin(), responsesMap.content.end()), headers);
+        newMap->emplace_back(std::move(entry));
+      }
+      frontend->d_responsesMap = std::move(newMap);
+    }
+
     state.doh3Frontend = std::move(frontend);
   }
 #endif /* HAVE_DNS_OVER_HTTP3 */
@@ -371,7 +397,7 @@ static bool handleTLSConfiguration(const Context& context, const dnsdist::rust::
     }
     else {
       SLOG(errlog("DOH bind %s is configured to use an unknown library ('%s')", bind.listen_address, frontend->d_library),
-           context.logger->error(Logr::Error, "DoH frontend is configured to use an unknown library", "frontend.address", Logging::Loggable(bind.listen_address), "library", Logging::Loggable(frontend->d_library)));
+           context.logger->info(Logr::Error, "DoH frontend is configured to use an unknown library", "frontend.address", Logging::Loggable(bind.listen_address), "library", Logging::Loggable(frontend->d_library)));
       return false;
     }
 
@@ -441,8 +467,17 @@ static std::shared_ptr<DownstreamState> createBackendFromConfiguration(const Con
   backendConfig.d_numberOfSockets = config.sockets;
   backendConfig.d_qpsLimit = config.queries_per_second;
   backendConfig.order = config.order;
-  backendConfig.d_weight = config.weight;
+  if (config.weight < 1 || config.weight > std::numeric_limits<decltype(backendConfig.d_weight)>::max()) {
+    SLOG(warnlog("Ignoring invalid weight on backend %s", std::string(config.address)),
+         context.logger->info(Logr::Warning, "Ignoring invalid weight on backend", "backend.address", Logging::Loggable(config.address)));
+  }
+  else {
+    backendConfig.d_weight = static_cast<decltype(backendConfig.d_weight)>(config.weight);
+  }
+
   backendConfig.d_maxInFlightQueriesPerConn = config.max_in_flight;
+  backendConfig.d_maxUDPOutstanding = config.max_udp_outstanding;
+  backendConfig.d_maxOutstandingQueries = config.max_outstanding_queries;
   backendConfig.d_tcpConcurrentConnectionsLimit = config.max_concurrent_tcp_connections;
   backendConfig.name = std::string(config.name);
   if (!config.id.empty()) {
@@ -480,7 +515,8 @@ static std::shared_ptr<DownstreamState> createBackendFromConfiguration(const Con
   backendConfig.minRiseSuccesses = hcConf.rise;
   backendConfig.udpTimeout = config.udp_timeout;
 
-  getLuaFunctionFromConfiguration<DownstreamState::checkfunc_t>(backendConfig.checkFunction, hcConf.function, hcConf.lua, hcConf.lua_file, "backend health-check");
+  getLuaFunctionFromConfiguration<DownstreamState::HealthCheckQueryGenerator>(backendConfig.d_healthCheckGenerationFunction, hcConf.function, hcConf.lua, hcConf.lua_file, "backend health-check");
+  getLuaFunctionFromConfiguration<DownstreamState::HealthCheckResponseValidator>(backendConfig.d_healthCheckResponseValidationCallback, hcConf.validation_function, hcConf.validation_lua, hcConf.validation_lua_file, "backend health-check");
 
   DownstreamState::parseAvailabilityConfigFromStr(backendConfig, std::string(hcConf.mode));
 
@@ -522,6 +558,7 @@ static std::shared_ptr<DownstreamState> createBackendFromConfiguration(const Con
     boost::algorithm::to_lower(backendConfig.d_tlsParams.d_provider);
     backendConfig.d_tlsParams.d_ciphers = std::string(tlsConf.ciphers);
     backendConfig.d_tlsParams.d_ciphers13 = std::string(tlsConf.ciphers_tls_13);
+    backendConfig.d_tlsParams.d_ecdheCurves = std::string(tlsConf.ecdhe_curves);
     backendConfig.d_tlsParams.d_caStore = std::string(tlsConf.ca_store);
     backendConfig.d_tlsParams.d_keyLogFile = std::string(tlsConf.key_log_file);
     backendConfig.d_tlsParams.d_validateCertificates = tlsConf.validate_certificate;
@@ -688,6 +725,19 @@ static void loadDynamicBlockConfiguration(const dnsdist::rust::settings::Dynamic
         }
         dbrgObj->setRCodeRatio(strToRCode("dynamic-rules.rules.rcode_ratio", "rcode", rule.rcode), std::move(ruleParams));
       }
+      else if (rule.rule_type == "allowed-rcodes-ratio") {
+        std::unordered_set<uint8_t> allowed;
+        for (const auto& rcode : rule.allowed_rcodes) {
+          allowed.insert(strToRCode("dynamic-rules.rules.allowed_rcodes_ratio", "allowed_rcodes", rcode));
+        }
+        DynBlockRulesGroup::DynBlockAllowedRCodesRatioRule ruleParams(std::move(allowed), std::string(rule.comment), rule.action_duration, rule.ratio, rule.warning_ratio, rule.seconds, rule.action.empty() ? DNSAction::Action::None : DNSAction::typeFromString(std::string(rule.action)), rule.minimum_number_of_responses);
+        if (ruleParams.d_action == DNSAction::Action::SetTag && !rule.tag_name.empty()) {
+          ruleParams.d_tagSettings = std::make_shared<DynBlock::TagSettings>();
+          ruleParams.d_tagSettings->d_name = std::string(rule.tag_name);
+          ruleParams.d_tagSettings->d_value = std::string(rule.tag_value);
+        }
+        dbrgObj->setAllowedRCodesRatio(std::move(ruleParams));
+      }
       else if (rule.rule_type == "qtype-rate") {
         DynBlockRulesGroup::DynBlockRule ruleParams(std::string(rule.comment), rule.action_duration, rule.rate, rule.warning_rate, rule.seconds, rule.action.empty() ? DNSAction::Action::None : DNSAction::typeFromString(std::string(rule.action)));
         if (ruleParams.d_action == DNSAction::Action::SetTag && !rule.tag_name.empty()) {
@@ -792,7 +842,7 @@ static void loadBinds(const Context& context, const ::rust::Vec<dnsdist::rust::s
         std::shared_ptr<DNSCryptContext> dnsCryptContext;
 #endif /* defined(HAVE_DNSCRYPT) */
 
-        auto state = std::make_shared<ClientState>(listeningAddress, protocol != "doq" && protocol != "doh3", bind.reuseport, bind.tcp.fast_open_queue_size, std::string(bind.interface), cpus, bind.enable_proxy_protocol);
+        auto state = std::make_shared<ClientState>(listeningAddress, protocol != "doq" && protocol != "doh3", bind.reuseport, bind.tcp.fast_open_queue_size, std::string(bind.interface), cpus, bind.enable_proxy_protocol, bind.pad_responses);
 
         if (bind.tcp.listen_queue_size > 0) {
           state->tcpListenQueueSize = bind.tcp.listen_queue_size;
@@ -828,7 +878,7 @@ static void loadBinds(const Context& context, const ::rust::Vec<dnsdist::rust::s
         config.d_frontends.emplace_back(std::move(state));
         if (protocol == "do53" || protocol == "dnscrypt") {
           /* also create the UDP listener */
-          state = std::make_shared<ClientState>(ComboAddress(std::string(bind.listen_address), defaultPort), false, bind.reuseport, bind.tcp.fast_open_queue_size, std::string(bind.interface), cpus, bind.enable_proxy_protocol);
+          state = std::make_shared<ClientState>(ComboAddress(std::string(bind.listen_address), defaultPort), false, bind.reuseport, bind.tcp.fast_open_queue_size, std::string(bind.interface), cpus, bind.enable_proxy_protocol, bind.pad_responses);
 #if defined(HAVE_DNSCRYPT)
           state->dnscryptCtx = std::move(dnsCryptContext);
 #endif /* defined(HAVE_DNSCRYPT) */
@@ -901,6 +951,7 @@ static void loadWebServer(const Context& context, const dnsdist::rust::settings:
     dnsdist::webserver::setMaxConcurrentConnections(webConfig.max_concurrent_connections);
     config.d_apiConfigDirectory = std::string(webConfig.api_configuration_directory);
     config.d_apiReadWrite = webConfig.api_read_write;
+    config.d_webserverBindFatal = webConfig.bind_fatal;
   });
 }
 
@@ -1010,6 +1061,36 @@ static void handleLoggingConfiguration(const Context& context, const dnsdist::ru
     }
     config.d_structuredLoggingUseServerID = settings.structured.set_instance_from_server_id;
   });
+
+  if (!settings.open_telemetry_tracing.internal_tracing.empty() && !settings.open_telemetry_tracing.enabled) {
+    VERBOSESLOG(infolog("Internal OpenTelemetry tracing requested, but OpenTelemetry is disabled"),
+                context.logger->info(Logr::Info, "Internal OpenTelemetry tracing requested, but OpenTelemetry is disabled"));
+  }
+  else {
+    for (const auto& internal_trace_config : settings.open_telemetry_tracing.internal_tracing) {
+      dnsdist::configuration::updateRuntimeConfiguration([context, internal_trace_config](dnsdist::configuration::RuntimeConfiguration& config) {
+        if (internal_trace_config.kind == "maintenance") {
+          config.d_opentelemetryMaintenanceInterval = internal_trace_config.sample_rate == 0 ? 60 : internal_trace_config.sample_rate;
+          std::vector<std::shared_ptr<RemoteLoggerInterface>> loggers;
+          for (const auto& logger_name : internal_trace_config.remote_loggers) {
+            auto logger = dnsdist::configuration::yaml::getRegisteredTypeByName<RemoteLoggerInterface>(std::string(logger_name));
+            if (!logger) {
+              if (!(dnsdist::configuration::yaml::s_inClientMode || dnsdist::configuration::yaml::s_inConfigCheckMode)) {
+                throw std::runtime_error("Unable to find the remote logger named '" + std::string(logger_name) + "'");
+              }
+              continue;
+            }
+            RemoteLoggerInterface& remoteLoggerRef = *logger;
+            if (typeid(remoteLoggerRef) != typeid(RemoteLogger) && typeid(remoteLoggerRef) != typeid(OTLPLogger)) {
+              throw std::runtime_error("The remote logger '" + std::string(logger_name) + "' is not a Protobuf or OTLP logger and can not be used for maintenance traces");
+            }
+            loggers.push_back(std::move(logger));
+          }
+          config.d_maintenanceRemoteLoggers = std::move(loggers);
+        }
+      });
+    }
+  }
 }
 
 static void handleConsoleConfiguration(const dnsdist::rust::settings::ConsoleConfiguration& consoleConf)
@@ -1023,15 +1104,16 @@ static void handleConsoleConfiguration(const dnsdist::rust::settings::ConsoleCon
         config.d_consoleACL.addMask(std::string(aclEntry));
       }
       B64Decode(std::string(consoleConf.key), config.d_consoleKey);
+      config.d_consoleBindFatal = consoleConf.bind_fatal;
     });
   }
 }
 
-static void handlePacketCacheConfiguration(const ::rust::Vec<dnsdist::rust::settings::PacketCacheConfiguration>& caches)
+static void handlePacketCacheConfiguration(const Context& context, const ::rust::Vec<dnsdist::rust::settings::PacketCacheConfiguration>& caches)
 {
   for (const auto& cache : caches) {
     DNSDistPacketCache::CacheSettings settings{
-      .d_maxEntries = cache.size,
+      .d_maxEntries = static_cast<size_t>(cache.size),
       .d_maxTTL = cache.max_ttl,
       .d_minTTL = cache.min_ttl,
       .d_tempFailureTTL = cache.temporary_failure_ttl,
@@ -1044,6 +1126,13 @@ static void handlePacketCacheConfiguration(const ::rust::Vec<dnsdist::rust::sett
       .d_keepStaleData = cache.keep_stale_data,
       .d_shuffle = cache.shuffle,
     };
+
+    if (settings.d_maxEntries < settings.d_shardCount) {
+      SLOG(warnlog("The number of entries (%d) in the packet cache is smaller than the number of shards (%d), decreasing the number of shards to %d", settings.d_maxEntries, settings.d_shardCount, settings.d_maxEntries),
+           context.logger->info(Logr::Warning, "The number of entries in the packet cache is smaller than the number of shards, decreasing the number of shards to the number of entries", "number_of_entries", Logging::Loggable(settings.d_maxEntries), "number_of_shards", Logging::Loggable(settings.d_shardCount)));
+      settings.d_shardCount = settings.d_maxEntries;
+    }
+
     std::unordered_set<uint16_t> ranks;
     if (!cache.options_to_skip.empty()) {
       settings.d_optionsToSkip.clear();
@@ -1182,7 +1271,7 @@ bool loadConfigurationFromFile(const std::string& fileName, [[maybe_unused]] boo
 
 #if defined(HAVE_XSK)
     for (const auto& xskEntry : globalConfig.xsk) {
-      auto map = std::shared_ptr<XSKMap>();
+      auto map = std::make_shared<XSKMap>();
       for (size_t counter = 0; counter < xskEntry.queues; ++counter) {
         auto socket = std::make_shared<XskSocket>(xskEntry.frames, std::string(xskEntry.interface), counter, std::string(xskEntry.map_path));
         dnsdist::xsk::g_xsk.push_back(socket);
@@ -1259,7 +1348,7 @@ bool loadConfigurationFromFile(const std::string& fileName, [[maybe_unused]] boo
       });
     }
 
-    handlePacketCacheConfiguration(globalConfig.packet_caches);
+    handlePacketCacheConfiguration(context, globalConfig.packet_caches);
 
     loadCustomPolicies(globalConfig.load_balancing_policies.custom_policies);
 
@@ -1325,7 +1414,7 @@ bool loadConfigurationFromFile(const std::string& fileName, [[maybe_unused]] boo
 void addLuaBindingsForYAMLObjects([[maybe_unused]] LuaContext& luaCtx)
 {
 #if defined(HAVE_YAML_CONFIGURATION)
-  using ReturnValue = std::optional<boost::variant<std::shared_ptr<DNSDistPacketCache>, std::shared_ptr<DNSRule>, std::shared_ptr<DNSAction>, std::shared_ptr<DNSResponseAction>, std::shared_ptr<NetmaskGroup>, std::shared_ptr<KeyValueStore>, std::shared_ptr<KeyValueLookupKey>, std::shared_ptr<RemoteLoggerInterface>, std::shared_ptr<ServerPolicy>, std::shared_ptr<TimedIPSetRule>, std::shared_ptr<XSKMap>>>;
+  using ReturnValue = std::optional<boost::variant<std::shared_ptr<DNSDistPacketCache>, std::shared_ptr<DNSRule>, std::shared_ptr<DNSAction>, std::shared_ptr<DNSResponseAction>, std::shared_ptr<NetmaskGroup>, std::shared_ptr<KeyValueStore>, std::shared_ptr<KeyValueLookupKey>, std::shared_ptr<RemoteLoggerInterface>, std::shared_ptr<ServerPolicy>, std::shared_ptr<TimedIPSetRule>, std::shared_ptr<XSKMap>, std::shared_ptr<MMDB>>>;
 
   luaCtx.writeFunction("getObjectFromYAMLConfiguration", [](const std::string& name) -> ReturnValue {
     auto map = s_registeredTypesMap.lock();
@@ -1366,6 +1455,11 @@ void addLuaBindingsForYAMLObjects([[maybe_unused]] LuaContext& luaCtx)
     if (auto* ptr = std::get_if<std::shared_ptr<XSKMap>>(&item->second)) {
       return ReturnValue(*ptr);
     }
+#ifdef HAVE_MMDB
+    if (auto* ptr = std::get_if<std::shared_ptr<MMDB>>(&item->second)) {
+      return ReturnValue(*ptr);
+    }
+#endif
 
     return std::nullopt;
   });
@@ -1629,7 +1723,7 @@ std::shared_ptr<DNSSelector> getNetmaskGroupSelector(const NetmaskGroupSelectorC
 
 std::shared_ptr<DNSActionWrapper> getKeyValueStoreLookupAction([[maybe_unused]] const KeyValueStoreLookupActionConfiguration& config)
 {
-#if defined(HAVE_LMDB) || defined(HAVE_CDB)
+#if defined(HAVE_LMDB) || defined(HAVE_CDB) || defined(HAVE_MMDB)
   auto kvs = dnsdist::configuration::yaml::getRegisteredTypeByName<KeyValueStore>(std::string(config.kvs_name));
   if (!kvs && !(dnsdist::configuration::yaml::s_inClientMode || dnsdist::configuration::yaml::s_inConfigCheckMode)) {
     throw std::runtime_error("Unable to find the key-value store named '" + std::string(config.kvs_name) + "'");
@@ -1647,7 +1741,7 @@ std::shared_ptr<DNSActionWrapper> getKeyValueStoreLookupAction([[maybe_unused]] 
 
 std::shared_ptr<DNSActionWrapper> getKeyValueStoreRangeLookupAction([[maybe_unused]] const KeyValueStoreRangeLookupActionConfiguration& config)
 {
-#if defined(HAVE_LMDB) || defined(HAVE_CDB)
+#if defined(HAVE_LMDB) || defined(HAVE_CDB) || defined(HAVE_MMDB)
   auto kvs = dnsdist::configuration::yaml::getRegisteredTypeByName<KeyValueStore>(std::string(config.kvs_name));
   if (!kvs && !(dnsdist::configuration::yaml::s_inClientMode || dnsdist::configuration::yaml::s_inConfigCheckMode)) {
     throw std::runtime_error("Unable to find the key-value store named '" + std::string(config.kvs_name) + "'");
@@ -1665,7 +1759,7 @@ std::shared_ptr<DNSActionWrapper> getKeyValueStoreRangeLookupAction([[maybe_unus
 
 std::shared_ptr<DNSSelector> getKeyValueStoreLookupSelector([[maybe_unused]] const KeyValueStoreLookupSelectorConfiguration& config)
 {
-#if defined(HAVE_LMDB) || defined(HAVE_CDB)
+#if defined(HAVE_LMDB) || defined(HAVE_CDB) || defined(HAVE_MMDB)
   auto kvs = dnsdist::configuration::yaml::getRegisteredTypeByName<KeyValueStore>(std::string(config.kvs_name));
   if (!kvs && !(dnsdist::configuration::yaml::s_inClientMode || dnsdist::configuration::yaml::s_inConfigCheckMode)) {
     throw std::runtime_error("Unable to find the key-value store named '" + std::string(config.kvs_name) + "'");
@@ -1683,7 +1777,7 @@ std::shared_ptr<DNSSelector> getKeyValueStoreLookupSelector([[maybe_unused]] con
 
 std::shared_ptr<DNSSelector> getKeyValueStoreRangeLookupSelector([[maybe_unused]] const KeyValueStoreRangeLookupSelectorConfiguration& config)
 {
-#if defined(HAVE_LMDB) || defined(HAVE_CDB)
+#if defined(HAVE_LMDB) || defined(HAVE_CDB) || defined(HAVE_MMDB)
   auto kvs = dnsdist::configuration::yaml::getRegisteredTypeByName<KeyValueStore>(std::string(config.kvs_name));
   if (!kvs && !(dnsdist::configuration::yaml::s_inClientMode || dnsdist::configuration::yaml::s_inConfigCheckMode)) {
     throw std::runtime_error("Unable to find the key-value store named '" + std::string(config.kvs_name) + "'");
@@ -1762,11 +1856,12 @@ std::shared_ptr<DNSActionWrapper> getSetTraceAction(const SetTraceActionConfigur
   }
 
   dnsdist::actions::SetTraceActionConfiguration actionConfig{
-    .value = config.value,
     .remote_loggers = std::move(loggers),
-    .use_incoming_traceid = config.use_incoming_traceid,
-    .trace_edns_option = config.trace_edns_option,
-    .strip_incoming_traceid = config.strip_incoming_traceid,
+    .traceparentOptionCode = config.traceparent_edns_option_code,
+    .value = config.value,
+    .useIncomingTraceparent = config.use_incoming_traceparent,
+    .stripIncomingTraceparent = config.strip_incoming_traceparent,
+    .sendDownstreamTraceparent = config.send_downstream_traceparent,
   };
 
   auto action = dnsdist::actions::getSetTraceAction(actionConfig);
@@ -1798,12 +1893,19 @@ std::shared_ptr<DNSActionWrapper> getRemoteLogAction(const RemoteLogActionConfig
       actionConfig.tagsToExport->emplace(std::string(tag));
     }
   }
+  if (!config.export_tags_prefixes.empty()) {
+    for (const auto& prefix : config.export_tags_prefixes) {
+      actionConfig.tagsPrefixesToExport.emplace(std::string(prefix));
+    }
+  }
   dnsdist::actions::ProtobufAlterFunction alterFunc;
   if (dnsdist::configuration::yaml::getLuaFunctionFromConfiguration(alterFunc, config.alter_function_name, config.alter_function_code, config.alter_function_file, "remote log action")) {
     actionConfig.alterQueryFunc = std::move(alterFunc);
   }
   actionConfig.useServerID = config.use_server_id;
-  auto action = dnsdist::actions::getRemoteLogAction(actionConfig);
+  actionConfig.tagsExportKeyOnly = config.export_tags_key_only;
+  actionConfig.tagsStripPrefixes = config.export_tags_strip_prefixes;
+  auto action = dnsdist::actions::getRemoteLogAction(std::move(actionConfig));
   return newDNSActionWrapper(std::move(action), config.name);
 #endif
 }
@@ -1832,6 +1934,11 @@ std::shared_ptr<DNSResponseActionWrapper> getRemoteLogResponseAction(const Remot
       actionConfig.tagsToExport->emplace(std::string(tag));
     }
   }
+  if (!config.export_tags_prefixes.empty()) {
+    for (const auto& prefix : config.export_tags_prefixes) {
+      actionConfig.tagsPrefixesToExport.emplace(std::string(prefix));
+    }
+  }
   if (!config.export_extended_errors_to_meta.empty()) {
     actionConfig.exportExtendedErrorsToMeta = std::string(config.export_extended_errors_to_meta);
   }
@@ -1841,7 +1948,9 @@ std::shared_ptr<DNSResponseActionWrapper> getRemoteLogResponseAction(const Remot
   }
   actionConfig.delay = config.delay;
   actionConfig.useServerID = config.use_server_id;
-  auto action = dnsdist::actions::getRemoteLogResponseAction(actionConfig);
+  actionConfig.tagsExportKeyOnly = config.export_tags_key_only;
+  actionConfig.tagsStripPrefixes = config.export_tags_strip_prefixes;
+  auto action = dnsdist::actions::getRemoteLogResponseAction(std::move(actionConfig));
   return newDNSResponseActionWrapper(std::move(action), config.name);
 #endif
 }
@@ -1861,12 +1970,12 @@ void registerProtobufLogger(const ProtobufLoggerConfiguration& config)
     std::vector<std::shared_ptr<RemoteLoggerInterface>> loggers;
     loggers.reserve(config.connection_count);
     for (uint64_t i = 0; i < config.connection_count; i++) {
-      loggers.push_back(std::make_shared<RemoteLogger>(ComboAddress(std::string(config.address)), config.timeout, config.max_queued_entries * 100, config.reconnect_wait_time, dnsdist::configuration::yaml::s_inClientMode));
+      loggers.push_back(std::make_shared<RemoteLogger>(ComboAddress(std::string(config.address)), config.timeout, config.max_queued_entries * 100, config.reconnect_wait_time, dnsdist::configuration::yaml::s_inClientMode, RemoteLogger::FrameSize::Two, config.stalled_write_timeout));
     }
     object = std::shared_ptr<RemoteLoggerInterface>(std::make_shared<RemoteLoggerPool>(std::move(loggers)));
   }
   else {
-    object = std::shared_ptr<RemoteLoggerInterface>(std::make_shared<RemoteLogger>(ComboAddress(std::string(config.address)), config.timeout, config.max_queued_entries * 100, config.reconnect_wait_time, dnsdist::configuration::yaml::s_inClientMode));
+    object = std::shared_ptr<RemoteLoggerInterface>(std::make_shared<RemoteLogger>(ComboAddress(std::string(config.address)), config.timeout, config.max_queued_entries * 100, config.reconnect_wait_time, dnsdist::configuration::yaml::s_inClientMode, RemoteLogger::FrameSize::Two, config.stalled_write_timeout));
   }
   dnsdist::configuration::yaml::registerType<RemoteLoggerInterface>(object, config.name);
 #endif
@@ -1919,9 +2028,24 @@ void registerDnstapLogger([[maybe_unused]] const DnstapLoggerConfiguration& conf
 #endif
 }
 
+void registerOtlpLogger([[maybe_unused]] const OtlpLoggerConfiguration& config)
+{
+#if !defined(DISABLE_PROTOBUF) && defined(HAVE_LIBCURL)
+  if (dnsdist::configuration::yaml::s_inClientMode || dnsdist::configuration::yaml::s_inConfigCheckMode) {
+    auto object = std::shared_ptr<RemoteLoggerInterface>(nullptr);
+    dnsdist::configuration::yaml::registerType<RemoteLoggerInterface>(object, config.name);
+    return;
+  }
+  std::shared_ptr<RemoteLoggerInterface> object = std::make_shared<OTLPLogger>(std::string(config.address), config.interval, config.queue_size, config.batch_size);
+  dnsdist::configuration::yaml::registerType<RemoteLoggerInterface>(object, config.name);
+#else
+  throw std::runtime_error("Unable to create OTLP logger: OTLP support is disabled");
+#endif /* !defined(DISABLE_PROTOBUF) && defined(HAVE_LIBCURL) */
+}
+
 void registerKVSObjects([[maybe_unused]] const KeyValueStoresConfiguration& config)
 {
-#if defined(HAVE_LMDB) || defined(HAVE_CDB)
+#if defined(HAVE_LMDB) || defined(HAVE_CDB) || defined(HAVE_MMDB)
   bool createObjects = !dnsdist::configuration::yaml::s_inClientMode && !dnsdist::configuration::yaml::s_inConfigCheckMode;
 #if defined(HAVE_LMDB)
   for (const auto& lmdb : config.lmdb) {
@@ -1935,6 +2059,29 @@ void registerKVSObjects([[maybe_unused]] const KeyValueStoresConfiguration& conf
     dnsdist::configuration::yaml::registerType<KeyValueStore>(store, cdb.name);
   }
 #endif /* defined(HAVE_CDB) */
+#if defined(HAVE_MMDB)
+  for (const auto& mmdb : config.mmdb) {
+    auto definedMmdb = dnsdist::configuration::yaml::getRegisteredTypeByName<MMDB>(mmdb.mmdb);
+    if (!definedMmdb) {
+      throw std::runtime_error("Unable to find a MMDB named " + std::string(mmdb.mmdb));
+    }
+    LuaTypeOrArrayOf<std::string> queryParams;
+    if (!mmdb.query_param.empty()) {
+      queryParams = std::string(mmdb.query_param);
+    }
+    else {
+      std::vector<std::pair<int, std::string>> params;
+      params.reserve(mmdb.query_params.size());
+      int idx = 1;
+      for (const auto& param : mmdb.query_params) {
+        params.emplace_back(idx++, param);
+      }
+      queryParams = params;
+    }
+    auto store = createObjects ? std::shared_ptr<KeyValueStore>(std::make_shared<MMDBKVStore>(definedMmdb, queryParams)) : std::shared_ptr<KeyValueStore>();
+    dnsdist::configuration::yaml::registerType<KeyValueStore>(store, mmdb.name);
+  }
+#endif /* defined(HAVE_MMDB) */
   for (const auto& key : config.lookup_keys.source_ip_keys) {
     auto lookup = createObjects ? std::shared_ptr<KeyValueLookupKey>(std::make_shared<KeyValueLookupKeySourceIP>(key.v4_mask, key.v6_mask, key.include_port)) : std::shared_ptr<KeyValueLookupKey>();
     dnsdist::configuration::yaml::registerType<KeyValueLookupKey>(lookup, key.name);
@@ -1951,7 +2098,16 @@ void registerKVSObjects([[maybe_unused]] const KeyValueStoresConfiguration& conf
     auto lookup = createObjects ? std::shared_ptr<KeyValueLookupKey>(std::make_shared<KeyValueLookupKeyTag>(std::string(key.tag))) : std::shared_ptr<KeyValueLookupKey>();
     dnsdist::configuration::yaml::registerType<KeyValueLookupKey>(lookup, key.name);
   }
-#endif /* defined(HAVE_LMDB) || defined(HAVE_CDB) */
+#endif /* defined(HAVE_LMDB) || defined(HAVE_CDB) || defined(HAVE_MMDB) */
+}
+
+void registerMMDBObjects([[maybe_unused]] const ::rust::Vec<MmdbConfiguration>& config)
+{
+#ifdef HAVE_MMDB
+  for (const auto& mmdb : config) {
+    dnsdist::configuration::yaml::registerType<MMDB>(std::make_shared<MMDB>(std::string(mmdb.file_name), mmdb.mmap ? "mmap" : ""), mmdb.name);
+  }
+#endif
 }
 
 void registerNMGObjects(const ::rust::Vec<NetmaskGroupConfiguration>& nmgs)
@@ -2037,6 +2193,24 @@ std::shared_ptr<DNSSelector> getByNameSelector(const ByNameSelectorConfiguration
   auto ptr = dnsdist::configuration::yaml::getRegisteredTypeByName<DNSSelector>(config.selector_name);
   if (!ptr) {
     throw std::runtime_error("Unable to find a selector named " + std::string(config.selector_name));
+  }
+  return ptr;
+}
+
+std::shared_ptr<DNSActionWrapper> getByNameAction(const ByNameActionConfiguration& config)
+{
+  auto ptr = dnsdist::configuration::yaml::getRegisteredTypeByName<DNSActionWrapper>(config.action_name);
+  if (!ptr) {
+    throw std::runtime_error("Unable to find an action named " + std::string(config.action_name));
+  }
+  return ptr;
+}
+
+std::shared_ptr<DNSResponseActionWrapper> getByNameResponseAction(const ByNameResponseActionConfiguration& config)
+{
+  auto ptr = dnsdist::configuration::yaml::getRegisteredTypeByName<DNSResponseActionWrapper>(config.action_name);
+  if (!ptr) {
+    throw std::runtime_error("Unable to find an action named " + std::string(config.action_name));
   }
   return ptr;
 }

@@ -24,6 +24,10 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <optional>
+
+#include "ednsoptions.hh"
+#include "remote_logger.hh"
 
 #ifndef DISABLE_PROTOBUF
 #include "protozero-trace.hh"
@@ -31,6 +35,7 @@ using TraceID = pdns::trace::TraceID;
 using SpanID = pdns::trace::SpanID;
 using AnyValue = pdns::trace::AnyValue;
 using TracesData = pdns::trace::TracesData;
+using SpanKind = pdns::trace::Span::SpanKind;
 #else
 // Define the minimal things needed
 #include <variant>
@@ -38,6 +43,7 @@ using TraceID = int;
 using SpanID = int;
 using AnyValue = std::variant<std::string, int>;
 using TracesData = int;
+using SpanKind = int;
 #endif
 
 #include "lock.hh"
@@ -94,6 +100,13 @@ public:
   void setRootSpanID(const SpanID& spanID);
 
   /**
+   * @brief Set the name for the Scope Span
+   *
+   * @param name
+   */
+  void setScopeSpanName(const std::string& name);
+
+  /**
    * @brief Add an attribute to the Trace
    *
    * @param key
@@ -120,6 +133,16 @@ public:
    * @param value
    */
   void setSpanAttribute(const SpanID& spanID, const std::string& key, const AnyValue& value);
+
+  /**
+   * @brief Sets the Kind of a Span
+   *
+   * This does not work when the Tracer is not active
+   *
+   * @param spanID The SpanID of the Span to add the attribute to
+   * @param spanking The Kind to set the Span to
+   */
+  void setSpanKind(const SpanID& spanID, const SpanKind spankind);
 
   /**
    * @brief Sets the stop timestamp for a span
@@ -212,11 +235,30 @@ public:
         d_tracer->closeSpan(d_spanID);
       }
 #endif
-    };
-    Closer(const Closer&) = default;
-    Closer& operator=(const Closer&) = default;
-    Closer& operator=(Closer&&) noexcept = default;
-    Closer(Closer&&) = default;
+    }
+    Closer(const Closer&) = delete;
+    Closer& operator=(const Closer&) = delete;
+    Closer& operator=([[maybe_unused]] Closer&& rhs) noexcept
+    {
+#ifndef DISABLE_PROTOBUF
+      this->d_tracer = std::move(rhs.d_tracer);
+      this->d_spanID = rhs.d_spanID;
+      /* we wouldn't want to close it twice */
+      rhs.d_tracer.reset();
+      rhs.d_spanID.clear();
+#endif
+      return *this;
+    }
+    Closer([[maybe_unused]] Closer&& rhs) noexcept
+    {
+#ifndef DISABLE_PROTOBUF
+      this->d_tracer = std::move(rhs.d_tracer);
+      this->d_spanID = rhs.d_spanID;
+      /* we wouldn't want to close it twice */
+      rhs.d_tracer.reset();
+      rhs.d_spanID.clear();
+#endif
+    }
 
     /**
      * @brief Get the SpanID
@@ -233,6 +275,13 @@ public:
      * @return
      */
     void setAttribute(const std::string& key, const AnyValue& value);
+
+    /**
+     * @brief Set the Kind of Span
+     *
+     * @param spankind
+     */
+    void setKind(const SpanKind);
 
   private:
 #ifndef DISABLE_PROTOBUF
@@ -300,6 +349,7 @@ private:
     std::string name;
     SpanID span_id;
     SpanID parent_span_id;
+    SpanKind span_kind;
     uint64_t start_time_unix_nano;
     uint64_t end_time_unix_nano;
     std::vector<pdns::trace::KeyValue> attributes;
@@ -336,8 +386,26 @@ private:
       SpanID oldID;
       SpanID newID;
     } d_oldAndNewRootSpanID;
+
+    std::string scope_span_name;
   };
   LockGuarded<Data> d_data;
 #endif
 };
+
+std::vector<uint8_t> makeEDNSTraceParentOption(const std::shared_ptr<Tracer>& tracer);
+bool addTraceparentEdnsOptionToPacketBuffer(PacketBuffer& origBuf, const std::shared_ptr<Tracer>& tracer, const size_t qnameWireLength, const size_t proxyProtocolPayloadSize, const uint16_t traceparentOptionCode = EDNSOptionCode::TRACEPARENT, const bool isTCP = false);
+
+/*
+ * @brief Use this to *maybe* get an Internal Kind Closer in the current scope
+ *
+ * @param tracer A shared_ptr to a Tracer, if it is a nullptr, the returned closer is a nullopt
+ * @param spanName The name of the span
+ */
+std::optional<pdns::trace::dnsdist::Tracer::Closer> getCloserForInternalSpan([[maybe_unused]] std::shared_ptr<pdns::trace::dnsdist::Tracer>& tracer, [[maybe_unused]] const std::string& spanName);
+
+/*
+ * @brief sends the protobuf for tracer to remoteloggers
+ */
+void sendTracesToRemoteLoggers(const std::shared_ptr<Tracer>& tracer, const std::vector<std::shared_ptr<RemoteLoggerInterface>>& remoteloggers);
 } // namespace pdns::trace::dnsdist

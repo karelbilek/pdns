@@ -5,6 +5,8 @@
 #define BOOST_TEST_NO_MAIN
 
 #include <boost/test/unit_test.hpp>
+#include <boost/assign/list_of.hpp>
+#include <boost/tuple/tuple.hpp>
 
 #include <cmath>
 #include <numeric>
@@ -188,6 +190,14 @@ BOOST_AUTO_TEST_CASE(test_trim) {
 
   DNSName root(".");
   BOOST_CHECK_EQUAL(root.countLabels(), 0U);
+
+  w.trimToLabels(0);
+  BOOST_CHECK(w == root);
+
+  w.clear();
+  BOOST_CHECK(w.empty());
+  w.trimToLabels(0);
+  BOOST_CHECK(w.empty());
 }
 
 BOOST_AUTO_TEST_CASE(test_toolong) {
@@ -850,6 +860,17 @@ BOOST_AUTO_TEST_CASE(test_invalid_label_length) { // Invalid label length in qna
   BOOST_CHECK_THROW(DNSName dn(name.c_str(), name.size(), 0, true), std::range_error);
 }
 
+BOOST_AUTO_TEST_CASE(test_name_length_too_long_from_wire) {
+
+  string name("\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x05""stats""\x05""stats""\x02""fr""\x00", 256);
+  BOOST_CHECK_THROW(DNSName(name.c_str(), name.size(), 0, true), std::range_error);
+}
+
+BOOST_AUTO_TEST_CASE(test_name_length_too_long_from_wire_compressed) {
+  string name("\x0a""wwwwwwwwww""\x00""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x03""www""\x05""stats""\x05""stats""\x02""fr""\xc0""\x00", 265);
+  BOOST_CHECK_THROW(DNSName(name.c_str(), name.size(), 12, true), std::range_error);
+}
+
 BOOST_AUTO_TEST_CASE(test_compression) { // Compression test
 
   string name("\x03""com\x00""\x07""example\xc0""\x00""\x03""www\xc0""\x05", 21);
@@ -1098,5 +1119,49 @@ BOOST_AUTO_TEST_CASE(test_variantnames) {
   BOOST_CHECK_THROW(ZoneName zone("variants.r.us..dot..dot...dot....dot.....dots"),std::out_of_range);
 }
 #endif
+
+BOOST_AUTO_TEST_CASE(test_pdns_ilexicographical_compare) {
+  using case_t = boost::tuple<const std::string, const std::string, bool>;
+  using cases_t = std::list<case_t>;
+
+  cases_t cases = boost::assign::list_of
+    (case_t(std::string(""), std::string(""), false))
+    (case_t(std::string(""), std::string("abc"), true))
+    (case_t(std::string("abc"), std::string(""), false))
+    (case_t(std::string("abc"), std::string("abcd"), true))
+    (case_t(std::string("abcd"), std::string("abc"), false))
+    (case_t(std::string("abd"), std::string("abc"), false))
+    (case_t(std::string("abc"), std::string("abd"), true))
+    (case_t(std::string("abc"), std::string("Abc"), false))
+    (case_t(std::string("Abc"), std::string("abc"), false))
+  ;
+
+  for(const case_t& val :  cases) {
+    bool res = pdns_ilexicographical_compare(val.get<0>(), val.get<1>());
+    BOOST_CHECK_EQUAL(res, val.get<2>());
+  }
+}
+
+BOOST_AUTO_TEST_CASE(test_pdns_iequals) {
+  using case_t = boost::tuple<const std::string, const std::string, bool>;
+  using cases_t = std::list<case_t>;
+
+  cases_t cases = boost::assign::list_of
+    (case_t(std::string(""), std::string(""), true))
+    (case_t(std::string(""), std::string("abc"), false))
+    (case_t(std::string("abc"), std::string(""), false))
+    (case_t(std::string("abc"), std::string("abcd"), false))
+    (case_t(std::string("abcd"), std::string("abc"), false))
+    (case_t(std::string("abd"), std::string("abc"), false))
+    (case_t(std::string("abc"), std::string("abd"), false))
+    (case_t(std::string("abc"), std::string("Abc"), true))
+    (case_t(std::string("Abc"), std::string("abc"), true))
+  ;
+
+  for(const case_t& val :  cases) {
+    bool res = pdns_iequals(val.get<0>(), val.get<1>());
+    BOOST_CHECK_EQUAL(res, val.get<2>());
+  }
+}
 
 BOOST_AUTO_TEST_SUITE_END()

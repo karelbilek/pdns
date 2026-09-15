@@ -1,6 +1,36 @@
 Upgrade Guide
 =============
 
+2.1.x to 2.2.0
+--------------
+
+Queries received from clients that have the truncated bit (TC) set are now dropped.
+
+The internal web server now binds listening sockets with ``IPV6_V6ONLY`` set, which means that ``[::]`` no longer accepts IPv4 connections. If you want to listen on both IPv4 and IPv6, you need to add a second line with ``0.0.0.0`` to your existing configuration.
+
+2.1.0-beta2 to 2.1.0
+--------------------
+
+The :doc:`reference/ottrace` YAML configuration has changed.
+It is now a structure with a single ``enabled`` field.
+
+Old:
+
+.. code-block:: yaml
+
+  logging:
+    open_telemetry_tracing: true
+
+New:
+
+.. code-block:: yaml
+
+  logging:
+    open_telemetry_tracing:
+      enabled: true
+
+The use of :attr:`DNSQuestion.dh` is now deprecated and strongly discouraged as it has proven to be error-prone. :meth:`DNSQuestion.getHeader` and :meth:`DNSQuestion.setHeader` should be used instead.
+
 2.0.x to 2.1.0
 --------------
 
@@ -13,7 +43,11 @@ support HTTP/2, but might be one in setups running dnsdist behind a reverse-prox
 
 Structured logging is now enabled by default, and can be disabled via :func:`setStructuredLogging` or the ``--structured-logging`` command-line switch.
 
-:program:`dnsdist` now looks by default for a configuration file named ``dnsdist.yml`` in the system configuration directory (determined by the ``SYSCONFDIR`` variable during compilation), instead of ``dnsdist.conf``. Please be aware that if a file named ``dnsdist.lua`` is present in the system configuration directory, it will also be loaded but without the ability to use configuration directives. Please see :doc:`the YAML settings reference <reference/yaml-settings>` for more information.
+:program:`dnsdist` now looks by default for a configuration file named ``dnsdist.yml`` in the system configuration directory (determined by the ``SYSCONFDIR`` variable during compilation), instead of ``dnsdist.conf``. If ``dnsdist.yml`` does not exist, it will automatically fall back to ``dnsdist.conf``. That means that if you are upgrading an existing setup using the ``Lua`` configuration format in a ``dnsdist.conf`` file, you should not have to edit your configuration as long as you don't have a ``dnsdist.yml`` file in the system configuration directory.
+
+Please be aware that after loading a ``dnsdist.yml`` file, :program:`dnsdist` will check whether a file named ``dnsdist.lua`` is present in the system configuration directory, and if so that file will also be loaded but without the ability to use configuration directives. Please see :doc:`the YAML settings reference <reference/yaml-settings>` for more information.
+
+The webserver no longer allows cross-origin HTTP requests by default, please have a look at ``webserver.allow_cross_origin_requests`` (:func:`setWebserverConfig`'s ``allowCrossOriginRequests`` for Lua-based configurations) if your setup requires them.
 
 1.9.x to 2.0.0
 --------------

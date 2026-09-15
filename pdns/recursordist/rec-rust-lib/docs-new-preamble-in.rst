@@ -273,9 +273,14 @@ As of version 5.1.0, a protobuf server is defined as
     logResponses: true
     exportTypes: [A, AAAA, CNAME] Sequence of QType names
     logMappedFrom: false
+    frame4: false # since 5.5.0
+    strategy: All # since 5.5.0
+    stalledWriteTimeout: 5 # since 5.5.0
 
 .. versionchanged:: 5.3.0 The aliases ``max_queued_entries``, ``reconnect_wait_time``, ``tagged_only``, ``async_connect``, ``log_queries``, ``log_responses``, ``export_types``, ``log_mapped_from`` have been introduced.
-    
+
+.. versionchanged:: 5.5.0 The alias ``stalled_write_timeout`` has been introduced.
+
 An example of a ``protobuf_servers`` entry, which is a sequence of `ProtobufServer`_:
 
 .. code-block:: yaml
@@ -404,8 +409,11 @@ As of version 5.1.0, an RPZ entry is defined as
     axfrTimeout: number
     dumpFile: string
     seedFile: string
+    wipePacketCache: true
 
 .. versionchanged:: 5.3.0 The aliases ``defpol_override_local_data``, ``extended_error_code``, ``extended_error_extra``, ``include_soa``, ``ignore_duplicates``, ``policy_name``, ``overriddes_gettag``, ``zone_size_hint``, ``max_received_bytes``, ``local_address``, ``axfr_timeout``, ``dump_file``, ``seed_file`` have been introduced.
+
+.. versionchanged:: 5.5.0 The flag ``wipePacketCache`` (default ``true``) has been added. When set, relevant names from qname triggers are cleared from the packet cache on (re)load of the RPZ.
 
 If ``addresses`` is empty, the ``name`` field specifies the path name of the RPZ; otherwise, the ``name`` field defines the name of the RPZ.
 Starting with version 5.2.0, names instead of IP addresses can be used for ``addresses`` if
@@ -603,6 +611,8 @@ The ``pkcs12`` feature is only available starting with version 5.5.0 and if the 
 
 At the moment it is not possible to list additional properties of the TLS listener.
 
+.. _outgoing-tls-configuration:
+
 OutgoingTLSConfiguration
 ^^^^^^^^^^^^^^^^^^^^^^^^
 
@@ -621,6 +631,15 @@ As of version 5.4.0, an outgoing TLS (DoT) configuration is defined as
    subject_address: The subject IP address passed in the SNI value of the TLS handshake, and against which to validate the certificate presented by the backend. Default is to use the remote IP address if no nameserver name is available.
    ciphers: The TLS ciphers to use. The exact format depends on the provider used. When the OpenSSL provider is used, ciphers for TLS 1.3 must be specified via ciphers_tls_13.
    ciphers_tls_13: The ciphers to use for TLS 1.3, when the OpenSSL provider is used. When the GnuTLS provider is used, ciphers applies regardless of the TLS protocol and this setting is not used.
+   # Version 5.5.0 adds the fields below and apply to the OpenSSL provider only
+   client_certificate: The pathname of a file containing a TLS client certificate (PEM or PKCS12 format).
+   client_certificate_key: The pathname of a file containing the key corresponding to the client certificate (PEM format).
+   client_certificate_password: The password to unlock the PKCS12 file.
+
+If both the ``client_certificate`` and the ``client_certificate_key`` fields are set, the values specify unencrypted PEM files.
+The ``client_certificate_password`` field is ignored in that case.
+
+If the ``client_certificate_key`` field is not set but the ``client_certificate`` and ``client_certificate_password`` fields are set, the listed file is assumed to be an encrypted PKCS12 (also known as pfx) file containing both a key and the certificate chain.
 
 A :ref:`setting-yaml-outgoing.tls_configurations` section contains a sequence of `OutgoingTLSConfiguration`_, for example:
 
@@ -678,6 +697,26 @@ A :ref:`setting-yaml-logging.opentelemetry_trace_conditions` section contains a 
         traceid_only: false
 
 See :ref:`opentelemetry_tracing` for an explanation how to use OpenTelemetry Trace Conditions.
+
+QNameAndQType
+^^^^^^^^^^^^^^
+
+As of version 5.5.0, a QNameAndType is defined as
+
+.. code-block:: yaml
+
+   qname: a DNS name
+   qtype: a text representation of aQType, default is A.
+
+A :ref:`setting-yaml-recordcache.keepwarm` section contains a sequence of `QNameAndQType`_, for example:
+
+.. code-block:: yaml
+
+  recordcache:
+    keepwarm:
+      - qname: www.example.com
+      - qname: www.example.com
+        qtype: AAAA
 
 The YAML settings
 -----------------

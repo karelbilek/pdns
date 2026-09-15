@@ -36,6 +36,7 @@
 #include "dnsdist-rings.hh"
 #include "dnsdist-snmp.hh"
 #include "dnsdist-tcp.hh"
+#include "dnsdist-udp.hh"
 #include "dnsdist-xsk.hh"
 #include "dolog.hh"
 #include "xsk.hh"
@@ -134,6 +135,8 @@ bool DownstreamState::reconnect(bool initialAttempt)
       }
     }
 #endif
+
+    dnsdist::udp::setUDPSocketBufferSizes(fd, *getLogger(), dnsdist::udp::Context::Backend, d_config.remote);
 
     if (!IsAnyAddress(d_config.sourceAddr)) {
 #ifdef IP_BIND_ADDRESS_NO_PORT
@@ -365,7 +368,7 @@ void DownstreamState::start()
     }
 #endif /* HAVE_XSK */
 
-    auto tid = std::thread(responderThread, shared_from_this());
+    auto tid = std::thread(dnsdist::udp::responderThread, shared_from_this());
     if (!d_config.d_cpus.empty()) {
       mapThreadToCPUList(tid.native_handle(), d_config.d_cpus);
     }
@@ -380,7 +383,8 @@ void DownstreamState::connectUDPSockets()
     idStates.clear();
   }
   else {
-    idStates.resize(config.d_maxUDPOutstanding);
+    const auto maxUDPOutstanding = d_config.d_maxUDPOutstanding > 0 ? d_config.d_maxUDPOutstanding : config.d_maxUDPOutstanding;
+    idStates.resize(maxUDPOutstanding);
   }
   sockets.resize(d_config.d_numberOfSockets);
 
@@ -456,10 +460,10 @@ void DownstreamState::handleUDPTimeout(IDState& ids)
   ++reuseds;
   --outstanding;
   ++dnsdist::metrics::g_stats.downstreamTimeouts; // this is an 'actively' discovered timeout
-  SLOG(infolog("Had a downstream timeout from %s (%s) for query for %s|%s from %s",
-               d_config.remote.toStringWithPort(), getName(),
-               ids.internal.qname.toLogString(), QType(ids.internal.qtype).toString(), ids.internal.origRemote.toStringWithPort()),
-       getLogger()->info(Logr::Info, "Had a downstream timeout", "dns.question.name", Logging::Loggable(ids.internal.qname), "dns.question.type", Logging::Loggable(ids.internal.qtype), "dns.question.class", Logging::Loggable(ids.internal.qclass), "dns.question.id", Logging::Loggable(ntohs(ids.internal.origID)), "client.address", Logging::Loggable(ids.internal.origRemote)));
+  VERBOSESLOG(infolog("Had a downstream timeout from %s (%s) for query for %s|%s from %s",
+                      d_config.remote.toStringWithPort(), getName(),
+                      ids.internal.qname.toLogString(), QType(ids.internal.qtype).toString(), ids.internal.origRemote.toStringWithPort()),
+              getLogger()->info(Logr::Info, "Had a downstream timeout", "dns.question.name", Logging::Loggable(ids.internal.qname), "dns.question.type", Logging::Loggable(ids.internal.qtype), "dns.question.class", Logging::Loggable(ids.internal.qclass), "dns.question.id", Logging::Loggable(ntohs(ids.internal.origID)), "client.address", Logging::Loggable(ids.internal.origRemote)));
 
   const auto& chains = dnsdist::configuration::getCurrentRuntimeConfiguration().d_ruleChains;
   const auto& timeoutRespRules = dnsdist::rules::getResponseRuleChain(chains, dnsdist::rules::ResponseRuleChain::TimeoutResponseRules);
@@ -478,7 +482,7 @@ void DownstreamState::handleUDPTimeout(IDState& ids)
     uint16_t* flags = getFlagsFromDNSHeader(&fake);
     *flags = ids.internal.origFlags;
 
-    g_rings.insertResponse(now, ids.internal.origRemote, ids.internal.qname, ids.internal.qtype, std::numeric_limits<unsigned int>::max(), 0, fake, d_config.remote, getProtocol());
+    g_rings.insertResponse(now, ids.internal.origRemote, std::move(ids.internal.qname), ids.internal.qtype, std::numeric_limits<unsigned int>::max(), 0, fake, d_config.remote, getProtocol());
   }
 
   reportTimeoutOrError();
@@ -581,7 +585,7 @@ uint16_t DownstreamState::saveState(InternalQueryState&& state)
 
   do {
     uint16_t selectedID = (idOffset++) % idStates.size();
-    IDState& ids = idStates[selectedID];
+    IDState& ids = idStates.at(selectedID);
     auto guard = ids.acquire();
     if (!guard) {
       continue;
@@ -624,7 +628,7 @@ void DownstreamState::restoreState(uint16_t id, InternalQueryState&& state)
     return;
   }
 
-  auto& ids = idStates[id];
+  auto& ids = idStates.at(id);
   auto guard = ids.acquire();
   if (!guard) {
     /* already used */
@@ -663,11 +667,11 @@ std::optional<InternalQueryState> DownstreamState::getState(uint16_t id)
     return result;
   }
 
-  if (id > idStates.size()) {
+  if (id >= idStates.size()) {
     return result;
   }
 
-  auto& ids = idStates[id];
+  auto& ids = idStates.at(id);
   auto guard = ids.acquire();
   if (!guard) {
     return result;
@@ -1043,11 +1047,28 @@ unsigned int DownstreamState::getQPSLimit() const
   return dnsdist::logging::getTopLogger("backend")->withValues("backend.name", Logging::Loggable(getName()), "backend.address", Logging::Loggable(d_config.remote), "backend.protocol", Logging::Loggable(getProtocol()));
 }
 
+bool DownstreamState::canAcceptNewQueries(bool enforceQPS) const
+{
+  if (!isUp()) {
+    return false;
+  }
+
+  if (d_config.d_maxOutstandingQueries > 0 && outstanding.load() >= d_config.d_maxOutstandingQueries) {
+    return false;
+  }
+
+  if (enforceQPS && d_qpsLimiter && !d_qpsLimiter->checkOnly()) {
+    return false;
+  }
+
+  return true;
+}
+
 size_t ServerPool::countServers(bool upOnly) const
 {
   size_t count = 0;
   for (const auto& server : d_servers) {
-    if (!upOnly || std::get<1>(server)->isUp()) {
+    if (!upOnly || std::get<1>(server)->canAcceptNewQueries(true)) {
       count++;
     }
   }
@@ -1069,7 +1090,7 @@ bool ServerPool::hasAtLeastOneServerAvailable() const
 {
   // NOLINTNEXTLINE(readability-use-anyofallof): no it's not more readable
   for (const auto& server : d_servers) {
-    if (std::get<1>(server)->isUp()) {
+    if (std::get<1>(server)->canAcceptNewQueries(true)) {
       return true;
     }
   }

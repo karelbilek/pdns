@@ -15,7 +15,7 @@ Configuring Protocol Buffer logs
 --------------------------------
 Protobuf export to a server is enabled using the ``protobufServer()`` directive:
 
-.. function:: protobufServer(servers [, options]))
+.. function:: protobufServer(servers [, options])
 
   .. versionadded:: 4.2.0
   .. versionadded:: 5.1.0 Alternative equivalent YAML setting: :ref:`setting-yaml-logging.protobuf_servers`.
@@ -49,18 +49,18 @@ Protobuf export to a server is enabled using the ``protobufServer()`` directive:
 
      Added support for the HTTPS, SVCB and NAPTR record types.
 
-.. function:: protobufServer(server [[[[[[[, timeout=2], maxQueuedEntries=100], reconnectWaitTime=1], maskV4=32], maskV6=128], asyncConnect=false], taggedOnly=false])
+  .. versionadded:: 5.5.0
 
-  .. deprecated:: 4.2.0
+  * ``frame4=false``: bool - Whether to use 4 byte ints as framing value. Default is to use 2 bytes, which limits the message size to 64k.
+  * ``strategy='All'``: string - The strategy to use, possible values are:
 
-  :param string server: The IP and port to connect to
-  :param int timeout: Time in seconds to wait when sending a message
-  :param int maxQueuedEntries: How many entries will be kept in memory if the server becomes unreachable
-  :param int reconnectWaitTime: How long to wait, in seconds, between two reconnection attempts
-  :param int maskV4: network mask to apply to the client IPv4 addresses, for anonymization purposes. The default of 32 means no anonymization.
-  :param int maskV6: Same as maskV4, but for IPv6. Defaults to 128.
-  :param bool taggedOnly: Only entries with a policy or a policy tag set will be sent.
-  :param bool asyncConnect: When set to false (default) the first connection to the server during startup will block up to ``timeout`` seconds; otherwise, the connection is done in a separate thread, after the first message has been queued..
+    - ``'All'`` send to all servers.
+    - ``'RoundRobin'`` alternate between servers in a cyclic way.
+    - ``'FirstAvailable'`` send to first server that has room in its queue.
+    - ``'Hashed'`` send to a single server, indexed by a hash of the qname and client address.
+
+
+  * ``stalledWriteTimeout=5``: int - If we have been unable to write or buffer data on our side of the TCP socket for that long, in seconds, consider that the remote endpoint has died and reconnect.
 
 .. function:: setProtobufMasks(maskv4, maskV6)
 
@@ -104,15 +104,19 @@ While :func:`protobufServer` only exports the queries sent to the recursor from 
 
      Added support for the HTTPS, SVCB and NAPTR records types.
 
-.. function:: outgoingProtobufServer(server [[[[, timeout=2], maxQueuedEntries=100], reconnectWaitTime=1], asyncConnect=false])
+  .. versionadded:: 5.5.0
 
-  .. deprecated:: 4.2.0
+  * ``frame4=false``: bool - Whether to use 4 byte ints as framing value. Default is to use 2 bytes, which limits the message size to 64k.
+  * ``strategy='All'``: string - The strategy to use, possible values are:
 
-  :param string server: The IP and port to connect to
-  :param int timeout: Time in seconds to wait when sending a message
-  :param int maxQueuedEntries: How many entries will be kept in memory if the server becomes unreachable
-  :param int reconnectWaitTime: How long to wait, in seconds, between two reconnection attempts
-  :param bool asyncConnect: When set to false (default) the first connection to the server during startup will block up to ``timeout`` seconds; otherwise, the connection is done in a separate thread, after the first message has been queued..
+    - ``'All'`` send to all servers.
+    - ``'RoundRobin'`` alternate between servers in a cyclic way.
+    - ``'FirstAvailable'`` send to first server that has room in its queue.
+    - ``'Hashed'`` send to a single server, indexed by a hash of the qname and client address.
+
+
+  * ``stalledWriteTimeout=5``: int - If we have been unable to write or buffer data on our side of the TCP socket for that long, in seconds, consider that the remote endpoint has died and reconnect.
+
 
 Protocol Buffers Definition
 ---------------------------

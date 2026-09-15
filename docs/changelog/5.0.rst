@@ -2,6 +2,218 @@ Changelogs for 5.0.x
 ====================
 
 .. changelog::
+  :version: 5.0.7
+  :released: 6th of August 2026
+
+  This is release 5.0.7 of the Authoritative Server.
+  It contains bug fixes, as well as a security fix.
+
+  Please review the :doc:`Upgrade Notes <../upgrading>` before upgrading from versions < 5.0.x.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17842
+    :tickets: 17835
+
+    iputils: do not index past the address for byte-aligned prefixes
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17838
+    :tickets: 17824
+
+    geoipbackend: create DNSSEC key files with mode 0600
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17812
+    :tickets: 17774
+
+    more lmdb stability
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17819
+    :tickets: 17797
+
+    Account for the existing content when parsing label
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17633
+    :tickets: 16965
+
+    Use the proper size after processing a proxy protocol payload
+
+.. changelog::
+  :version: 5.0.6
+  :released: 25th of June 2026
+
+  This is release 5.0.6 of the Authoritative Server.
+  It contains a security fix only.
+
+  Please review the :doc:`Upgrade Notes <../upgrading>` before upgrading from versions < 5.0.x.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17590
+
+    Fix PowerDNS Security Advisory 2026-07 for PowerDNS Authoritative Server
+
+.. changelog::
+  :version: 5.0.5
+  :released: 20th of May 2026
+
+  This is release 5.0.5 of the Authoritative Server.
+  It contains bug fixes and security fixes.
+
+  Please review the :doc:`Upgrade Notes <../upgrading>` before upgrading from versions < 5.0.x.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17443
+
+    Fix PowerDNS Security Advisory 2026-06 for PowerDNS Authoritative Server: Multiple Issues
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17296
+    :tickets: 17284
+
+    use less inefficient code in web server
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17294
+    :tickets: 17240
+
+    harden xfr*BitInt writers
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17259
+    :tickets: 16636
+
+    perform axfr immediately when creating an autosecondary domain
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17261
+    :tickets: 16671
+
+    Actually install binaries when building with meson
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17263
+    :tickets: 16731
+
+    web: stricter control of statistics rings changes
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17264
+    :tickets: 16831
+
+    stricter handing of the Lua DNS update policy
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17266
+    :tickets: 17000
+
+    correctly delete ENT records from the API
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17268
+    :tickets: 17126
+
+    lua: one more bad case of createForward
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17270
+    :tickets: 17130
+
+    minor pdns_control bugfixes
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17273
+    :tickets: 17149
+
+    webserver: correctly split the basic authorization cookie
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17275
+    :tickets: 17152
+
+    fixes to AXFR in Bind backend
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17277
+    :tickets: 17155
+
+    dnsupdate handling buglet
+
+.. changelog::
+  :version: 5.0.4
+  :released: 22th of April 2026
+
+  This is release 5.0.4 of the Authoritative Server.
+  It contains security fixes only.
+
+  Please review the :doc:`Upgrade Notes <../upgrading>` before upgrading from versions < 5.0.x.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 17191
+
+    Fix PowerDNS Security Advisory 2026-05 for PowerDNS Authoritative Server: Multiple Issues
+
+.. changelog::
+  :version: 5.0.3
+  :released: 20th of February 2026
+
+  This is release 5.0.3 of the Authoritative Server.
+  It contains bug fixes only.
+
+  Please review the :doc:`Upgrade Notes <../upgrading>` before upgrading from versions < 5.0.x.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 16878
+
+    fix stupid logic error in lmdb-write-update-notification=no
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 16876
+
+    Stricter timestamp checks
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 16874
+
+    Correctly compute public key exponent length when larger than 255.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 16685
+
+    fix geoip_mmdb backend MMDB_open error handling
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 16683
+
+    more robustness in createReverse*
+
+.. changelog::
   :version: 5.0.2
   :released: 11th of December 2025
 

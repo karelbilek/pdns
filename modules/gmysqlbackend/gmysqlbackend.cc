@@ -39,28 +39,36 @@
 gMySQLBackend::gMySQLBackend(const string& mode, const string& suffix) :
   GSQLBackend(mode, suffix)
 {
+  if (g_slogStructured) {
+    d_slog = g_slog->withName("gmysql" + suffix);
+  }
+
   try {
-    reconnect();
+    // Explicit call rather than virtual method call, to silence clang-tidy
+    gMySQLBackend::reconnect();
   }
 
   catch (SSqlException& e) {
-    g_log << Logger::Error << mode << " Connection failed: " << e.txtReason() << endl;
+    SLOG(g_log << Logger::Error << mode << " Connection failed: " << e.txtReason() << endl,
+         d_slog->error(Logr::Error, e.txtReason(), "Database connection failed"));
     throw PDNSException("Unable to launch " + mode + " connection: " + e.txtReason());
   }
-  g_log << Logger::Info << mode << " Connection successful. Connected to database '" << getArg("dbname") << "' on '" << (getArg("host").empty() ? getArg("socket") : getArg("host")) << "'." << endl;
+  SLOG(g_log << Logger::Info << mode << " Connection successful. Connected to database '" << getArg("dbname") << "' on '" << (getArg("host").empty() ? getArg("socket") : getArg("host")) << "'." << endl,
+       d_slog->info(Logr::Info, "Database connection successful", "database", Logging::Loggable(getArg("dbname")), "host", Logging::Loggable(getArg("host").empty() ? getArg("socket") : getArg("host"))));
 }
 
 void gMySQLBackend::reconnect()
 {
-  setDB(std::unique_ptr<SSql>(new SMySQL(getArg("dbname"),
+  setDB(std::unique_ptr<SSql>(new SMySQL(d_slog,
+                                         getArg("dbname"),
                                          getArg("host"),
-                                         getArgAsNum("port"),
+                                         getArgAsNum<uint16_t>("port"),
                                          getArg("socket"),
                                          getArg("user"),
                                          getArg("password"),
                                          getArg("group"),
                                          mustDo("innodb-read-committed"),
-                                         getArgAsNum("timeout"),
+                                         getArgAsNum<unsigned int>("timeout"),
                                          mustDo("thread-cleanup"))));
   allocateStatements();
 }
@@ -135,8 +143,8 @@ public:
     declare(suffix, "update-serial-query", "", "update domains set notified_serial=? where id=?");
     declare(suffix, "update-lastcheck-query", "", "update domains set last_check=? where id=?");
     declare(suffix, "info-all-primary-query", "", "select d.id, d.name, d.type, d.notified_serial,d.options, d.catalog,r.content from records r join domains d on r.domain_id=d.id and r.name=d.name where r.type='SOA' and r.disabled=0 and d.type in ('MASTER', 'PRODUCER') order by d.id");
-    declare(suffix, "info-producer-members-query", "", "select domains.id, domains.name, domains.options from records join domains on records.domain_id=domains.id and records.name=domains.name where domains.type='MASTER' and domains.catalog=? and records.type='SOA' and records.disabled=0");
-    declare(suffix, "info-consumer-members-query", "", "select id, name, options, master from domains where type='SLAVE' and catalog=?");
+    declare(suffix, "info-producer-members-query", "", "select domains.id, domains.name, domains.type, domains.options from records join domains on records.domain_id=domains.id and records.name=domains.name where domains.type in ('MASTER', 'PRODUCER') and domains.catalog=? and records.type='SOA' and records.disabled=0");
+    declare(suffix, "info-consumer-members-query", "", "select id, name, type, options, master from domains where type in ('SLAVE', 'CONSUMER') and catalog=?");
     declare(suffix, "delete-domain-query", "", "delete from domains where name=?");
     declare(suffix, "delete-zone-query", "", "delete from records where domain_id=?");
     declare(suffix, "delete-rrset-query", "", "delete from records where domain_id=? and name=? and type=?");
@@ -188,6 +196,9 @@ public:
   gMySQLLoader()
   {
     BackendMakers().report(std::make_unique<gMySQLFactory>("gmysql"));
+    // If this module is not loaded dynamically at runtime, this code runs
+    // as part of a global constructor, before the structured logger has a
+    // chance to be set up, so fallback to simple logging.
     g_log << Logger::Info << "[gmysqlbackend] This is the gmysql backend version " VERSION
 #ifndef REPRODUCIBLE
           << " (" __DATE__ " " __TIME__ ")"

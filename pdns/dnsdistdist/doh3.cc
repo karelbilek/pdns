@@ -30,13 +30,12 @@
 #include "misc.hh"
 #include "sstuff.hh"
 #include "threadname.hh"
-#include "base64.hh"
 
+#include "dnsdist-concurrent-connections.hh"
 #include "dnsdist-dnsparser.hh"
 #include "dnsdist-ecs.hh"
 #include "dnsdist-proxy-protocol.hh"
 #include "dnsdist-tcp.hh"
-#include "dnsdist-random.hh"
 
 #include "doq-common.hh"
 
@@ -49,37 +48,28 @@
 
 using namespace dnsdist::doq;
 
-class H3Connection
+class H3Connection : public QUICConnection
 {
 public:
-  H3Connection(const ComboAddress& peer, const ComboAddress& localAddr, QuicheConfig config, QuicheConnection&& conn) :
-    d_peer(peer), d_localAddr(localAddr), d_conn(std::move(conn)), d_config(std::move(config))
+  H3Connection(const ComboAddress& peer, const ComboAddress& localAddr, QuicheConfig config, QuicheConnection&& conn, ClientState& frontend) :
+    QUICConnection(frontend, peer, localAddr, std::move(config), std::move(conn))
   {
   }
   H3Connection(const H3Connection&) = delete;
   H3Connection(H3Connection&&) = default;
   H3Connection& operator=(const H3Connection&) = delete;
-  H3Connection& operator=(H3Connection&&) = default;
+  H3Connection& operator=(H3Connection&&) = delete;
   ~H3Connection() = default;
 
-  std::shared_ptr<const std::string> getSNI()
+  void removeTemporaryQueryContent(uint64_t streamID)
   {
-    if (!d_sni) {
-      d_sni = std::make_shared<const std::string>(getSNIFromQuicheConnection(d_conn));
-    }
-    return d_sni;
+    d_headersBuffers.erase(streamID);
+    d_streamBuffers.erase(streamID);
   }
 
-  ComboAddress d_peer;
-  ComboAddress d_localAddr;
-  QuicheConnection d_conn;
-  QuicheConfig d_config;
   QuicheHTTP3Connection d_http3{nullptr, quiche_h3_conn_free};
   // buffer request headers by streamID
   std::unordered_map<uint64_t, dnsdist::doh3::h3_headers_t> d_headersBuffers;
-  std::unordered_map<uint64_t, PacketBuffer> d_streamBuffers;
-  std::unordered_map<uint64_t, PacketBuffer> d_streamOutBuffers;
-  std::shared_ptr<const std::string> d_sni{nullptr};
 };
 
 static void sendBackDOH3Unit(DOH3UnitUniquePtr&& unit, const char* description);
@@ -147,12 +137,16 @@ public:
     memcpy(&cleartextDH, dnsResponse.getHeader().get(), sizeof(cleartextDH));
 
     if (!response.isAsync()) {
+      if (!responseContentMatches(unit->response, dnsResponse.ids.qname, dnsResponse.ids.qtype, dnsResponse.ids.qclass, unit->downstream, dnsdist::configuration::getCurrentRuntimeConfiguration().d_allowEmptyResponse)) {
+        return;
+      }
 
       dnsResponse.ids.doh3u = std::move(unit);
 
       if (!processResponse(dnsResponse.ids.doh3u->response, dnsResponse, false)) {
         if (dnsResponse.ids.doh3u) {
-
+          /* this will signal an error */
+          dnsResponse.ids.doh3u->response.clear();
           sendBackDOH3Unit(std::move(dnsResponse.ids.doh3u), "Response dropped by rules");
         }
         return;
@@ -168,7 +162,7 @@ public:
     if (!unit->ids.selfGenerated) {
       auto udiff = unit->ids.queryRealTime.udiff();
       VERBOSESLOG(infolog("Got answer from %s, relayed to %s (DoH3, %d bytes), took %d us", unit->downstream->d_config.remote.toStringWithPort(), unit->ids.origRemote.toStringWithPort(), unit->response.size(), udiff),
-                  dnsResponse.getLogger()->info("Got answer from backend, relayed to client"));
+                  dnsResponse.getLogger()->info(Logr::Info, "Got answer from backend, relayed to client"));
 
       auto backendProtocol = unit->downstream->getProtocol();
       if (backendProtocol == dnsdist::Protocol::DoUDP && unit->tcp) {
@@ -459,7 +453,14 @@ static std::optional<std::reference_wrapper<H3Connection>> createConnection(DOH3
     quiche_conn_set_keylog_path(quicheConn.get(), config.df->d_quicheParams.d_keyLogFile.c_str());
   }
 
-  auto conn = H3Connection(peer, localAddr, std::move(quicheConfig), std::move(quicheConn));
+#ifdef HAVE_QUICHE_CONN_SET_QLOG_PATH
+  if (config.df && !config.df->d_quicheParams.d_qLogDir.empty()) {
+    configureQLog(quicheConn, config.df->d_quicheParams.d_qLogDir, peer);
+  }
+#endif
+
+  auto conn = H3Connection(peer, localAddr, std::move(quicheConfig), std::move(quicheConn), *config.clientState);
+  gettimeofday(&conn.d_connectionStartTime, nullptr);
   auto pair = config.d_connections.emplace(serverSideID, std::move(conn));
   return pair.first->second;
 }
@@ -514,13 +515,32 @@ static void processDOH3Query(DOH3UnitUniquePtr&& doh3Unit)
 
     if (!dnsdist::configuration::getCurrentRuntimeConfiguration().d_ACL.match(remote)) {
       VERBOSESLOG(infolog("Query from %s (DoH3) dropped because of ACL", remote.toStringWithPort()),
-                  dsc->df->getLogger().info("DoH3 query dropped because of ACL", "client.address", Logging::Loggable(remote)));
+                  dsc->df->getLogger().info(Logr::Info, "DoH3 query dropped because of ACL", "client.address", Logging::Loggable(remote)));
       ++dnsdist::metrics::g_stats.aclDrops;
       unit->response.clear();
 
       unit->status_code = 403;
       handleImmediateResponse(std::move(unit), "DoH3 query dropped because of ACL");
       return;
+    }
+
+    /* the responses map can be updated at runtime, so we need to take a copy of
+       the shared pointer, increasing the reference counter */
+    auto responsesMap = unit->dsc->df->d_responsesMap;
+    if (responsesMap) {
+      for (const auto& entry : *responsesMap) {
+        if (entry->matches(unit->getHTTPPath())) {
+          const auto& customHeaders = entry->getHeaders();
+          unit->status_code = entry->getStatusCode();
+          unit->response = entry->getContent();
+          if (customHeaders) {
+            unit->headers = *customHeaders;
+          }
+
+          handleImmediateResponse(std::move(unit), "DoH3 custom response");
+          return;
+        }
+      }
     }
 
     if (unit->query.size() < sizeof(dnsheader)) {
@@ -600,7 +620,7 @@ static void processDOH3Query(DOH3UnitUniquePtr&& doh3Unit)
       if (unit->response.size() >= sizeof(dnsheader)) {
         const dnsheader_aligned dnsHeader(unit->response.data());
 
-        handleResponseSent(unit->ids.qname, QType(unit->ids.qtype), 0, unit->ids.origRemote, ComboAddress(), unit->response.size(), *dnsHeader, dnsdist::Protocol::DoH3, dnsdist::Protocol::DoH3, false);
+        handleResponseSent(DNSName(unit->ids.qname), QType(unit->ids.qtype), 0., unit->ids.origRemote, ComboAddress(), unit->response.size(), *dnsHeader, dnsdist::Protocol::DoH3, dnsdist::Protocol::DoH3, false);
       }
       handleImmediateResponse(std::move(unit), "DoH3 self-answered response");
       return;
@@ -642,10 +662,14 @@ static void processDOH3Query(DOH3UnitUniquePtr&& doh3Unit)
     if (downstream->passCrossProtocolQuery(std::move(cpq))) {
       return;
     }
-    // NOLINTNEXTLINE(bugprone-use-after-move): it was only moved if the call succeeded
-    unit = cpq->releaseDU();
-    unit->status_code = 500;
-    handleImmediateResponse(std::move(unit), "DoH3 internal error");
+
+    /* On exceptional cases, cpq is moved but returns false above. So we check to make sure. See https://github.com/PowerDNS/pdns/issues/17109 */
+    // NOLINTNEXTLINE(bugprone-use-after-move): the behaviour of a moved std::unique_ptr is actually specified
+    if (cpq) {
+      unit = cpq->releaseDU();
+      unit->status_code = 500;
+      handleImmediateResponse(std::move(unit), "DoH3 internal error");
+    }
     return;
   }
   catch (const std::exception& e) {
@@ -697,7 +721,7 @@ static void flushResponses(pdns::channel::Receiver<DOH3Unit>& receiver, const Lo
     }
     catch (const std::exception& e) {
       SLOG(errlog("Error while processing response received over DoH3: %s", e.what()),
-           frontendLogger.error(e.what(), "Error while processing response received over DoH3"));
+           frontendLogger.error(Logr::Error, e.what(), "Error while processing response received over DoH3"));
     }
     catch (...) {
       SLOG(errlog("Unspecified error while processing response received over DoH3"),
@@ -729,69 +753,80 @@ static void processH3HeaderEvent(ClientState& clientState, DOH3Frontend& fronten
     ++clientState.nonCompliantQueries;
     ++frontend.d_errorResponses;
     h3_send_response(conn, streamID, 400, msg);
+    conn.removeTemporaryQueryContent(streamID);
   };
 
-  auto& headers = conn.d_headersBuffers.at(streamID);
-  // Callback result. Any value other than 0 will interrupt further header processing.
-  int cbresult = quiche_h3_event_for_each_header(
-    event,
-    [](uint8_t* name, size_t name_len, uint8_t* value, size_t value_len, void* argp) -> int {
-      // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast): Quiche API
-      std::string_view key(reinterpret_cast<char*>(name), name_len);
-      // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast): Quiche API
-      std::string_view content(reinterpret_cast<char*>(value), value_len);
-      // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast): Quiche API
-      auto* headersptr = reinterpret_cast<dnsdist::doh3::h3_headers_t*>(argp);
-      headersptr->emplace(key, content);
-      return 0;
-    },
-    &headers);
+  try {
+    auto& headers = conn.d_headersBuffers[streamID];
+    // Callback result. Any value other than 0 will interrupt further header processing.
+    int cbresult = quiche_h3_event_for_each_header(
+      event,
+      [](uint8_t* name, size_t name_len, uint8_t* value, size_t value_len, void* argp) -> int {
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast): Quiche API
+        std::string_view key(reinterpret_cast<char*>(name), name_len);
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast): Quiche API
+        std::string_view content(reinterpret_cast<char*>(value), value_len);
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast): Quiche API
+        auto* headersptr = reinterpret_cast<dnsdist::doh3::h3_headers_t*>(argp);
+        if (headersptr->size() >= dnsdist::doh::MAX_INCOMING_HTTP_HEADERS) {
+          /* be nice but not too nice */
+          return 1;
+        }
+        headersptr->emplace(key, content);
+        return 0;
+      },
+      &headers);
 
 #ifdef DEBUGLOG_ENABLED
-  DEBUGLOG("Processed headers of stream " << streamID);
-  for (const auto& [key, value] : headers) {
-    DEBUGLOG(" " << key << ": " << value);
-  }
+    DEBUGLOG("Processed headers of stream " << streamID);
+    for (const auto& [key, value] : headers) {
+      DEBUGLOG(" " << key << ": " << value);
+    }
 #endif
-  if (cbresult != 0 || headers.count(":method") == 0) {
-    handleImmediateError("Unable to process query headers");
-    return;
-  }
+    if (cbresult != 0 || headers.count(":method") == 0) {
+      handleImmediateError("Unable to process query headers");
+      return;
+    }
 
-  if (headers.at(":method") == "GET") {
-    if (headers.count(":path") == 0 || headers.at(":path").empty()) {
-      handleImmediateError("Path not found");
+    if (headers.at(":method") == "GET") {
+      if (headers.count(":path") == 0 || headers.at(":path").empty()) {
+        handleImmediateError("Path not found");
+        return;
+      }
+      const auto& path = headers.at(":path");
+      auto payload = dnsdist::doh::getPayloadFromPath(path);
+      if (!payload) {
+        handleImmediateError("Unable to find the DNS parameter");
+        return;
+      }
+      if (payload->size() < sizeof(dnsheader)) {
+        handleImmediateError("DoH3 non-compliant query");
+        return;
+      }
+      DEBUGLOG("Dispatching GET query");
+      ++conn.d_queriesCount;
+      doh3_dispatch_query(*(frontend.d_server_config), std::move(*payload), conn.d_localAddr, client, serverConnID, streamID, conn.getSNI(), std::move(headers));
+      conn.removeTemporaryQueryContent(streamID);
       return;
     }
-    const auto& path = headers.at(":path");
-    auto payload = dnsdist::doh::getPayloadFromPath(path);
-    if (!payload) {
-      handleImmediateError("Unable to find the DNS parameter");
-      return;
-    }
-    if (payload->size() < sizeof(dnsheader)) {
-      handleImmediateError("DoH3 non-compliant query");
-      return;
-    }
-    DEBUGLOG("Dispatching GET query");
-    doh3_dispatch_query(*(frontend.d_server_config), std::move(*payload), conn.d_localAddr, client, serverConnID, streamID, conn.getSNI(), std::move(headers));
-    conn.d_streamBuffers.erase(streamID);
-    conn.d_headersBuffers.erase(streamID);
-    return;
-  }
 
-  if (headers.at(":method") == "POST") {
+    if (headers.at(":method") == "POST") {
 #if defined(HAVE_QUICHE_H3_EVENT_HEADERS_HAS_MORE_FRAMES)
-    if (!quiche_h3_event_headers_has_more_frames(event)) {
+      if (!quiche_h3_event_headers_has_more_frames(event)) {
 #else
-    if (!quiche_h3_event_headers_has_body(event)) {
+      if (!quiche_h3_event_headers_has_body(event)) {
 #endif
-      handleImmediateError("Empty POST query");
+        handleImmediateError("Empty POST query");
+      }
+      return;
     }
-    return;
-  }
 
-  handleImmediateError("Unsupported HTTP method");
+    handleImmediateError("Unsupported HTTP method");
+  }
+  catch (const std::exception& exp) {
+    handleImmediateError("Exception while processing query");
+    throw;
+  }
 }
 
 static void processH3DataEvent(ClientState& clientState, DOH3Frontend& frontend, H3Connection& conn, const ComboAddress& client, const PacketBuffer& serverConnID, const uint64_t streamID, PacketBuffer& buffer)
@@ -802,50 +837,72 @@ static void processH3DataEvent(ClientState& clientState, DOH3Frontend& frontend,
     ++clientState.nonCompliantQueries;
     ++frontend.d_errorResponses;
     h3_send_response(conn, streamID, 400, msg);
+    conn.removeTemporaryQueryContent(streamID);
   };
-  auto& headers = conn.d_headersBuffers.at(streamID);
 
-  if (headers.at(":method") != "POST") {
-    handleImmediateError("DATA frame for non-POST method");
-    return;
-  }
-
-  if (headers.count("content-type") == 0 || headers.at("content-type") != "application/dns-message") {
-    handleImmediateError("Unsupported content-type");
-    return;
-  }
-
-  buffer.resize(std::numeric_limits<uint16_t>::max());
-  auto& streamBuffer = conn.d_streamBuffers[streamID];
-
-  while (true) {
-    buffer.resize(std::numeric_limits<uint16_t>::max());
-    ssize_t len = quiche_h3_recv_body(conn.d_http3.get(),
-                                      conn.d_conn.get(), streamID,
-                                      buffer.data(), buffer.size());
-
-    if (len <= 0) {
-      break;
+  try {
+    auto headersIt = conn.d_headersBuffers.find(streamID);
+    if (headersIt == conn.d_headersBuffers.end()) {
+      handleImmediateError("DATA frame for stream without headers");
+      return;
+    }
+    auto& headers = headersIt->second;
+    {
+      if (auto methodIt = headers.find(":method"); methodIt == headers.end() || methodIt->second != "POST") {
+        handleImmediateError("DATA frame for non-POST method");
+        return;
+      }
     }
 
-    buffer.resize(static_cast<size_t>(len));
-    streamBuffer.insert(streamBuffer.end(), buffer.begin(), buffer.end());
+    if (auto contentTypeHeaderIt = headers.find("content-type"); contentTypeHeaderIt == headers.end() || contentTypeHeaderIt->second != "application/dns-message") {
+      handleImmediateError("Unsupported content-type");
+      return;
+    }
+
+    buffer.resize(std::numeric_limits<uint16_t>::max());
+    auto& streamBuffer = conn.d_streamBuffers[streamID];
+
+    while (true) {
+      buffer.resize(std::numeric_limits<uint16_t>::max());
+      ssize_t len = quiche_h3_recv_body(conn.d_http3.get(),
+                                        conn.d_conn.get(), streamID,
+                                        buffer.data(), buffer.size());
+
+      if (len <= 0) {
+        break;
+      }
+
+      if (len > std::numeric_limits<uint16_t>::max() || (std::numeric_limits<uint16_t>::max() - streamBuffer.size()) < static_cast<size_t>(len)) {
+        VERBOSESLOG(infolog("DOH3 data frame of size %d is too large for a DNS query (we already have %d)", len, streamBuffer.size()),
+                    frontend.d_logger->info(Logr::Info, "DOH3 data frame is too large for a DNS query", "http.stream_id", Logging::Loggable(streamID), "frame_size", Logging::Loggable(len), "existing_payload_size", Logging::Loggable(streamBuffer.size())));
+        conn.d_streamBuffers.erase(streamID);
+        handleImmediateError("DoH3 non-compliant query");
+        return;
+      }
+
+      buffer.resize(static_cast<size_t>(len));
+      streamBuffer.insert(streamBuffer.end(), buffer.begin(), buffer.end());
+    }
+
+    if (!quiche_conn_stream_finished(conn.d_conn.get(), streamID)) {
+      return;
+    }
+
+    if (streamBuffer.size() < sizeof(dnsheader)) {
+      handleImmediateError("DoH3 non-compliant query");
+      return;
+    }
+
+    DEBUGLOG("Dispatching POST query");
+    ++conn.d_queriesCount;
+    doh3_dispatch_query(*(frontend.d_server_config), std::move(streamBuffer), conn.d_localAddr, client, serverConnID, streamID, conn.getSNI(), std::move(headers));
+    conn.removeTemporaryQueryContent(streamID);
   }
 
-  if (!quiche_conn_stream_finished(conn.d_conn.get(), streamID)) {
-    return;
+  catch (const std::exception& exp) {
+    handleImmediateError("Exception while processing query");
+    throw;
   }
-
-  if (streamBuffer.size() < sizeof(dnsheader)) {
-    conn.d_streamBuffers.erase(streamID);
-    handleImmediateError("DoH3 non-compliant query");
-    return;
-  }
-
-  DEBUGLOG("Dispatching POST query");
-  doh3_dispatch_query(*(frontend.d_server_config), std::move(streamBuffer), conn.d_localAddr, client, serverConnID, streamID, conn.getSNI(), std::move(headers));
-  conn.d_headersBuffers.erase(streamID);
-  conn.d_streamBuffers.erase(streamID);
 }
 
 static void processH3Events(ClientState& clientState, DOH3Frontend& frontend, H3Connection& conn, const ComboAddress& client, const PacketBuffer& serverConnID, PacketBuffer& buffer)
@@ -860,25 +917,33 @@ static void processH3Events(ClientState& clientState, DOH3Frontend& frontend, H3
     if (streamID < 0) {
       break;
     }
-    conn.d_headersBuffers.try_emplace(streamID, dnsdist::doh3::h3_headers_t{});
 
-    switch (quiche_h3_event_type(event)) {
-    case QUICHE_H3_EVENT_HEADERS: {
-      processH3HeaderEvent(clientState, frontend, conn, client, serverConnID, streamID, event);
-      break;
-    }
-    case QUICHE_H3_EVENT_DATA: {
-      processH3DataEvent(clientState, frontend, conn, client, serverConnID, streamID, buffer);
-      break;
-    }
-    case QUICHE_H3_EVENT_FINISHED:
-    case QUICHE_H3_EVENT_RESET:
-    case QUICHE_H3_EVENT_PRIORITY_UPDATE:
-    case QUICHE_H3_EVENT_GOAWAY:
-      break;
-    }
+    try {
+      std::unique_ptr<quiche_h3_event, decltype(&quiche_h3_event_free)> eventPtr(event, quiche_h3_event_free);
+      event = nullptr;
 
-    quiche_h3_event_free(event);
+      switch (quiche_h3_event_type(eventPtr.get())) {
+      case QUICHE_H3_EVENT_HEADERS: {
+        processH3HeaderEvent(clientState, frontend, conn, client, serverConnID, streamID, eventPtr.get());
+        break;
+      }
+      case QUICHE_H3_EVENT_DATA: {
+        processH3DataEvent(clientState, frontend, conn, client, serverConnID, streamID, buffer);
+        break;
+      }
+      case QUICHE_H3_EVENT_FINISHED:
+      case QUICHE_H3_EVENT_RESET:
+        conn.removeTemporaryQueryContent(streamID);
+        break;
+      case QUICHE_H3_EVENT_PRIORITY_UPDATE:
+      case QUICHE_H3_EVENT_GOAWAY:
+        break;
+      }
+    }
+    catch (const std::exception& exp) {
+      VERBOSESLOG(infolog("Error processing DoH3 event for stream %d: %s", streamID, exp.what()),
+                  frontend.d_logger->error(Logr::Info, exp.what(), "Error processing DoH3 event", "http.stream_id", Logging::Loggable(streamID)));
+    }
   }
 }
 
@@ -961,6 +1026,12 @@ static void handleSocketReadable(DOH3Frontend& frontend, ClientState& clientStat
         continue;
       }
 
+      auto connectionResult = dnsdist::IncomingConcurrentTCPConnectionsManager::accountNewTCPConnection(client, true, true);
+      if (connectionResult == dnsdist::IncomingConcurrentTCPConnectionsManager::NewConnectionResult::Denied) {
+        DEBUGLOG("Connection not allowed!");
+        continue;
+      }
+
       DEBUGLOG("Creating a new connection");
       conn = createConnection(*frontend.d_server_config, serverConnID, *originalDestinationID, localAddr, client);
       if (!conn) {
@@ -994,6 +1065,7 @@ static void handleSocketReadable(DOH3Frontend& frontend, ClientState& clientStat
         DEBUGLOG("Successfully created HTTP/3 connection");
       }
 
+      ++conn->get().d_readIOsTotal;
       processH3Events(clientState, frontend, conn->get(), client, serverConnID, buffer);
 
       flushEgress(sock, conn->get().d_conn, client, localAddr, buffer, clientState.local.isUnspecified());

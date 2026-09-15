@@ -3,6 +3,10 @@
 #include "dnsdist-tcp-downstream.hh"
 #include "dnsdist-tcp-upstream.hh"
 #include "dnsdist-downstream-connection.hh"
+#include <limits>
+#ifndef DISABLE_PROTOBUF
+#include "dnsdist-ecs.hh"
+#endif
 
 #include "dnsparser.hh"
 
@@ -212,6 +216,10 @@ static bool getSerialFromIXFRQuery(TCPQuery& query)
     DEBUGLOG("Exception when parsing IXFR TCP Query to DNS: " << e.what());
     /* ponder what to do here, shall we close the connection? */
   }
+  catch (const std::exception& exp) {
+    DEBUGLOG("Exception when parsing IXFR TCP Query to DNS: " << exp.what());
+    /* ponder what to do here, shall we close the connection? */
+  }
 
   return false;
 }
@@ -283,6 +291,19 @@ IOState TCPConnectionToBackend::sendQuery(std::shared_ptr<TCPConnectionToBackend
   auto closer = conn->d_currentQuery.d_query.d_idstate.getCloser(classnamePrefix + __func__);
   (void)now;
   DEBUGLOG("sending query to backend " << conn->getDS()->getNameWithAddr() << " over FD " << conn->d_handler->getDescriptor());
+
+#ifndef DISABLE_PROTOBUF
+  if (auto& tracer = conn->d_currentQuery.d_query.d_idstate.getTracer(); conn->d_currentQuery.d_query.d_idstate.sendTraceParentToDownstreamID != 0 && tracer != nullptr) {
+    auto ednsAdded = pdns::trace::dnsdist::addTraceparentEdnsOptionToPacketBuffer(
+      conn->d_currentQuery.d_query.d_buffer,
+      tracer,
+      conn->d_currentQuery.d_query.d_idstate.qname.wirelength(),
+      conn->d_currentQuery.d_query.d_idstate.d_proxyProtocolPayloadSize,
+      conn->d_currentQuery.d_query.d_idstate.sendTraceParentToDownstreamID,
+      true);
+    conn->d_currentQuery.d_query.d_idstate.ednsAdded = conn->d_currentQuery.d_query.d_idstate.ednsAdded || ednsAdded;
+  }
+#endif
 
   IOState state = conn->d_handler->tryWrite(conn->d_currentQuery.d_query.d_buffer, conn->d_currentPos, conn->d_currentQuery.d_query.d_buffer.size());
 
@@ -558,13 +579,13 @@ void TCPConnectionToBackend::queueQuery(std::shared_ptr<TCPQuerySender>& sender,
   // start sending the query
   if (d_state == State::idle || d_state == State::waitingForResponseFromBackend) {
     DEBUGLOG("Sending new query to backend right away, with ID " << d_highestStreamID);
-    d_state = State::sendingQueryToBackend;
     d_currentPos = 0;
 
     uint16_t id = d_highestStreamID;
 
     d_currentQuery = PendingRequest({sender, std::move(query)});
     prepareQueryForSending(d_currentQuery.d_query, id, needProxyProtocolPayload() ? ConnectionState::needProxy : ConnectionState::proxySent);
+    d_state = State::sendingQueryToBackend;
 
     struct timeval now;
     gettimeofday(&now, 0);
@@ -905,6 +926,18 @@ bool TCPConnectionToBackend::isXFRFinished(const TCPResponse& response, TCPQuery
     /* ponder what to do here, shall we close the connection? */
   }
   return done;
+}
+
+bool TCPConnectionToBackend::reachedMaxStreamID() const
+{
+  /* TCP/DoT has only 2^16 usable identifiers, DoH has 2^32 */
+  const uint32_t maximumStreamID = std::numeric_limits<uint16_t>::max() - 1;
+  if (d_highestStreamID >= maximumStreamID) {
+    return true;
+  }
+
+  /* pending queries will need IDs, so we need to take them into account as well */
+  return (d_pendingQueries.size() >= (maximumStreamID - d_highestStreamID));
 }
 
 std::shared_ptr<const Logr::Logger> ConnectionToBackend::getLogger() const

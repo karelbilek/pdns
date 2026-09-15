@@ -17,6 +17,19 @@ using std::runtime_error;
 using std::tuple;
 using std::weak_ptr;
 
+void MDBOpenFailure(const std::string& filename, int ret)
+{
+  // Theoretically, trying to open a database created with a different and
+  // incompatible LMDB version would return MDB_VERSION_MISMATCH.
+  // But 1.0, when attempting to open a 0.9 database, won't, and figuring out
+  // that this is a version mismatch can be painful to figure out, so give
+  // the user some hints.
+  if (ret == MDB_INVALID) {
+    throw std::runtime_error("Unable to open database file " + filename + ": either not a valid LMDB database, or not in a format compatible with LMDB library version " + std::to_string(MDB_VERSION_MAJOR) + "." + std::to_string(MDB_VERSION_MINOR) + " used in this program.");
+  }
+  throw std::runtime_error("Unable to open database file " + filename + ": " + MDBError(ret));
+}
+
 #ifndef DNSDIST
 
 namespace LMDBLS {
@@ -123,7 +136,7 @@ Various other options may also need to be set before opening the handle, e.g. md
   if(int rc=mdb_env_open(d_env, fname, flags | MDB_NOTLS, mode)) {
     // If this function fails, mdb_env_close() must be called to discard the MDB_env handle.
     mdb_env_close(d_env);
-    throw std::runtime_error("Unable to open database file "+std::string(fname)+": " + MDBError(rc));
+    MDBOpenFailure(std::string(fname), rc); // throws
   }
 
   if ((flags & MDB_RDONLY) == 0) {
@@ -296,28 +309,28 @@ MDBRWTransactionImpl::~MDBRWTransactionImpl()
 void MDBRWTransactionImpl::commit()
 {
   closeRORWCursors();
-  if (!d_txn) {
-    return;
+  if (d_txn != nullptr) {
+    int retCode = mdb_txn_commit(d_txn);
+    // Upon failure, mdb_txn_commit() performs an mdb_txn_abort() call,
+    // so we need to consider the transaction aborted and correctly
+    // deallocated.
+    d_txn = nullptr;
+    environment().decRWTX();
+    if (retCode != 0) {
+      throw std::runtime_error("committing: " + MDBError(retCode));
+    }
   }
-
-  if(int retCode = mdb_txn_commit(d_txn); retCode != 0) {
-    throw std::runtime_error("committing: " + MDBError(retCode));
-  }
-  environment().decRWTX();
-  d_txn = nullptr;
 }
 
 void MDBRWTransactionImpl::abort()
 {
   closeRORWCursors();
-  if (!d_txn) {
-    return;
+  if (d_txn != nullptr) {
+    mdb_txn_abort(d_txn);
+    d_txn = nullptr;
+    // prevent the RO destructor from cleaning up the transaction itself
+    environment().decRWTX();
   }
-
-  mdb_txn_abort(d_txn);
-  // prevent the RO destructor from cleaning up the transaction itself
-  environment().decRWTX();
-  d_txn = nullptr;
 }
 
 MDBROTransactionImpl::MDBROTransactionImpl(MDBEnv *parent, MDB_txn *txn):
@@ -370,7 +383,7 @@ void MDBROTransactionImpl::abort()
 {
   closeROCursors();
   // if d_txn is non-nullptr here, either the transaction object was invalidated earlier (e.g. by moving from it), or it is an RW transaction which has already cleaned up the d_txn pointer (with an abort).
-  if (d_txn) {
+  if (d_txn != nullptr) {
     mdb_txn_abort(d_txn); // this appears to work better than abort for r/o database opening
     d_txn = nullptr;
   }
@@ -380,7 +393,7 @@ void MDBROTransactionImpl::commit()
 {
   closeROCursors();
   // if d_txn is non-nullptr here, either the transaction object was invalidated earlier (e.g. by moving from it), or it is an RW transaction which has already cleaned up the d_txn pointer (with an abort).
-  if (d_txn) {
+  if (d_txn != nullptr) {
     mdb_txn_commit(d_txn); // this appears to work better than abort for r/o database opening
     d_txn = nullptr;
   }

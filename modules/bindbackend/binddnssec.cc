@@ -150,7 +150,7 @@ void Bind2Backend::setupDNSSEC()
   if (getArg("dnssec-db").empty() || d_hybrid)
     return;
   try {
-    d_dnssecdb = std::make_shared<SSQLite3>(getArg("dnssec-db"), getArg("dnssec-db-journal-mode"));
+    d_dnssecdb = std::make_shared<SSQLite3>(d_slog, getArg("dnssec-db"), getArg("dnssec-db-journal-mode"));
     setupStatements();
   }
   catch (SSqlException& se) {
@@ -237,18 +237,20 @@ bool Bind2Backend::getNSEC3PARAMuncached(const ZoneName& name, NSEC3PARAMRecordC
   else
     return false; // No NSEC3 zone
 
-  static int maxNSEC3Iterations = ::arg().asNum("max-nsec3-iterations");
+  static auto maxNSEC3Iterations = ::arg().asNum<uint16_t>("max-nsec3-iterations");
   if (ns3p) {
     auto tmp = std::dynamic_pointer_cast<NSEC3PARAMRecordContent>(DNSRecordContent::make(QType::NSEC3PARAM, 1, value));
     *ns3p = *tmp;
 
     if (ns3p->d_iterations > maxNSEC3Iterations) {
       ns3p->d_iterations = maxNSEC3Iterations;
-      g_log << Logger::Error << "Number of NSEC3 iterations for zone '" << name << "' is above 'max-nsec3-iterations'. Value adjusted to: " << maxNSEC3Iterations << endl;
+      SLOG(g_log << Logger::Error << "Number of NSEC3 iterations for zone '" << name << "' is above 'max-nsec3-iterations'. Value adjusted to: " << maxNSEC3Iterations << endl,
+           d_slog->info(Logr::Error, "Number of NSEC3 iterations for zone exceeds max-nsec3-iterations, clamping", "zone", Logging::Loggable(name), "max-nsec3-iterations", Logging::Loggable(maxNSEC3Iterations)));
     }
 
     if (ns3p->d_algorithm != 1) {
-      g_log << Logger::Error << "Invalid hash algorithm for NSEC3: '" << std::to_string(ns3p->d_algorithm) << "', setting to 1 for zone '" << name << "'." << endl;
+      SLOG(g_log << Logger::Error << "Invalid hash algorithm for NSEC3: '" << std::to_string(ns3p->d_algorithm) << "', setting to 1 for zone '" << name << "'." << endl,
+           d_slog->info(Logr::Error, "Invalid hash algorithm for NSEC3 on zone, setting to 1", "zone", Logging::Loggable(name), "algorithm", Logging::Loggable(ns3p->d_algorithm)));
       ns3p->d_algorithm = 1;
     }
   }
@@ -382,7 +384,7 @@ bool Bind2Backend::addDomainKey(const ZoneName& name, const KeyData& key, int64_
     SSqlStatement::row_t row;
     d_GetLastInsertedKeyIdQuery_stmt->nextRow(row);
     ASSERT_ROW_COLUMNS("get-last-inserted-key-id-query", row, 1);
-    keyId = std::stoi(row[0]);
+    pdns::checked_stoi_into(keyId, row[0]);
     d_GetLastInsertedKeyIdQuery_stmt->reset();
     if (keyId == 0) {
       // No insert took place, report as error.
@@ -520,7 +522,7 @@ bool Bind2Backend::getTSIGKeys(std::vector<struct TSIGKey>& keys)
       key.name = DNSName(row[0]);
       key.algorithm = DNSName(row[1]);
       key.key = row[2];
-      keys.push_back(key);
+      keys.push_back(std::move(key));
     }
 
     d_getTSIGKeysQuery_stmt->reset();

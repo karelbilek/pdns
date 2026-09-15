@@ -691,7 +691,7 @@ void setupLuaInspection(LuaContext& luaCtx)
             iter->second++;
           }
           else {
-            histo.rbegin()++;
+            histo.rbegin()->second++;
           }
           totlat += entry.usec;
         }
@@ -738,12 +738,12 @@ void setupLuaInspection(LuaContext& luaCtx)
     ret << endl;
 
     ret << "Frontends:" << endl;
-    fmt = boost::format("%-3d %-20.20s %-20d %-20d %-20d %-25d %-20d %-20d %-20d %-20f %-20f %-20d %-20d %-25d %-25d %-15d %-15d %-15d %-15d %-15d %-15d");
-    ret << (fmt % "#" % "Address" % "Connections" % "Max concurrent conn" % "Died reading query" % "Died sending response" % "Gave up" % "Client timeouts" % "Downstream timeouts" % "Avg queries/conn" % "Avg duration" % "Avg read IOs/conn" % "TLS new sessions" % "TLS Resumptions" % "TLS unknown ticket keys" % "TLS inactive ticket keys" % "TLS 1.0" % "TLS 1.1" % "TLS 1.2" % "TLS 1.3" % "TLS other") << endl;
+    fmt = boost::format("%-3d %-20.20s %-20d %-20d %-20d %-25d %-20d %-20d %-20d %-20d %-10d %-10d %-15d %-20f %-20f %-20d %-20d %-25d %-25d %-15d %-15d %-15d %-15d %-15d %-15d");
+    ret << (fmt % "#" % "Address" % "Connections" % "Max concurrent conn" % "Died reading query" % "Died sending response" % "Gave up" % "Client timeouts" % "Downstream timeouts" % "Processing error" % "Bad ALPN" % "Bad PP" % "Max duration" % "Avg queries/conn" % "Avg duration" % "Avg read IOs/conn" % "TLS new sessions" % "TLS Resumptions" % "TLS unknown ticket keys" % "TLS inactive ticket keys" % "TLS 1.0" % "TLS 1.1" % "TLS 1.2" % "TLS 1.3" % "TLS other") << endl;
 
     size_t counter = 0;
     for (const auto& frontend : dnsdist::getFrontends()) {
-      ret << (fmt % counter % frontend->local.toStringWithPort() % frontend->tcpCurrentConnections % frontend->tcpMaxConcurrentConnections % frontend->tcpDiedReadingQuery % frontend->tcpDiedSendingResponse % frontend->tcpGaveUp % frontend->tcpClientTimeouts % frontend->tcpDownstreamTimeouts % frontend->tcpAvgQueriesPerConnection % frontend->tcpAvgConnectionDuration % frontend->tcpAvgIOsPerConnection % frontend->tlsNewSessions % frontend->tlsResumptions % frontend->tlsUnknownTicketKey % frontend->tlsInactiveTicketKey % frontend->tls10queries % frontend->tls11queries % frontend->tls12queries % frontend->tls13queries % frontend->tlsUnknownqueries) << endl;
+      ret << (fmt % counter % frontend->local.toStringWithPort() % frontend->tcpCurrentConnections % frontend->tcpMaxConcurrentConnections % frontend->tcpDiedReadingQuery % frontend->tcpDiedSendingResponse % frontend->tcpGaveUp % frontend->tcpClientTimeouts % frontend->tcpDownstreamTimeouts % frontend->tcpDiedDuringProcessing % frontend->tcpBadALPN % frontend->tcpBadProxyProtocol % frontend->tcpMaxDurationReached % frontend->tcpAvgQueriesPerConnection % frontend->tcpAvgConnectionDuration % frontend->tcpAvgIOsPerConnection % frontend->tlsNewSessions % frontend->tlsResumptions % frontend->tlsUnknownTicketKey % frontend->tlsInactiveTicketKey % frontend->tls10queries % frontend->tls11queries % frontend->tls12queries % frontend->tls13queries % frontend->tlsUnknownqueries) << endl;
       ++counter;
     }
     ret << endl;
@@ -897,12 +897,25 @@ void setupLuaInspection(LuaContext& luaCtx)
 
   luaCtx.writeFunction("getRespRing", getRespRing);
 
+  luaCtx.writeFunction("getRingBuffersSamplingRate", []() -> size_t {
+    if (dnsdist::configuration::isImmutableConfigurationDone()) {
+      return g_rings.getSamplingRate();
+    }
+    return dnsdist::configuration::getImmutableConfiguration().d_ringsSamplingRate;
+  });
+
   /* StatNode */
   luaCtx.registerFunction<unsigned int (StatNode::*)() const>("numChildren",
                                                               [](const StatNode& node) -> unsigned int {
-                                                                return node.size();
+                                                                return node.getNumberOfChildren();
                                                               });
-  luaCtx.registerMember("fullname", &StatNode::fullname);
+  luaCtx.registerMember<std::string(StatNode::*)>(std::string("fullname"), [](const StatNode& node) -> std::string {
+    /* we are not using toLogString() because we want:
+       - an empty string for empty
+       - trailing dots otherwise
+    */
+    return !node.fullname.empty() ? node.fullname.toString() : "";
+  });
   luaCtx.registerMember("labelsCount", &StatNode::labelsCount);
   luaCtx.registerMember("servfails", &StatNode::Stat::servfails);
   luaCtx.registerMember("nxdomains", &StatNode::Stat::nxdomains);
@@ -970,6 +983,18 @@ void setupLuaInspection(LuaContext& luaCtx)
       DynBlockRulesGroup::DynBlockRatioRule rule(reason, blockDuration, ratio, warningRatio ? *warningRatio : 0.0, seconds, action ? *action : DNSAction::Action::None, minimumNumberOfResponses);
       parseDynamicActionOptionalParameters("setRCodeRatio", rule, action, optionalParameters);
       group->setRCodeRatio(rcode, std::move(rule));
+    }
+  });
+  // NOLINTNEXTLINE(performance-unnecessary-value-param): optional parameters cannot be passed by const reference
+  luaCtx.registerFunction<void (std::shared_ptr<DynBlockRulesGroup>::*)(LuaArray<uint8_t>, double, unsigned int, const std::string&, unsigned int, size_t, std::optional<DNSAction::Action>, std::optional<double>, DynamicActionOptionalParameters)>("setAllowedRCodesRatio", [](std::shared_ptr<DynBlockRulesGroup>& group, LuaArray<uint8_t> rcodes, double ratio, unsigned int seconds, const std::string& reason, unsigned int blockDuration, size_t minimumNumberOfResponses, std::optional<DNSAction::Action> action, std::optional<double> warningRatio, DynamicActionOptionalParameters optionalParameters) {
+    if (group) {
+      std::unordered_set<uint8_t> allowed;
+      for (const auto& rcode : rcodes) {
+        allowed.insert(rcode.second);
+      }
+      DynBlockRulesGroup::DynBlockAllowedRCodesRatioRule rule(std::move(allowed), reason, blockDuration, ratio, warningRatio ? *warningRatio : 0.0, seconds, action ? *action : DNSAction::Action::None, minimumNumberOfResponses);
+      parseDynamicActionOptionalParameters("setAllowedRCodesRatio", rule, action, optionalParameters);
+      group->setAllowedRCodesRatio(std::move(rule));
     }
   });
   // NOLINTNEXTLINE(performance-unnecessary-value-param): optional parameters cannot be passed by const reference

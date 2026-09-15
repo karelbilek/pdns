@@ -161,7 +161,15 @@ boilerplate_conv(TXT, conv.xfrText(d_text, true));
 #ifdef HAVE_LUA_RECORDS
 boilerplate_conv(LUA, conv.xfrType(d_type); conv.xfrText(d_code, true));
 #endif
+#if defined(PDNS_AUTH) // [
+/* Move the position to the end of the current DNS record,
+   because of a bug in the authoritative server used to insert
+   non-empty content for some ENT records (see https://github.com/PowerDNS/pdns/pull/17000)
+*/
+boilerplate_conv(ENT, conv.consumeRemaining());
+#else
 boilerplate_conv(ENT, );
+#endif // ]
 boilerplate_conv(SPF, conv.xfrText(d_text, true));
 boilerplate_conv(HINFO, conv.xfrText(d_cpu);   conv.xfrText(d_host));
 
@@ -175,6 +183,10 @@ boilerplate_conv(OPT,
                    conv.xfrBlob(d_data)
                  );
 //NOLINTEND
+
+// NOLINTBEGIN
+boilerplate_conv(WALLET, conv.xfrText(d_text, true));
+// NOLINTEND
 
 #ifdef HAVE_LUA_RECORDS
 
@@ -495,6 +507,9 @@ std::shared_ptr<DNSRecordContent> EUI48RecordContent::make(const DNSRecord &dr, 
 
     auto ret=std::make_shared<EUI48RecordContent>();
     pr.copyRecord((uint8_t*) &ret->d_eui48, 6);
+    if (!pr.eof()) {
+      throw MOADNSException("When parsing EUI48 trailing data was not parsed: '" + pr.getRemaining() + "'");
+    }
     return ret;
 }
 std::shared_ptr<DNSRecordContent> EUI48RecordContent::make(const string& zone)
@@ -539,6 +554,9 @@ std::shared_ptr<DNSRecordContent> EUI64RecordContent::make(const DNSRecord &dr, 
 
     auto ret=std::make_shared<EUI64RecordContent>();
     pr.copyRecord((uint8_t*) &ret->d_eui64, 8);
+    if (!pr.eof()) {
+      throw MOADNSException("When parsing EUI64 trailing data was not parsed: '" + pr.getRemaining() + "'");
+    }
     return ret;
 }
 std::shared_ptr<DNSRecordContent> EUI64RecordContent::make(const string& zone)
@@ -588,11 +606,18 @@ std::shared_ptr<DNSRecordContent> APLRecordContent::make(const DNSRecord &dr, Pa
   auto ret=std::make_shared<APLRecordContent>();
 
   while (processed<dr.d_clen) {
+    if (dr.d_clen - processed < 4) {
+      throw MOADNSException("Malformed APL record, element header extends beyond record length");
+    }
     pr.xfr16BitInt(ard.d_family);
     pr.xfr8BitInt(ard.d_prefix);
     pr.xfr8BitInt(temp);
     ard.d_n = (temp & 128) >> 7;
     ard.d_afdlength = temp & 127;
+
+    if (ard.d_afdlength > dr.d_clen - processed - 4) {
+      throw MOADNSException("Malformed APL record, address data extends beyond record length");
+    }
 
     if (ard.d_family == APL_FAMILY_IPV4) {
       if (ard.d_afdlength > 4) {
@@ -608,12 +633,16 @@ std::shared_ptr<DNSRecordContent> APLRecordContent::make(const DNSRecord &dr, Pa
       memset(ard.d_ip.d_ip6, 0, sizeof(ard.d_ip.d_ip6));
       for (u_int i=0; i < ard.d_afdlength; i++)
         pr.xfr8BitInt(ard.d_ip.d_ip6[i]);
-    } else
-    throw MOADNSException("Unknown family for APL record");
+    } else {
+      throw MOADNSException("Unknown family for APL record");
+    }
 
     processed += 4 + ard.d_afdlength;
 
     ret->aplrdata.push_back(ard);
+  }
+  if (!pr.eof()) {
+    throw MOADNSException("When parsing APL trailing data was not parsed: '" + pr.getRemaining() + "'");
   }
 
   return ret;
@@ -762,12 +791,15 @@ string APLRecordContent::getZoneRepresentation(bool /* noDot */) const {
     if (ard->d_family == APL_FAMILY_IPV4) { // IPv4
       s_family = std::to_string(APL_FAMILY_IPV4);
       ca = ComboAddress();
-      memcpy(&ca.sin4.sin_addr.s_addr, ard->d_ip.d_ip4, sizeof(ca.sin4.sin_addr.s_addr));
+      memset(&ca.sin4.sin_addr.s_addr, 0, sizeof(ca.sin4.sin_addr.s_addr));
+      // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+      memcpy(&ca.sin4.sin_addr.s_addr, ard->d_ip.d_ip4, ard->d_afdlength);
     } else if (ard->d_family == APL_FAMILY_IPV6) { // IPv6
       s_family = std::to_string(APL_FAMILY_IPV6);
       ca = ComboAddress();
       ca.sin4.sin_family = AF_INET6;
       memset(&ca.sin6.sin6_addr.s6_addr, 0, sizeof(ca.sin6.sin6_addr.s6_addr));
+      // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
       memcpy(&ca.sin6.sin6_addr.s6_addr, ard->d_ip.d_ip6, ard->d_afdlength);
     } else {
       throw MOADNSException("Asked to decode APL record but got unknown Address Family");
@@ -875,7 +907,6 @@ boilerplate_conv(TKEY,
                  conv.xfr16BitInt(d_othersize);
                  if (d_othersize>0) conv.xfrBlobNoSpaces(d_other, d_othersize);
                  )
-TKEYRecordContent::TKEYRecordContent() { d_othersize = 0; } // fix CID#1288932
 
 boilerplate_conv(URI,
                  conv.xfr16BitInt(d_priority);
@@ -1017,6 +1048,7 @@ static void reportOtherTypes(const ReportIsOnlyCallableByReportAllTypes& guard)
    L32RecordContent::report(guard);
    L64RecordContent::report(guard);
    LPRecordContent::report(guard);
+   WALLETRecordContent::report(guard);
    ZONEMDRecordContent::report(guard);
 }
 

@@ -50,6 +50,7 @@ subdir('meson' / 'net-libs')                # Network Libraries
 subdir('meson' / 'tm-gmtoff')               # Check for tm_gmtoff field in struct tm
 subdir('meson' / 'mmap')                    # Check for mmap
 subdir('meson' / 'libcap')                  # Libcap to drop capabilities
+subdir('meson' / 'libcurl')                 # Libcurl for OTLPLogger
 subdir('meson' / 'libedit')                 # Libedit
 subdir('meson' / 'libsodium')               # Libsodium
 subdir('meson' / 'libcrypto')               # OpenSSL libcrypto
@@ -85,6 +86,7 @@ subdir('meson' / 'doq')                     # DNS over QUIC
 subdir('meson' / 'doh3')                    # DNS over HTTP/3
 subdir('meson' / 'yaml-configuration')      # YAML configuration
 subdir('meson' / 'catch2')                  # Microbenchmark
+subdir('meson' / 'mmdb')                    # MMDB (MaxmindDB)
 
 common_sources = []
 
@@ -154,7 +156,9 @@ common_sources += files(
   src_dir / 'dnsdist-lua-bindings-dnsparser.cc',
   src_dir / 'dnsdist-lua-bindings-dnsquestion.cc',
   src_dir / 'dnsdist-lua-bindings-kvs.cc',
+  src_dir / 'dnsdist-lua-bindings-mmdb.cc',
   src_dir / 'dnsdist-lua-bindings-network.cc',
+  src_dir / 'dnsdist-lua-bindings-opentelemetry.cc',
   src_dir / 'dnsdist-lua-bindings-packetcache.cc',
   src_dir / 'dnsdist-lua-bindings-protobuf.cc',
   src_dir / 'dnsdist-lua-bindings-rings.cc',
@@ -171,6 +175,7 @@ common_sources += files(
   src_dir / 'dnsdist-nghttp2.cc',
   src_dir / 'dnsdist-nghttp2-in.cc',
   src_dir / 'dnsdist-opentelemetry.cc',
+  src_dir / 'dnsdist-packet-processing.cc',
   src_dir / 'dnsdist-protobuf.cc',
   src_dir / 'dnsdist-protocols.cc',
   src_dir / 'dnsdist-proxy-protocol.cc',
@@ -188,6 +193,7 @@ common_sources += files(
   src_dir / 'dnsdist-systemd.cc',
   src_dir / 'dnsdist-tcp.cc',
   src_dir / 'dnsdist-tcp-downstream.cc',
+  src_dir / 'dnsdist-udp.cc',
   src_dir / 'dnsdist-web.cc',
   src_dir / 'dnsdist-xsk.cc',
   src_dir / 'dnsname.cc',
@@ -198,13 +204,16 @@ common_sources += files(
   src_dir / 'ednscookies.cc',
   src_dir / 'ednsextendederror.cc',
   src_dir / 'ednsoptions.cc',
+  src_dir / 'ednspadding.cc',
   src_dir / 'ednssubnet.cc',
   src_dir / 'gettime.cc',
   src_dir / 'iputils.cc',
   src_dir / 'libssl.cc',
   src_dir / 'logging.cc',
   src_dir / 'misc.cc',
+  src_dir / 'otlp_logger.cc',
   src_dir / 'protozero.cc',
+  src_dir / 'protozero-otlp.cc',
   src_dir / 'protozero-trace.cc',
   src_dir / 'proxy-protocol.cc',
   src_dir / 'qtype.cc',
@@ -226,6 +235,12 @@ conditional_sources = {
     ],
     'condition': dep_cdb.found(),
   },
+  'minicurl': {
+    'sources': [
+      src_dir / 'minicurl.cc',
+    ],
+    'condition': get_option('otlp').allowed() and dep_libcurl.found(),
+  },
   'doq': {
     'sources': [
       src_dir / 'doq.cc',
@@ -243,6 +258,12 @@ conditional_sources = {
       src_dir / 'doq-common.cc',
     ],
     'condition': dep_libquiche.found(),
+  },
+  'mmdb': {
+    'sources': [
+      src_dir / 'mmdb.cc',
+    ],
+    'condition': get_option('mmdb').allowed() and dep_mmdb.found(),
    },
 }
 
@@ -384,6 +405,7 @@ deps = [
   dep_ipcrypt2,
   dep_libcap,
   dep_libcrypto,
+  dep_libcurl,
   dep_gnutls,
   dep_libedit,
   dep_json11,
@@ -395,6 +417,7 @@ deps = [
   dep_lmdb,
   dep_lmdb_safe,
   dep_lua,
+  dep_mmdb,
   dep_protozero,
   dep_yahttp,
   dep_libre2,
@@ -493,7 +516,17 @@ if get_option('fuzz-targets')
       'files-extra': fuzz_extra_sources,
       'deps-extra': [
          dep_libsystemd,
-       ]
+       ],
+      'fuzzing-target': true,
+    },
+    'fuzz-target-dnsdist-ecs' : {
+      'main': src_dir / 'fuzz_dnsdist_ecs.cc',
+      'link-args': fuzzer_ldflags,
+      'files-extra': fuzz_extra_sources,
+      'deps-extra': [
+         dep_libsystemd,
+       ],
+      'fuzzing-target': true,
     },
   }
   if get_option('xsk').allowed() and dep_libbpf.found() and dep_libxdp.found()
@@ -508,9 +541,10 @@ if get_option('fuzz-targets')
            src_dir / 'misc.cc',
            src_dir / 'xsk.cc'
            ],
-        'deps-extra': [
+         'deps-extra': [
            dep_libsystemd,
-         ]
+          ],
+         'fuzzing-target': true,
        },
     }
   endif
@@ -529,6 +563,7 @@ test_sources += files(
   src_dir / 'test-dnsdistbackend_cc.cc',
   src_dir / 'test-dnsdistbackoff.cc',
   src_dir / 'test-dnsdist_cc.cc',
+  src_dir / 'test-dnsdist-concurrent-connections.cc',
   src_dir / 'test-dnsdist-connections-cache.cc',
   src_dir / 'test-dnsdist-dnsparser.cc',
   src_dir / 'test-dnsdist-ipcrypt2_cc.cc',
@@ -546,12 +581,14 @@ test_sources += files(
   src_dir / 'test-dnsdistrules_cc.cc',
   src_dir / 'test-dnsdistsvc_cc.cc',
   src_dir / 'test-dnsdistserverpool.cc',
+  src_dir / 'test-dnsdist-session-cache.cc',
   src_dir / 'test-dnsdisttcp_cc.cc',
   src_dir / 'test-dnsdist-xsk.cc',
   src_dir / 'test-dnsparser_cc.cc',
   src_dir / 'test-iputils_hh.cc',
   src_dir / 'test-luawrapper.cc',
   src_dir / 'test-mplexer.cc',
+  src_dir / 'test-protozero-otlp_cc.cc',
   src_dir / 'test-proxy_protocol_cc.cc',
   src_dir / 'test-sholder_hh.cc',
 )
@@ -582,6 +619,7 @@ if get_option('unit-tests')
           # FFI files are directly added to the binary, because otherwise the visibility
           # is ignored and the functions that are not used in the binary are not exported
           src_dir / 'dnsdist-lua-ffi.cc',
+          src_dir / 'dnsdist-lua-inspection-ffi.cc',
         ],
         'deps-extra': [
           libdnsdist_test,
@@ -597,10 +635,13 @@ endif
 
 benchmark_sources = files(
   src_dir / 'bench-dnsdist-action-rcode.cc',
+  src_dir / 'bench-dnsdist-cache.cc',
   src_dir / 'bench-dnsdist-dnsparser_cc.cc',
+  src_dir / 'bench-dnsdist-lua-bindings-opentelemetry_cc.cc',
   src_dir / 'bench-dnsdist-opentelemetry_cc.cc',
   src_dir / 'bench-dnsdist-rings_cc.cc',
   src_dir / 'bench-misc_hh.cc',
+  src_dir / 'bench-iputils.cc',
 )
 
 if get_option('benchmark')
@@ -624,12 +665,14 @@ if get_option('benchmark')
         dep_ffi_interface,
         dep_lua,
         dep_protozero,
+        dep_libsystemd,
       ],
     }
   }
 endif
 
 man_pages = []
+fuzzing_binaries = []
 foreach tool, info: tools
   var_name = tool.underscorify()
   main = files(info['main'])
@@ -640,21 +683,22 @@ foreach tool, info: tools
   link_args = 'link-args' in info ? info['link-args'] : []
   install = 'install' in info ? info['install'] : false
 
+  new_binary = executable(
+    tool,
+    main,
+    config_h,
+    files_extra,
+    export_dynamic: export_dynamic,
+    link_args: link_args,
+    dependencies: [
+      libdnsdist_common,
+      deps_extra,
+    ],
+    install: install,
+  )
   set_variable(
     var_name,
-    executable(
-      tool,
-      main,
-      config_h,
-      files_extra,
-      export_dynamic: export_dynamic,
-      link_args: link_args,
-      dependencies: [
-        libdnsdist_common,
-        deps_extra,
-      ],
-      install: install,
-    )
+    new_binary,
   )
 
   if 'manpages' in info
@@ -662,14 +706,22 @@ foreach tool, info: tools
       man_pages += docs_dir / 'manpages' / (man_page + '.rst')
     endforeach
   endif
+  if 'fuzzing-target' in info
+    fuzzing_binaries += new_binary
+  endif
 endforeach
 
+if get_option('fuzz-targets')
+  alias_target('fuzz-targets',
+               fuzzing_binaries)
+endif
+
 if get_option('unit-tests')
-  test('testrunner', testrunner)
+  test('testrunner', testrunner, timeout: 300)
 endif
 
 if get_option('benchmark')
-  benchmark('benchmarkrunner', benchmarkrunner, timeout:240)
+  benchmark('benchmarkrunner', benchmarkrunner, timeout: 300)
 endif
 
 # Man-pages.
@@ -792,7 +844,7 @@ if dep_systemd_prog.found()
   dnsdist_service_conf_general.set('ConfigFile', '')
 
   configure_file(
-    input: 'dnsdist.service.meson.in',
+    input: 'dnsdist.service.in',
     output: 'dnsdist.service',
     configuration: dnsdist_service_conf_general,
     install: true,
@@ -806,7 +858,7 @@ if dep_systemd_prog.found()
   dnsdist_service_conf_instance.set('ConfigFile', '--config ' + get_option('sysconfdir') + '/dnsdist-%i.conf')
 
   configure_file(
-    input: 'dnsdist.service.meson.in',
+    input: 'dnsdist.service.in',
     output: 'dnsdist@.service',
     configuration: dnsdist_service_conf_instance,
     install: true,

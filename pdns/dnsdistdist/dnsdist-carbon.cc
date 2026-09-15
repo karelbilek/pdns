@@ -30,6 +30,7 @@
 #include "dnsdist-configuration.hh"
 #include "dnsdist-frontend.hh"
 #include "dnsdist-metrics.hh"
+#include "dnsdist-lua-types.hh"
 
 #ifndef DISABLE_CARBON
 #include "dolog.hh"
@@ -146,6 +147,10 @@ static bool doOneCarbonExport(const Carbon::Endpoint& endpoint, const Logr::Logg
       str << base << "tcpgaveup" << ' ' << front->tcpGaveUp.load() << " " << now << "\r\n";
       str << base << "tcpclienttimeouts" << ' ' << front->tcpClientTimeouts.load() << " " << now << "\r\n";
       str << base << "tcpdownstreamtimeouts" << ' ' << front->tcpDownstreamTimeouts.load() << " " << now << "\r\n";
+      str << base << "tcpdiedduringprocessing" << ' ' << front->tcpDiedDuringProcessing.load() << " " << now << "\r\n";
+      str << base << "tcpbadalpn" << ' ' << front->tcpBadALPN.load() << " " << now << "\r\n";
+      str << base << "tcpbadproxyprotocol" << ' ' << front->tcpBadProxyProtocol.load() << " " << now << "\r\n";
+      str << base << "tcpmaxdurationreached" << ' ' << front->tcpMaxDurationReached.load() << " " << now << "\r\n";
       str << base << "tcpcurrentconnections" << ' ' << front->tcpCurrentConnections.load() << " " << now << "\r\n";
       str << base << "tcpmaxconcurrentconnections" << ' ' << front->tcpMaxConcurrentConnections.load() << " " << now << "\r\n";
       str << base << "tcpavgqueriesperconnection" << ' ' << front->tcpAvgQueriesPerConnection.load() << " " << now << "\r\n";
@@ -328,7 +333,7 @@ static void carbonHandler(const Carbon::Endpoint& endpoint)
         }
         else {
           VERBOSESLOG(infolog("Carbon export for %s took longer (%s us) than the configured interval (%d us)", endpoint.server.toStringWithPort(), elapsedUSec, intervalUSec),
-                      logger->info("Carbon export took longer than the configured interval", "dnsdist.carbon.elapsed_usec", Logging::Loggable(elapsedUSec), "dnsdist.carbon.interval_usec", Logging::Loggable(intervalUSec)));
+                      logger->info(Logr::Info, "Carbon export took longer than the configured interval", "dnsdist.carbon.elapsed_usec", Logging::Loggable(elapsedUSec), "dnsdist.carbon.interval_usec", Logging::Loggable(intervalUSec)));
         }
         consecutiveFailures = 0;
       }
@@ -338,7 +343,7 @@ static void carbonHandler(const Carbon::Endpoint& endpoint)
           consecutiveFailures++;
         }
         VERBOSESLOG(infolog("Run for %s - %s failed, next attempt in %d", endpoint.server.toStringWithPort(), endpoint.getOurName(), backOff),
-                    logger->info("Carbon export failed", "dnsdist.carbon.next_attempt_seconds", Logging::Loggable(backOff)));
+                    logger->info(Logr::Info, "Carbon export failed", "dnsdist.carbon.next_attempt_seconds", Logging::Loggable(backOff)));
         std::this_thread::sleep_for(std::chrono::seconds(backOff));
       }
     } while (true);
@@ -374,13 +379,13 @@ void Carbon::run(const std::vector<Carbon::Endpoint>& endpoints)
   }
 }
 
-const std::string Carbon::Endpoint::getOurName() const
+std::string Carbon::Endpoint::getOurName() const
 {
   std::string ret = ourname.value_or("");
   if (!ourname) {
     ret = dnsdist::configuration::getCurrentRuntimeConfiguration().d_server_id;
+    std::replace(ret.begin(), ret.end(), '.', '_');
   }
-  std::replace(ret.begin(), ret.end(), '.', '_');
   return ret;
 }
 

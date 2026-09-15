@@ -216,8 +216,8 @@ static void readAuthZoneData(SyncRes::AuthDomain& authDomain, const pair<string,
 {
   log->info(Logr::Notice, "Parsing authoritative data from file", "zone", Logging::Loggable(headers.first), "file", Logging::Loggable(headers.second));
   ZoneParserTNG zpt(headers.second, DNSName(headers.first));
-  zpt.setMaxGenerateSteps(::arg().asNum("max-generate-steps"));
-  zpt.setMaxIncludes(::arg().asNum("max-include-depth"));
+  zpt.setMaxGenerateSteps(::arg().asNum<size_t>("max-generate-steps"));
+  zpt.setMaxIncludes(::arg().asNum<size_t>("max-include-depth"));
   DNSResourceRecord resourceRecord;
   DNSRecord dnsrecord;
   while (zpt.get(resourceRecord)) {
@@ -412,7 +412,7 @@ static void processExportEtcHosts(std::shared_ptr<SyncRes::domainmap_t>& newMap,
   string fname = ::arg()["etc-hosts-file"];
   ifstream ifs(fname);
   if (!ifs) {
-    log->error(Logr::Warning, "Could not open file for reading", "file", Logging::Loggable(fname));
+    log->info(Logr::Warning, "Could not open file for reading", "file", Logging::Loggable(fname));
     return;
   }
   vector<string> parts;

@@ -200,7 +200,7 @@ static void possiblyConvertACLFile(const string& includeDir, const string& apiDi
   ofconf << yaml << endl;
   ofconf.close();
   if (ofconf.bad()) {
-    log->error(Logr::Error, "Error writing YAML", "to", Logging::Loggable(tmpfilename));
+    log->info(Logr::Error, "Error writing YAML", "to", Logging::Loggable(tmpfilename));
     unlink(tmpfilename.c_str());
     throw runtime_error("YAML Conversion");
   }
@@ -255,7 +255,7 @@ static void fileCopy(const string& src, const string& dst, Logr::log_t log)
   ifconf.close();
   ofconf.close();
   if (ofconf.bad()) {
-    log->error(Logr::Error, "Error writing YAML", "to", Logging::Loggable(dst));
+    log->info(Logr::Error, "Error writing YAML", "to", Logging::Loggable(dst));
     throw runtime_error("YAML Conversion");
   }
 }
@@ -546,7 +546,7 @@ static void processLine(const std::string& arg, FieldMap& map, bool mainFile)
   ::rust::String section;
   ::rust::String fieldname;
   ::rust::String type_name;
-  pdns::rust::settings::rec::Value rustvalue = {false, 0, 0.0, "", {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}};
+  pdns::rust::settings::rec::Value rustvalue = {false, 0, 0.0, "", {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}};
   if (pdns::settings::rec::oldKVToBridgeStruct(var, val, section, fieldname, type_name, rustvalue)) {
     auto overriding = !mainFile && !incremental && !simpleRustType(type_name);
     auto [existing, inserted] = map.emplace(std::pair{std::pair{section, fieldname}, pdns::rust::settings::rec::OldStyle{section, fieldname, var, std::move(type_name), rustvalue, overriding}});
@@ -663,22 +663,24 @@ std::string pdns::settings::rec::defaultsToYaml(bool postProcess)
     rustvalue.u64_val = 24;
     map.emplace(std::pair{std::pair{section, name}, pdns::rust::settings::rec::OldStyle{section, name, name, type, std::move(rustvalue), false}});
   };
-  def("dnssec", "trustanchors", "Vec<TrustAnchor>");
   def("dnssec", "negative_trustanchors", "Vec<NegativeTrustAnchor>");
   def("dnssec", "trustanchorfile", "String");
   def("dnssec", "trustanchorfile_interval", "u64");
-  def("logging", "protobuf_servers", "Vec<ProtobufServer>");
-  def("logging", "outgoing_protobuf_servers", "Vec<ProtobufServer>");
+  def("dnssec", "trustanchors", "Vec<TrustAnchor>");
+  def("incoming", "proxymappings", "Vec<ProxyMapping>");
   def("logging", "dnstap_framestream_servers", "Vec<DNSTapFrameStreamServer>");
   def("logging", "dnstap_nod_framestream_servers", "Vec<DNSTapNODFrameStreamServer>");
-  def("recursor", "rpzs", "Vec<RPZ>");
-  def("recursor", "sortlists", "Vec<SortList>");
+  def("logging", "opentelemetry_trace_conditions", "Vec<OpenTelemetryTraceCondition>");
+  def("logging", "outgoing_protobuf_servers", "Vec<ProtobufServer>");
+  def("logging", "protobuf_servers", "Vec<ProtobufServer>");
+  def("recordcache", "keepwarm", "Vec<QNameAndQType>");
   def("recordcache", "zonetocaches", "Vec<ZoneToCache>");
   def("recursor", "allowed_additional_qtypes", "Vec<AllowedAdditionalQType>");
-  def("incoming", "proxymappings", "Vec<ProxyMapping>");
   def("recursor", "forwarding_catalog_zones", "Vec<ForwardingCatalogZone>");
-  def("webservice", "listen", "Vec<IncomingWSConfig>");
+  def("recursor", "rpzs", "Vec<RPZ>");
+  def("recursor", "sortlists", "Vec<SortList>");
   def("recursor", "tls_configurations", "Vec<OutgoingTLSConfiguration>");
+  def("webservice", "listen", "Vec<IncomingWSConfig>");
   // End of should be generated XXX
 
   // Convert the map to a vector, as CXX does not have any dictionary like support.
@@ -781,6 +783,7 @@ void fromLuaToRust(const ProtobufExportConfig& pbConfig, pdns::rust::settings::r
   pbServer.timeout = pbConfig.timeout;
   pbServer.maxQueuedEntries = pbConfig.maxQueuedEntries;
   pbServer.reconnectWaitTime = pbConfig.reconnectWaitTime;
+  pbServer.stalledWriteTimeout = pbConfig.stalledWriteTimeout;
   pbServer.taggedOnly = pbConfig.taggedOnly;
   pbServer.asyncConnect = pbConfig.asyncConnect;
   pbServer.logQueries = pbConfig.logQueries;
@@ -789,6 +792,8 @@ void fromLuaToRust(const ProtobufExportConfig& pbConfig, pdns::rust::settings::r
     pbServer.exportTypes.emplace_back(QType(num).toString());
   }
   pbServer.logMappedFrom = pbConfig.logMappedFrom;
+  pbServer.frame4 = pbConfig.frame4;
+  pbServer.strategy = ProtobufExportConfig::toString(pbConfig.strategy);
 }
 
 void fromLuaToRust(const FrameStreamExportConfig& fsc, pdns::rust::settings::rec::DNSTapFrameStreamServer& dnstap)
@@ -884,6 +889,7 @@ void fromLuaToRust(const vector<RPZTrackerParams>& rpzs, pdns::rust::settings::r
       .axfrTimeout = 20,
       .dumpFile = "",
       .seedFile = "",
+      .wipePacketCache = true,
     };
 
     for (const auto& address : rpz.zoneXFRParams.primaries) {
@@ -916,6 +922,7 @@ void fromLuaToRust(const vector<RPZTrackerParams>& rpzs, pdns::rust::settings::r
     rustrpz.axfrTimeout = rpz.zoneXFRParams.xfrTimeout;
     rustrpz.dumpFile = rpz.dumpZoneFileName;
     rustrpz.seedFile = rpz.seedFileName;
+    rustrpz.wipePacketCache = rpz.wipePacketCache;
 
     rec.rpzs.emplace_back(rustrpz);
   }
@@ -1137,11 +1144,14 @@ void fromRustToLuaConfig(const pdns::rust::settings::rec::ProtobufServer& pbServ
   exp.maxQueuedEntries = pbServer.maxQueuedEntries;
   exp.timeout = pbServer.timeout;
   exp.reconnectWaitTime = pbServer.reconnectWaitTime;
+  exp.stalledWriteTimeout = pbServer.stalledWriteTimeout;
   exp.asyncConnect = pbServer.asyncConnect;
   exp.logQueries = pbServer.logQueries;
   exp.logResponses = pbServer.logResponses;
   exp.taggedOnly = pbServer.taggedOnly;
   exp.logMappedFrom = pbServer.logMappedFrom;
+  exp.frame4 = pbServer.frame4;
+  exp.strategy = ProtobufExportConfig::strategyFromString(std::string(pbServer.strategy));
 }
 
 void fromRustToLuaConfig(const pdns::rust::settings::rec::DNSTapFrameStreamServer& dnstap, FrameStreamExportConfig& exp)
@@ -1242,6 +1252,7 @@ void fromRustToLuaConfig(const rust::Vec<pdns::rust::settings::rec::RPZ>& rpzs, 
     params.zoneXFRParams.xfrTimeout = rpz.axfrTimeout;
     params.dumpZoneFileName = std::string(rpz.dumpFile);
     params.seedFileName = std::string(rpz.seedFile);
+    params.wipePacketCache = rpz.wipePacketCache;
     luaConfig.rpzs.emplace_back(params);
   }
 }
@@ -1338,6 +1349,13 @@ void fromRustToLuaConfig(const rust::Vec<pdns::rust::settings::rec::ForwardingCa
   }
 }
 
+void fromRustToLuaConfig(const rust::Vec<pdns::rust::settings::rec::QNameAndQType>& keepwarm, std::vector<std::pair<DNSName, QType>>& lua)
+{
+  for (const auto& warm : keepwarm) {
+    lua.emplace_back(DNSName(std::string(warm.qname)), QType::chartocode(std::string(warm.qtype).data()));
+  }
+}
+
 void fromRustToOTTraceConditions(const rust::Vec<pdns::rust::settings::rec::OpenTelemetryTraceCondition>& settings, OpenTelemetryTraceConditions& conditions)
 {
   for (const auto& setting : settings) {
@@ -1390,6 +1408,7 @@ void pdns::settings::rec::fromBridgeStructToLuaConfig(const pdns::rust::settings
   fromRustToLuaConfig(settings.recursor.forwarding_catalog_zones, luaConfig.catalogzones);
   fromRustToLuaConfig(settings.incoming.proxymappings, proxyMapping);
   fromRustToOTTraceConditions(settings.logging.opentelemetry_trace_conditions, conditions);
+  fromRustToLuaConfig(settings.recordcache.keepwarm, luaConfig.keepWarm);
 }
 
 // Return true if an item that's (also) a Lua config item is set

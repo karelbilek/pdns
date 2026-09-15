@@ -39,8 +39,13 @@
 gPgSQLBackend::gPgSQLBackend(const string& mode, const string& suffix) :
   GSQLBackend(mode, suffix)
 {
+  if (g_slogStructured) {
+    d_slog = g_slog->withName("gpgsql" + suffix);
+  }
+
   try {
-    setDB(std::unique_ptr<SSql>(new SPgSQL(getArg("dbname"),
+    setDB(std::unique_ptr<SSql>(new SPgSQL(d_slog,
+                                           getArg("dbname"),
                                            getArg("host"),
                                            getArg("port"),
                                            getArg("user"),
@@ -50,11 +55,13 @@ gPgSQLBackend::gPgSQLBackend(const string& mode, const string& suffix) :
   }
 
   catch (SSqlException& e) {
-    g_log << Logger::Error << mode << " Connection failed: " << e.txtReason() << endl;
+    SLOG(g_log << Logger::Error << mode << " Connection failed: " << e.txtReason() << endl,
+         d_slog->error(Logr::Error, e.txtReason(), "Database connection failed", "mode", Logging::Loggable(mode)));
     throw PDNSException("Unable to launch " + mode + " connection: " + e.txtReason());
   }
   allocateStatements();
-  g_log << Logger::Info << mode << " Connection successful. Connected to database '" << getArg("dbname") << "' on '" << getArg("host") << "'." << endl;
+  SLOG(g_log << Logger::Info << mode << " Connection successful. Connected to database '" << getArg("dbname") << "' on '" << getArg("host") << "'." << endl,
+       d_slog->info(Logr::Info, "Database connection successful", "database", Logging::Loggable(getArg("dbname")), "host", Logging::Loggable(getArg("host"))));
 }
 
 void gPgSQLBackend::reconnect()
@@ -143,8 +150,8 @@ public:
     declare(suffix, "update-serial-query", "", "update domains set notified_serial=$1 where id=$2");
     declare(suffix, "update-lastcheck-query", "", "update domains set last_check=$1 where id=$2");
     declare(suffix, "info-all-primary-query", "", "select domains.id, domains.name, domains.type, domains.notified_serial, domains.options, domains.catalog, records.content from records join domains on records.domain_id=domains.id and records.name=domains.name where records.type='SOA' and records.disabled=false and domains.type in ('MASTER', 'PRODUCER') order by domains.id");
-    declare(suffix, "info-producer-members-query", "", "select domains.id, domains.name, domains.options from records join domains on records.domain_id=domains.id and records.name=domains.name where domains.type='MASTER' and domains.catalog=$1 and records.type='SOA' and records.disabled=false");
-    declare(suffix, "info-consumer-members-query", "", "select id, name, options, master from domains where type='SLAVE' and catalog=$1");
+    declare(suffix, "info-producer-members-query", "", "select domains.id, domains.name, domains.type, domains.options from records join domains on records.domain_id=domains.id and records.name=domains.name where domains.type in ('MASTER', 'PRODUCER') and domains.catalog=$1 and records.type='SOA' and records.disabled=false");
+    declare(suffix, "info-consumer-members-query", "", "select id, name, type, options, master from domains where type in ('SLAVE', 'CONSUMER') and catalog=$1");
     declare(suffix, "delete-domain-query", "", "delete from domains where name=$1");
     declare(suffix, "delete-zone-query", "", "delete from records where domain_id=$1");
     declare(suffix, "delete-rrset-query", "", "delete from records where domain_id=$1 and name=$2 and type=$3");
@@ -165,7 +172,7 @@ public:
     declare(suffix, "remove-domain-key-query", "", "delete from cryptokeys where domain_id=(select id from domains where name=$1) and cryptokeys.id=$2");
     declare(suffix, "clear-domain-all-keys-query", "", "delete from cryptokeys where domain_id=(select id from domains where name=$1)");
     declare(suffix, "get-tsig-key-query", "", "select algorithm, secret from tsigkeys where name=$1");
-    declare(suffix, "set-tsig-key-query", "", "insert into tsigkeys (name,algorithm,secret) values($1,$2,$3)");
+    declare(suffix, "set-tsig-key-query", "", "insert into tsigkeys (name,algorithm,secret) values($1,$2,$3) on conflict(name,algorithm) do update set secret=Excluded.secret");
     declare(suffix, "delete-tsig-key-query", "", "delete from tsigkeys where name=$1");
     declare(suffix, "get-tsig-keys-query", "", "select name,algorithm, secret from tsigkeys");
 
@@ -196,6 +203,9 @@ public:
   gPgSQLLoader()
   {
     BackendMakers().report(std::make_unique<gPgSQLFactory>("gpgsql"));
+    // If this module is not loaded dynamically at runtime, this code runs
+    // as part of a global constructor, before the structured logger has a
+    // chance to be set up, so fallback to simple logging.
     g_log << Logger::Info << "[gpgsqlbackend] This is the gpgsql backend version " VERSION
 #ifndef REPRODUCIBLE
           << " (" __DATE__ " " __TIME__ ")"

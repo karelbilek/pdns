@@ -26,15 +26,18 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include "config.h"
 #include "credentials.hh"
 #include "dnsdist-actions.hh"
 #include "dnsdist-carbon.hh"
+#include "dnsdist-lua-types.hh"
 #include "dnsdist-query-count.hh"
 #include "dnsdist-rule-chains.hh"
 #include "dnsdist-server-pool.hh"
 #include "iputils.hh"
+#include "remote_logger.hh"
 
 class ServerPolicy;
 struct ServerPool;
@@ -104,7 +107,7 @@ struct ImmutableConfiguration
   uint32_t d_maxTCPReadIOsPerQuery{50};
   uint32_t d_tcpBanDurationForExceedingMaxReadIOsPerQuery{60};
   uint32_t d_tcpBanDurationForExceedingTCPTLSRate{10};
-  uint16_t d_maxUDPOutstanding{std::numeric_limits<uint16_t>::max()};
+  uint32_t d_maxUDPOutstanding{65536U};
   TimeFormat d_structuredLoggingTimeFormat{TimeFormat::Numeric};
   uint8_t d_udpTimeout{2};
   uint8_t d_tcpConnectionsOverloadThreshold{90};
@@ -135,6 +138,9 @@ struct RuntimeConfiguration
   std::shared_ptr<const CredentialsHolder> d_webAPIKey;
   std::optional<std::unordered_map<std::string, std::string>> d_webCustomHeaders;
   std::shared_ptr<ServerPolicy> d_lbPolicy;
+#ifndef DISABLE_PROTOBUF
+  std::vector<std::shared_ptr<RemoteLoggerInterface>> d_maintenanceRemoteLoggers;
+#endif
   NetmaskGroup d_ACL;
   NetmaskGroup d_proxyProtocolACL;
   NetmaskGroup d_consoleACL;
@@ -150,6 +156,7 @@ struct RuntimeConfiguration
   size_t d_maxTCPQueriesPerConn{0};
   size_t d_maxTCPConnectionDuration{0};
   size_t d_proxyProtocolMaximumSize{512};
+  size_t d_opentelemetryMaintenanceInterval{0}; // Sample interval for the maintenance function, 0 means disabled
   uint32_t d_staleCacheEntriesTTL{0};
   uint32_t d_secPollInterval{3600};
   uint32_t d_consoleOutputMsgMaxSize{10000000};
@@ -181,10 +188,13 @@ struct RuntimeConfiguration
   bool d_allowEmptyResponse{false};
   bool d_dropEmptyQueries{false};
   bool d_consoleEnabled{false};
+  bool d_consoleBindFatal{false};
+  bool d_webserverBindFatal{false};
   bool d_logConsoleConnections{true};
   bool d_addEDNSToSelfGeneratedResponses{true};
   bool d_applyACLToProxiedClients{false};
   bool d_openTelemetryTracing{false}; // XXX: It would be nice to #ifndef DISABLE_PROTOBUF, but as this is defined in dnsdist-settings-definitions.yml, we can't
+  bool d_webServerAllowCrossOriginRequests{false}; // Whether the webserver / API allows cross-origin requests
 };
 
 /* Be careful not to hold on this for too long, it can be invalidated

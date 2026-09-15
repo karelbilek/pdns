@@ -35,33 +35,115 @@ std::atomic<bool> DNSRecordContent::d_locked{false};
 
 UnknownRecordContent::UnknownRecordContent(const string& zone)
 {
-  // parse the input
-  vector<string> parts;
-  stringtok(parts, zone);
-  // we need exactly 3 parts, except if the length field is set to 0 then we only need 2
-  if (parts.size() != 3 && !(parts.size() == 2 && boost::equals(parts.at(1), "0"))) {
-    throw MOADNSException("Unknown record was stored incorrectly, need 3 fields, got " + std::to_string(parts.size()) + ": " + zone);
-  }
+  // The expected format is '\#', followed by the length in decimal, and as
+  // many pairs of hex digits as the length, which may be separated by
+  // whitespace.
+  // Because of this, using stringtok() might be horribly suboptimal for large
+  // data with every byte separated by spaces.
 
-  if (parts.at(0) != "\\#") {
-    throw MOADNSException("Unknown record was stored incorrectly, first part should be '\\#', got '" + parts.at(0) + "'");
-  }
+  // The following is equivalent to strintok(parts, zone), but stops after
+  // filling two parts, and stores the beginning of the actual payload for
+  // further consumption.
+  constexpr const char *delimiters = " \t\n";
+  std::vector<std::string> parts;
+  parts.reserve(2);
+  std::string::size_type pos{0};
+  {
+    const auto len = zone.length();
 
-  const string& relevant = (parts.size() > 2) ? parts.at(2) : "";
-  auto total = pdns::checked_stoi<unsigned int>(parts.at(1));
-  if (relevant.size() % 2 || (relevant.size() / 2) != total) {
-    throw MOADNSException((boost::format("invalid unknown record length: size not equal to length field (%d != 2 * %d)") % relevant.size() % total).str());
-  }
+    while (pos<len) {
+      // eat leading whitespace
+      pos = zone.find_first_not_of (delimiters, pos);
+      if (pos == string::npos) {
+        break;   // nothing left but white space
+      }
 
-  string out;
-  out.reserve(total + 1);
+      // find the end of the token
+      std::string::size_type epos = zone.find_first_of (delimiters, pos);
 
-  for (unsigned int n = 0; n < total; ++n) {
-    int c;
-    if (sscanf(&relevant.at(2*n), "%02x", &c) != 1) {
-      throw MOADNSException("unable to read data at position " + std::to_string(2 * n) + " from unknown record of size " + std::to_string(relevant.size()));
+      // push token
+      if (epos == std::string::npos) {
+        parts.push_back (zone.substr(pos));
+        pos = epos;
+        break;
+      }
+      parts.push_back (zone.substr(pos, epos-pos));
+      // set up for next loop
+      pos = epos + 1;
+      if (parts.size() == 2) {
+        break;
+      }
     }
-    out.append(1, (char)c);
+  }
+
+  if (parts.empty() || parts.at(0) != "\\#") {
+    throw MOADNSException("Unknown record was stored incorrectly, should start with '\\#'");
+  }
+
+  if (parts.size() < 2) {
+    throw MOADNSException("Unknown record was stored incorrectly, missing size field");
+  }
+  auto total = pdns::checked_stoi<unsigned long>(parts.at(1));
+  if (total == 0) {
+    if (pos != std::string::npos) {
+      throw MOADNSException("Unknown record was stored incorrectly, spurious data after zero size field");
+    }
+    return;
+  }
+
+  if (total > std::numeric_limits<uint16_t>::max()) {
+    throw MOADNSException((boost::format("invalid unknown record length size (%d)") % total).str());
+  }
+
+  std::string out;
+  out.reserve(total);
+
+  // This loops mimics stringtok() again
+  unsigned int byte = 0;
+  while (byte < total) {
+    // eat leading whitespace
+    pos = zone.find_first_not_of (delimiters, pos);
+    if (pos == std::string::npos) { // nothing left but white space
+      throw MOADNSException("Unknown record was stored incorrectly, truncated after byte " + std::to_string(byte) + " of " + std::to_string(total));
+    }
+
+    // find the end of the token
+    std::string::size_type epos = zone.find_first_of (delimiters, pos);
+
+    // extract token
+    std::string_view chunk{};
+    if (epos == std::string::npos) {
+      // TODO: replace with zone.subview(pos) once we can use C++26
+      chunk = std::string_view(&zone.at(pos));
+      pos = epos;
+    } else {
+      // TODO: replace with zone.subview(pos, epos-pos) once we can use C++26
+      chunk = std::string_view(&zone.at(pos), epos-pos);
+    }
+
+    // process token
+    if ((chunk.size() % 2) != 0) {
+      throw MOADNSException("Unknown record was stored incorrectly, sequence of digits for byte " + std::to_string(byte) + " of " + std::to_string(total) + " onward at offset " + std::to_string(pos) + " has uneven length");
+    }
+    if ((chunk.size() / 2) > total - byte) {
+      throw MOADNSException("Unknown record was stored incorrectly, sequence of digits for byte " + std::to_string(byte) + " of " + std::to_string(total) + " onward at offset " + std::to_string(pos) + " is too long");
+    }
+    for (std::string_view::size_type subpos = 0; subpos < chunk.size(); subpos += 2) {
+      int chr{0};
+      if (sscanf(&chunk.at(subpos), "%02x", &chr) != 1) {
+        throw MOADNSException("unable to read data for byte " + std::to_string(byte) + " of " + std::to_string(total) + " at offset " + std::to_string(pos + subpos) + " from unknown record");
+      }
+      out.append(1, static_cast<char>(chr));
+      ++byte;
+    }
+
+    // set up for next loop
+    if (epos == std::string::npos) {
+      pos = epos;
+    }
+    else {
+      pos = epos + 1;
+    }
   }
 
   d_record.insert(d_record.end(), out.begin(), out.end());
@@ -70,11 +152,14 @@ UnknownRecordContent::UnknownRecordContent(const string& zone)
 string UnknownRecordContent::getZoneRepresentation(bool /* noDot */) const
 {
   ostringstream str;
-  str<<"\\# "<<(unsigned int)d_record.size()<<" ";
-  char hex[4];
-  for (unsigned char n : d_record) {
-    snprintf(hex, sizeof(hex), "%02x", n);
-    str << hex;
+  str<<"\\# "<<(unsigned int)d_record.size();
+  if (!d_record.empty()) {
+    std::array<char,4> hex{};
+    str << " ";
+    for (auto byte : d_record) {
+      snprintf(hex.data(), hex.size(), "%02x", byte);
+      str << hex.data();
+    }
   }
   return str.str();
 }
@@ -149,6 +234,22 @@ std::shared_ptr<DNSRecordContent> DNSRecordContent::make(uint16_t qtype, uint16_
   auto i = getZmakermap().find(pair(qclass, qtype));
   if(i==getZmakermap().end()) {
     return std::make_shared<UnknownRecordContent>(content);
+  }
+
+  // If the record type is known, but is provided as raw data, we need to first
+  // parse it as an UnknownRecordContent, and then pretend the data is coming
+  // from the wire.
+  if (content.length() >= 3 && content.at(0) == '\\' && content.at(1) == '#' && isspace(content.at(2)) != 0) {
+    UnknownRecordContent urc(content);
+    const auto& rawdata = urc.getRawContent();
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast): rawdata.data() is uint8_t *
+    PacketReader reader(std::string_view(reinterpret_cast<const char *>(rawdata.data()), rawdata.size()), 0, false, true /* standalone */);
+    DNSRecord rec;
+    rec.d_class = qclass;
+    rec.d_type = qtype;
+    rec.d_ttl = 0;
+    rec.d_clen = rawdata.size();
+    return make(rec, reader);
   }
 
   return i->second(content);
@@ -266,8 +367,15 @@ void MOADNSParser::init(bool query, const std::string_view& packet)
     vector<unsigned char> record;
     bool seenTSIG = false;
     validPacket=true;
-    d_answers.reserve((unsigned int)(d_header.ancount + d_header.nscount + d_header.arcount));
-    for(n=0;n < (unsigned int)(d_header.ancount + d_header.nscount + d_header.arcount); ++n) {
+    unsigned int supposedRecordCount = d_header.ancount + d_header.nscount + d_header.arcount;
+    // No need to reserve more memory for more records than the request can
+    // contain. We could try to be smarter and actually count the records
+    // by doing getDnsrecordheader and skip the payload in a loop, but all
+    // we really want here is to avoid reserving too much memory in case of
+    // maliciously high record counts.
+    auto reserveRecordCount = std::min(1 + (packet.size() - sizeof(dnsheader)) / sizeof(dnsrecordheader), static_cast<size_t>(supposedRecordCount));
+    d_answers.reserve(reserveRecordCount);
+    for (n = 0; n < supposedRecordCount; ++n) {
       DNSRecord dr;
 
       if(n < d_header.ancount)
@@ -372,6 +480,9 @@ void PacketReader::getDnsrecordheader(struct dnsrecordheader &ah)
 
   d_startrecordpos = d_pos; // needed for getBlob later on
   d_recordlen = ah.d_clen;
+  if (d_pos > d_content.size() || (d_content.size() - d_pos) < (d_recordlen)) {
+    throw std::out_of_range("DNS record length (" + std::to_string(d_recordlen) + " starting at " + std::to_string(d_pos) + ") goes beyond the packet's content (" + std::to_string(d_content.size()) + ")");
+  }
 }
 
 
@@ -460,10 +571,12 @@ DNSName PacketReader::getName()
 {
   unsigned int consumed;
   try {
-    DNSName dn((const char*) d_content.data(), d_content.size(), d_pos, true /* uncompress */, nullptr /* qtype */, nullptr /* qclass */, &consumed, sizeof(dnsheader));
+    uint16_t minOffset = d_standalone ? 0 : sizeof(dnsheader);
+    bool uncompress = !d_standalone;
+    DNSName name((const char*) d_content.data(), d_content.size(), d_pos, uncompress, nullptr /* qtype */, nullptr /* qclass */, &consumed, minOffset);
 
     d_pos+=consumed;
-    return dn;
+    return name;
   }
   catch(const std::range_error& re) {
     throw std::out_of_range(string("dnsname issue: ")+re.what());
@@ -502,25 +615,33 @@ string PacketReader::getText(bool multi, bool lenField)
 {
   string ret;
   ret.reserve(40);
-  while(d_pos < d_startrecordpos + d_recordlen ) {
-    if(!ret.empty()) {
+  while (d_pos < d_startrecordpos + d_recordlen ) {
+    if (!ret.empty()) {
       ret.append(1,' ');
     }
     uint16_t labellen;
-    if(lenField)
-      labellen=static_cast<uint8_t>(d_content.at(d_pos++));
-    else
-      labellen=d_recordlen - (d_pos - d_startrecordpos);
+    if (lenField) {
+      labellen = static_cast<uint8_t>(d_content.at(d_pos++));
+    }
+    else {
+      labellen = d_recordlen - (d_pos - d_startrecordpos);
+    }
 
-    ret.append(1,'"');
-    if(labellen) { // no need to do anything for an empty string
-      string val(&d_content.at(d_pos), &d_content.at(d_pos+labellen-1)+1);
+    const uint16_t remaining = (d_startrecordpos + d_recordlen) - d_pos;
+    if (labellen > remaining) {
+      throw std::out_of_range("label length in text record exceeds record boundary");
+    }
+
+    ret.append(1, '"');
+    if (labellen) { // no need to do anything for an empty string
+      string val(&d_content.at(d_pos), &d_content.at(d_pos + labellen - 1) + 1);
       ret.append(txtEscape(val)); // the end is one beyond the packet
     }
-    ret.append(1,'"');
-    d_pos+=labellen;
-    if(!multi)
+    ret.append(1, '"');
+    d_pos += labellen;
+    if (!multi) {
       break;
+    }
   }
 
   if (ret.empty() && !lenField) {
@@ -532,19 +653,28 @@ string PacketReader::getText(bool multi, bool lenField)
 
 string PacketReader::getUnquotedText(bool lenField)
 {
-  uint16_t stop_at;
-  if(lenField)
+  uint16_t stop_at{};
+  if (lenField) {
     stop_at = static_cast<uint8_t>(d_content.at(d_pos)) + d_pos + 1;
-  else
+  }
+  else {
     stop_at = d_recordlen;
+  }
 
   /* think unsigned overflow */
   if (stop_at < d_pos) {
     throw std::out_of_range("getUnquotedText out of record range");
   }
 
-  if(stop_at == d_pos)
+  /* Validate against record boundary */
+  const uint16_t recordEnd = d_startrecordpos + d_recordlen;
+  if (stop_at > recordEnd) {
+    throw std::out_of_range("getUnquotedText: length exceeds record boundary");
+  }
+
+  if (stop_at == d_pos) {
     return "";
+  }
 
   d_pos++;
   string ret(d_content.substr(d_pos, stop_at-d_pos));
@@ -582,6 +712,10 @@ void PacketReader::xfrBlob(string& blob, int length)
   if(length) {
     if (length < 0) {
       throw std::out_of_range("xfrBlob out of range (negative length)");
+    }
+    auto available = (d_startrecordpos + d_recordlen) - d_pos;
+    if (available < length) {
+      throw std::out_of_range("xfrBlob out of range (excessive length)");
     }
 
     blob.assign(&d_content.at(d_pos), &d_content.at(d_pos + length - 1 ) + 1 );
@@ -752,7 +886,9 @@ string simpleCompress(const string& elabel, const string& root)
   string ret;
   ret.reserve(label.size()+4);
   for(const auto & part : parts) {
-    if(!root.empty() && !strncasecmp(root.c_str(), label.c_str() + part.first, 1 + label.length() - part.first)) { // also match trailing 0, hence '1 +'
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+    auto label_part = std::string_view(label.c_str() + part.first, 1 + label.length() - part.first); // also match trailing 0, hence '1 +'
+    if(!root.empty() && pdns_ilexicographical_compare_three_way(root, label_part) == 0) {
       const unsigned char rootptr[2]={0xc0,0x11};
       ret.append((const char *) rootptr, 2);
       return ret;
@@ -1350,13 +1486,12 @@ bool visitDNSPacket(const std::string_view& packet, const std::function<bool(uin
       uint32_t dnsttl = reader.get32BitInt();
       uint16_t contentLength = reader.get16BitInt();
       uint16_t pos = reader.getPosition();
+      reader.skip(contentLength);
 
       bool done = visitor(section, dnsclass, dnstype, dnsttl, contentLength, &packet.at(pos));
       if (done) {
         return true;
       }
-
-      reader.skip(contentLength);
     }
   }
   catch (...) {

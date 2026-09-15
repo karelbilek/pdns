@@ -10,7 +10,7 @@ LMDB backend
 * DNS Update: since version 5.0.0
 * DNSSEC: Yes
 * Disabled data: Yes
-* Comments: No
+* Comments: since version 5.1.0
 * Search: since version 5.0.0
 * Views: Yes
 * API: Read-Write
@@ -93,7 +93,12 @@ PowerDNS Version  LMDB Schema version
 4.7.x and up      4
 4.8.x and up      5
 5.0.x and up      6
+5.1.x and up      6 [#]_
 ================  ===================
+
+.. [#] 5.1.x and up add two sub-databases tied to new features in 5.1 (one for ``lmdb-split-domains-table``, if enabled, and one for RRset comments).
+       Downgrading back to 5.0.x is supported, but those sub-databases will be invisible to 5.0.x as the older version doesn't have these features.
+       See :ref:`setting-lmdb-split-domains-table` for an explanation of pdns behavior when toggling that feature in particular.
 
 .. _settings-lmdb-random-ids:
 
@@ -122,8 +127,9 @@ Defaults to 100 on 32 bit systems, and 16000 on 64 bit systems.
 
   .. versionchanged:: 5.1.0
 
-From version 5.1.0 onwards, this settings only applies to the main database
-file; shards use :ref:`settings-lmdb-shards-map-size` instead.
+From version 5.1.0 onwards, the size of the main database and the
+size of the shard databases can be set independently.
+In order to set a different size for the shard databases, use :ref:`settings-lmdb-shards-map-size`.
 
 .. _settings-lmdb-shards-map-size:
 
@@ -170,6 +176,26 @@ This setting is also available in version 4.9.9.
 to be sent upon startup, unless a ``flush`` command is sent using
 :doc:`pdns_control <../manpages/pdns_control.1>` before stopping the
 PowerDNS Authoritative Server.
+
+.. _setting-lmdb-split-domains-table:
+
+``lmdb-split-domains-table``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+  .. versionadded:: 5.1.0
+
+-  Boolean
+-  Default: no
+
+Split the domains table in two, with the last notification timestamp and
+last freshness check timestamp in a separate table.
+This lowers the I/O bandwidth requirements on setups with many zones.
+
+Except for the first time this feature gets enabled, after changing the value
+of this option, the next time the authoritative server starts, it will operate
+on out-of-date data and may send unnecessary notifications, as well as
+perform unnecessary freshness checks. This however allows this feature to work
+without requiring a database schema upgrade.
 
 ``lmdb-lightning-stream``
 ^^^^^^^^^^^^^^^^^^^^^^^^^

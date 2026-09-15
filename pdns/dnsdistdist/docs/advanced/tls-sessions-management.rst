@@ -34,7 +34,7 @@ By default, dnsdist will generate a new, random STEK at startup for each fronten
 When the automatic rotation mechanism kicks in a new, random key will be added to the list of keys. With the OpenSSL provider, the new key becomes active, so new tickets will be encrypted with this key, and the existing keys become passive and only be used to decrypt existing tickets. With the GnuTLS provider only one key is currently supported so the existing keys are immediately discarded.
 This automatic rotation can be disabled by setting ``ticketsKeysRotationDelay`` to 0.
 
-It is also possible to manually request a STEK rotation using the :func:`getDOHFrontend` (DoH) and :func:`getTLSFrontend` (DoT) functions to retrieve the bind object, and calling its ``rotateTicketsKey`` method (:meth:`DOHFrontend:rotateTicketsKey`, :meth:`TLSFrontend:rotateTicketsKey`).
+It is also possible to manually request a STEK rotation using the :func:`getDOHFrontend` (DoH) and :func:`getTLSFrontend` (DoT) functions to retrieve the bind object, and calling its ``rotateTicketsKey`` method (:meth:`DOHFrontend.rotateTicketsKey`, :meth:`TLSFrontend.rotateTicketsKey`).
 
 There is an important difference when the YAML configuration is used: groups of identical frontends can be created via the ``threads`` parameter of a :ref:`frontend configuration <yaml-settings-BindConfiguration>`. Identical frontends then share the same STEKs, even after an automatic or manual rotation. In addition to that, any operation on the STEKs should be done on the first frontend of the group, as attempting to alter the STEKs of the other frontends in a group will be ignored to avoid unwanted side-effects.
 
@@ -55,7 +55,7 @@ The file can then be loaded at startup by using the ``ticketKeyFile`` parameter 
 If the file contains several keys, so for example 240 random bytes, dnsdist will load several STEKs, using the last one for encrypting new tickets and all of them to decrypt existing tickets.
 
 In order to rotate the keys at runtime, it is possible to instruct dnsdist to reload the content of the certificates, keys, and STEKs from the same file used at configuration time, for all DoH and DoH binds, by issuing the :func:`reloadAllCertificates` command.
-It can also be done one bind at a time using the :func:`getDOHFrontend` (DoH) and :func:`getTLSFrontend` (DoT) functions to retrieve the bind object, and calling its ``loadTicketsKeys`` method (:meth:`DOHFrontend:loadTicketsKeys`, :meth:`TLSFrontend:loadTicketsKeys`).
+It can also be done one bind at a time using the :func:`getDOHFrontend` (DoH) and :func:`getTLSFrontend` (DoT) functions to retrieve the bind object, and calling its ``loadTicketsKeys`` method (:meth:`DOHFrontend.loadTicketsKeys`, :meth:`TLSFrontend.loadTicketsKeys`).
 
 One possible way of handling manual rotation of the key would be to first:
 
@@ -92,6 +92,6 @@ Sessions management for outgoing connections
 Since 1.7, dnsdist supports securing the connection toward backends using DNS over TLS. For these connections, it keeps a cache of TLS tickets to be able to resume a TLS session quickly. By default that cache contains up to 20 TLS tickets per-backend, is cleaned up every 60s, and TLS tickets expire if they have not been used after 600 seconds.
 These values can be set at configuration time via:
 
- * :func:`setOutgoingTLSSessionsCacheMaxTicketsPerBackend`
- * :func:`setOutgoingTLSSessionsCacheCleanupDelay`
- * :func:`setOutgoingTLSSessionsCacheMaxTicketValidity`
+* :func:`setOutgoingTLSSessionsCacheMaxTicketsPerBackend`
+* :func:`setOutgoingTLSSessionsCacheCleanupDelay`
+* :func:`setOutgoingTLSSessionsCacheMaxTicketValidity`

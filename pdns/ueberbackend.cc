@@ -31,6 +31,7 @@
 #include <string>
 #include <sys/types.h>
 
+#include "auth-main.hh"
 #include "dns.hh"
 #include "arguments.hh"
 #include "dnsbackend.hh"
@@ -51,13 +52,21 @@ AtomicCounter* UeberBackend::s_backendQueries = nullptr;
 //! Loads a module and reports it to all UeberBackend threads
 bool UeberBackend::loadmodule(const string& name)
 {
-  g_log << Logger::Warning << "Loading '" << name << "'" << endl;
+  std::shared_ptr<Logr::Logger> slog;
+
+  if (g_slogStructured) {
+    slog = g_slog->withName("Ueberbackend");
+  }
+
+  SLOG(g_log << Logger::Warning << "Loading '" << name << "'" << endl,
+       slog->info(Logr::Warning, "Loading", "module", Logging::Loggable(name)));
 
   void* dlib = dlopen(name.c_str(), RTLD_NOW);
 
   if (dlib == nullptr) {
     // NOLINTNEXTLINE(concurrency-mt-unsafe): There's no thread-safe alternative to dlerror().
-    g_log << Logger::Error << "Unable to load module '" << name << "': " << dlerror() << endl;
+    SLOG(g_log << Logger::Error << "Unable to load module '" << name << "': " << dlerror() << endl,
+         slog->error(Logr::Error, dlerror(), "Unable to load", "module", Logging::Loggable(name)));
     return false;
   }
 
@@ -66,31 +75,36 @@ bool UeberBackend::loadmodule(const string& name)
 
 bool UeberBackend::loadModules(const vector<string>& modules, const string& path)
 {
-  g_log << Logger::Debug << "UeberBackend: path = " << path << endl;
+  std::shared_ptr<Logr::Logger> slog;
+
+  if (g_slogStructured) {
+    slog = g_slog->withName("Ueberbackend");
+  }
+
+  SLOG(g_log << Logger::Debug << "UeberBackend: path = " << path << endl,
+       slog->info(Logr::Debug, "Loading modules", "path", Logging::Loggable(path)));
 
   for (const auto& module : modules) {
     bool res = false;
 
-    g_log << Logger::Debug << "UeberBackend: Attempting to load module '" << module << "'" << endl;
+    SLOG(g_log << Logger::Debug << "UeberBackend: Attempting to load module '" << module << "'" << endl,
+         slog->info(Logr::Debug, "Attempting to load", "module", Logging::Loggable(module)));
 
     if (module.find('.') == string::npos) {
       auto fullPath = path;
       fullPath += "/lib";
       fullPath += module;
       fullPath += "backend.so";
-      g_log << Logger::Debug << "UeberBackend: Loading '" << fullPath << "'" << endl;
       res = UeberBackend::loadmodule(fullPath);
     }
     else if (module[0] == '/' || (module[0] == '.' && module[1] == '/') || (module[0] == '.' && module[1] == '.')) {
-      // Absolute path, Current path or Parent path
-      g_log << Logger::Debug << "UeberBackend: Loading '" << module << "'" << endl;
+      // Absolute path, or relative path from Current or Parent directory
       res = UeberBackend::loadmodule(module);
     }
     else {
       auto fullPath = path;
       fullPath += "/";
       fullPath += module;
-      g_log << Logger::Debug << "UeberBackend: Loading '" << fullPath << "'" << endl;
       res = UeberBackend::loadmodule(fullPath);
     }
 
@@ -411,7 +425,8 @@ bool UeberBackend::fillSOAFromZoneRecord(ZoneName& shorter, const domainid_t zon
 
   DNSZoneRecord zoneRecord;
   if (!get(zoneRecord)) {
-    DLOG(g_log << Logger::Info << "Backend returned no SOA for zone '" << shorter.toLogString() << "', which it reported as existing " << endl);
+    DLOG(SLOG(g_log << Logger::Info << "Backend returned no SOA for zone '" << shorter.toLogString() << "', which it reported as existing " << endl,
+              d_slog->info(Logr::Info, "Backend returned no SOA yet reports zone as existing", "zone", Logging::Loggable(shorter))));
     return false;
   }
 
@@ -426,7 +441,8 @@ bool UeberBackend::fillSOAFromZoneRecord(ZoneName& shorter, const domainid_t zon
     fillSOAData(zoneRecord, *soaData);
   }
   catch (...) {
-    g_log << Logger::Warning << "Backend returned a broken SOA for zone '" << shorter.toLogString() << "'" << endl;
+    SLOG(g_log << Logger::Warning << "Backend returned a broken SOA for zone '" << shorter.toLogString() << "'" << endl,
+         d_slog->info(Logr::Warning, "Backend returned broken SOA", "zone", Logging::Loggable(shorter)));
     lookupEnd();
     return false;
   }
@@ -446,42 +462,49 @@ UeberBackend::CacheResult UeberBackend::fillSOAFromCache(SOAData* soaData, ZoneN
   auto cacheResult = cacheHas(d_question, d_answers);
 
   if (cacheResult == CacheResult::Hit && !d_answers.empty() && d_cache_ttl != 0U) {
-    DLOG(g_log << Logger::Error << "has pos cache entry: " << shorter << endl);
+    DLOG(SLOG(g_log << Logger::Error << "has pos cache entry: " << shorter << endl,
+              d_slog->info(Logr::Error, "cache hit", "zone", Logging::Loggable(shorter))));
     fillSOAData(d_answers[0], *soaData);
 
     soaData->db = backends.size() == 1 ? backends.begin()->get() : nullptr;
     soaData->zonename = shorter.makeLowerCase();
   }
   else if (cacheResult == CacheResult::NegativeMatch && d_negcache_ttl != 0U) {
-    DLOG(g_log << Logger::Error << "has neg cache entry: " << shorter << endl);
+    DLOG(SLOG(g_log << Logger::Error << "has neg cache entry: " << shorter << endl,
+              d_slog->info(Logr::Error, "negative cache hit", "zone", Logging::Loggable(shorter))));
   }
 
   return cacheResult;
 }
 
-static std::vector<std::unique_ptr<DNSBackend>>::iterator findBestMatchingBackend(std::vector<std::unique_ptr<DNSBackend>>& backends, std::vector<std::pair<std::size_t, SOAData>>& bestMatches, const ZoneName& shorter, SOAData* soaData)
+static std::vector<std::unique_ptr<DNSBackend>>::iterator findBestMatchingBackend([[maybe_unused]] Logr::log_t slog, std::vector<std::unique_ptr<DNSBackend>>& backends, std::vector<std::pair<std::size_t, SOAData>>& bestMatches, const ZoneName& shorter, SOAData* soaData)
 {
   auto backend = backends.begin();
   for (auto bestMatch = bestMatches.begin(); backend != backends.end() && bestMatch != bestMatches.end(); ++backend, ++bestMatch) {
 
-    DLOG(g_log << Logger::Error << "backend: " << backend - backends.begin() << ", qname: " << shorter << endl);
+    DLOG(SLOG(g_log << Logger::Error << "backend: " << backend - backends.begin() << ", qname: " << shorter << endl,
+              slog->info(Logr::Error, "trying backend", "number", Logging::Loggable(backend - backends.begin()), "qname", Logging::Loggable(shorter))));
 
     auto wirelength = shorter.operator const DNSName&().wirelength();
     if (bestMatch->first < wirelength) {
-      DLOG(g_log << Logger::Error << "skipped, we already found a shorter best match in this backend: " << bestMatch->second.qname() << endl);
+      DLOG(SLOG(g_log << Logger::Error << "skipped, we already found a shorter best match in this backend: " << bestMatch->second.qname() << endl,
+                slog->info(Logr::Error, "backend skipped, already found a shorter best match", "best match", Logging::Loggable(bestMatch->second.qname()))));
       continue;
     }
 
     if (bestMatch->first == wirelength) {
-      DLOG(g_log << Logger::Error << "use shorter best match: " << bestMatch->second.qname() << endl);
+      DLOG(SLOG(g_log << Logger::Error << "use shorter best match: " << bestMatch->second.qname() << endl,
+                slog->info(Logr::Error, "use shorter best match", "best match", Logging::Loggable(bestMatch->second.qname()))));
       *soaData = bestMatch->second;
       break;
     }
 
-    DLOG(g_log << Logger::Error << "lookup: " << shorter << endl);
+    DLOG(SLOG(g_log << Logger::Error << "lookup: " << shorter << endl,
+              slog->info(Logr::Error, "lookup", "name", Logging::Loggable(shorter))));
 
     if ((*backend)->getAuth(shorter, soaData)) {
-      DLOG(g_log << Logger::Error << "got: " << soaData->zonename << endl);
+      DLOG(SLOG(g_log << Logger::Error << "got: " << soaData->zonename << endl,
+                slog->info(Logr::Error, "got soa", "name", Logging::Loggable(soaData->zonename))));
 
       if (!soaData->qname().empty() && !shorter.isPartOf(soaData->qname())) {
         throw PDNSException("getAuth() returned an SOA for the wrong zone. Zone '" + soaData->qname().toLogString() + "' is not part of '" + shorter.toLogString() + "'");
@@ -495,21 +518,24 @@ static std::vector<std::unique_ptr<DNSBackend>>::iterator findBestMatchingBacken
       }
     }
     else {
-      DLOG(g_log << Logger::Error << "no match for: " << shorter << endl);
+      DLOG(SLOG(g_log << Logger::Error << "no match for: " << shorter << endl,
+                slog->info(Logr::Error, "no match", "name", Logging::Loggable(shorter))));
     }
   }
 
   return backend;
 }
 
-static bool foundTarget(const ZoneName& target, const ZoneName& shorter, const QType& qtype, [[maybe_unused]] SOAData* soaData, const bool found)
+static bool foundTarget([[maybe_unused]] Logr::log_t slog, const ZoneName& target, const ZoneName& shorter, const QType& qtype, [[maybe_unused]] SOAData* soaData, const bool found)
 {
   if (found == (qtype == QType::DS) || target != shorter) {
-    DLOG(g_log << Logger::Error << "found: " << soaData->qname() << endl);
+    DLOG(SLOG(g_log << Logger::Error << "found: " << soaData->qname() << endl,
+              slog->info(Logr::Error, "found", "name", Logging::Loggable(soaData->qname()))));
     return true;
   }
 
-  DLOG(g_log << Logger::Error << "chasing next: " << soaData->qname() << endl);
+  DLOG(SLOG(g_log << Logger::Error << "chasing next: " << soaData->qname() << endl,
+            slog->info(Logr::Error, "chasing next", "name", Logging::Loggable(soaData->qname()))));
   return false;
 }
 
@@ -529,11 +555,13 @@ bool UeberBackend::getAuth(const ZoneName& target, const QType& qtype, SOAData* 
   std::string view{};
   if (g_zoneCache.isEnabled()) {
     Netmask _remote(remote);
-    view = g_zoneCache.getViewFromNetwork(&_remote);
-    // Remember the view and its netmask, if applicable, for ECS responses.
-    if (!view.empty() && pkt_p != nullptr) {
-      pkt_p->d_view = view;
-      pkt_p->d_span = _remote;
+    if (g_views) {
+      view = g_zoneCache.getViewFromNetwork(&_remote);
+      // Remember the view and its netmask, if applicable, for ECS responses.
+      if (!view.empty() && pkt_p != nullptr) {
+        pkt_p->d_view = view;
+        pkt_p->d_span = _remote;
+      }
     }
   }
 
@@ -552,7 +580,7 @@ bool UeberBackend::getAuth(const ZoneName& target, const QType& qtype, SOAData* 
           // Need to invoke foundTarget() with the same variant part in the
           // first two arguments, since they are compared as ZoneName, hence
           // the use of `shorter' rather than `_shorter' here.
-          if (foundTarget(target, shorter, qtype, soaData, found)) {
+          if (foundTarget(d_slog, target, shorter, qtype, soaData, found)) {
             return true;
           }
 
@@ -574,7 +602,7 @@ bool UeberBackend::getAuth(const ZoneName& target, const QType& qtype, SOAData* 
     if (cachedOk && (d_cache_ttl != 0 || d_negcache_ttl != 0)) {
       auto cacheResult = fillSOAFromCache(soaData, shorter);
       if (cacheResult == CacheResult::Hit) {
-        if (foundTarget(target, shorter, qtype, soaData, found)) {
+        if (foundTarget(d_slog, target, shorter, qtype, soaData, found)) {
           return true;
         }
 
@@ -589,12 +617,13 @@ bool UeberBackend::getAuth(const ZoneName& target, const QType& qtype, SOAData* 
 
     // Check backends.
     {
-      auto backend = findBestMatchingBackend(backends, bestMatches, shorter, soaData);
+      auto backend = findBestMatchingBackend(d_slog, backends, bestMatches, shorter, soaData);
 
       // Add to cache
       if (backend == backends.end()) {
         if (d_negcache_ttl != 0U) {
-          DLOG(g_log << Logger::Error << "add neg cache entry:" << shorter << endl);
+          DLOG(SLOG(g_log << Logger::Error << "add neg cache entry:" << shorter << endl,
+                    d_slog->info(Logr::Error, "adding negative cache entry", "zone", Logging::Loggable(shorter))));
           d_question.qname = shorter.operator const DNSName&();
           addNegCache(d_question);
         }
@@ -603,7 +632,8 @@ bool UeberBackend::getAuth(const ZoneName& target, const QType& qtype, SOAData* 
       }
 
       if (d_cache_ttl != 0) {
-        DLOG(g_log << Logger::Error << "add pos cache entry: " << soaData->qname() << endl);
+        DLOG(SLOG(g_log << Logger::Error << "add pos cache entry: " << soaData->qname() << endl,
+                  d_slog->info(Logr::Error, "adding cache entry", "zone", Logging::Loggable(soaData->qname()))));
 
         d_question.qtype = QType::SOA;
         d_question.qname = soaData->qname();
@@ -620,7 +650,7 @@ bool UeberBackend::getAuth(const ZoneName& target, const QType& qtype, SOAData* 
       }
     }
 
-    if (foundTarget(target, shorter, qtype, soaData, found)) {
+    if (foundTarget(d_slog, target, shorter, qtype, soaData, found)) {
       return true;
     }
 
@@ -711,10 +741,17 @@ bool UeberBackend::autoPrimaryBackend(const string& ipAddr, const ZoneName& doma
 
 UeberBackend::UeberBackend(const string& pname)
 {
-  d_cache_ttl = ::arg().asNum("query-cache-ttl");
-  d_negcache_ttl = ::arg().asNum("negquery-cache-ttl");
+  if (g_slogStructured) {
+    d_slog = g_slog->withName("Ueberbackend");
+  }
+  d_handle.setSLog(d_slog);
+
+  ::arg().assignNum(d_cache_ttl, "query-cache-ttl");
+  ::arg().assignNum(d_negcache_ttl, "negquery-cache-ttl");
 
   backends = BackendMakers().all(pname == "key-only");
+
+  d_handle.setParent(this);
 }
 
 // returns -1 for miss, 0 for negative match, 1 for hit
@@ -728,7 +765,8 @@ enum UeberBackend::CacheResult UeberBackend::cacheHas(const Question& question, 
 
   resourceRecords.clear();
 #if 0
-  g_log<<Logger::Warning<<"looking up: '"<<question.qname<<"'|N|"<<question.qtype<<"|"<<std::to_string(question.zoneId)<<endl;
+  SLOG(g_log<<Logger::Warning<<"looking up: '"<<question.qname<<"'|N|"<<question.qtype<<"|"<<std::to_string(question.zoneId)<<endl,
+       d_slog->info(Logr::Warning, "looking up in cache", "name", Logging::Loggable(question.qname), "type", Logging::Loggable(question.qtype), "zone id", Logging::Loggable(question.zoneId)));
 #endif
 
   bool ret = QC.getEntry(question.qname, question.qtype, resourceRecords, question.zoneId); // think about lowercasing here
@@ -783,7 +821,8 @@ void UeberBackend::alsoNotifies(const ZoneName& domain, set<string>* ips)
 
 UeberBackend::~UeberBackend()
 {
-  DLOG(g_log << Logger::Error << "UeberBackend destructor called, deleting our backends" << endl);
+  DLOG(SLOG(g_log << Logger::Error << "UeberBackend destructor called, deleting our backends" << endl,
+            d_slog->info(Logr::Error, "destructor called, deleting our backends")));
 
   backends.clear();
 }
@@ -792,43 +831,41 @@ UeberBackend::~UeberBackend()
 void UeberBackend::lookup(const QType& qtype, const DNSName& qname, domainid_t zoneId, DNSPacket* pkt_p)
 {
   if (d_stale) {
-    g_log << Logger::Error << "Stale ueberbackend received question, signalling that we want to be recycled" << endl;
+    SLOG(g_log << Logger::Error << "Stale ueberbackend received question, signalling that we want to be recycled" << endl,
+         d_slog->info(Logr::Error, "Stale ueberbackend received question, signalling that we want to be recycled"));
     throw PDNSException("We are stale, please recycle");
   }
 
-  DLOG(g_log << "UeberBackend received question for " << qtype << " of " << qname << endl);
+  DLOG(SLOG(g_log << "UeberBackend received question for " << qtype << " of " << qname << endl,
+            d_slog->info(Logr::Debug, "received question", "query", Logging::Loggable(qname), "type", Logging::Loggable(qtype))));
   if (!d_go) {
-    g_log << Logger::Error << "UeberBackend is blocked, waiting for 'go'" << endl;
+    SLOG(g_log << Logger::Error << "UeberBackend is blocked, waiting for 'go'" << endl,
+         d_slog->info(Logr::Error, "currently blocked, waiting for 'go'"));
     std::unique_lock<std::mutex> lock(d_mut);
     d_cond.wait(lock, [] { return d_go; });
-    g_log << Logger::Error << "Broadcast received, unblocked" << endl;
+    SLOG(g_log << Logger::Error << "Broadcast received, unblocked" << endl,
+         d_slog->info(Logr::Error, "broadcast received, unblocked"));
   }
 
   d_qtype = qtype.getCode();
 
-  d_handle.i = 0;
-  d_handle.qtype = s_doANYLookupsOnly ? QType::ANY : qtype;
-  d_handle.qname = qname;
-  d_handle.zoneId = zoneId;
-  d_handle.pkt_p = pkt_p;
+  d_handle.lookup(qtype, qname, zoneId, pkt_p);
 
   if (backends.empty()) {
-    g_log << Logger::Error << "No database backends available - unable to answer questions." << endl;
+    SLOG(g_log << Logger::Error << "No database backends available - unable to answer questions." << endl,
+         d_slog->info(Logr::Error, "No database backends available - unable to answer questions"));
     d_stale = true; // please recycle us!
     throw PDNSException("We are stale, please recycle");
   }
 
-  d_question.qtype = d_handle.qtype;
-  d_question.qname = qname;
-  d_question.zoneId = d_handle.zoneId;
+  d_handle.setupQuestion(d_question);
 
   auto cacheResult = cacheHas(d_question, d_answers);
   if (cacheResult == CacheResult::Miss) { // nothing
     //      cout<<"UeberBackend::lookup("<<qname<<"|"<<DNSRecordContent::NumberToType(qtype.getCode())<<"): uncached"<<endl;
     d_negcached = d_cached = false;
     d_answers.clear();
-    (d_handle.d_hinterBackend = backends[d_handle.i++].get())->lookup(d_handle.qtype, d_handle.qname, d_handle.zoneId, d_handle.pkt_p);
-    ++(*s_backendQueries);
+    d_handle.selectNextBackend();
   }
   else if (cacheResult == CacheResult::NegativeMatch) {
     //      cout<<"UeberBackend::lookup("<<qname<<"|"<<DNSRecordContent::NumberToType(qtype.getCode())<<"): NEGcached"<<endl;
@@ -842,8 +879,6 @@ void UeberBackend::lookup(const QType& qtype, const DNSName& qname, domainid_t z
     d_cached = true;
     d_cachehandleiter = d_answers.begin();
   }
-
-  d_handle.parent = this;
 }
 
 void UeberBackend::getAllDomains(vector<DomainInfo>* domains, bool getSerial, bool include_disabled)
@@ -1065,46 +1100,61 @@ void UeberBackend::flush()
   }
 }
 
-AtomicCounter UeberBackend::handle::instances(0);
-
-UeberBackend::handle::handle()
+void UeberBackend::handle::lookup(const QType& qtype, const DNSName& qname, domainid_t zoneId, DNSPacket* pkt_p)
 {
-  //  g_log<<Logger::Warning<<"Handle instances: "<<instances<<endl;
-  ++instances;
+  d_backendIndex = 0;
+  d_qtype = s_doANYLookupsOnly ? QType::ANY : qtype;
+  d_qname = qname;
+  d_zoneId = zoneId;
+  d_pkt_p = pkt_p;
 }
 
-UeberBackend::handle::~handle()
+void UeberBackend::handle::setupQuestion(UeberBackend::Question& question) const
 {
-  --instances;
+  question.qtype = d_qtype;
+  question.qname = d_qname;
+  question.zoneId = d_zoneId;
+}
+
+// Set d_hinterBackend to the next available backend from the parents list,
+// reset it to nullptr if the whole list has been processed.
+// Invokes lookup on behalf of the newly picked backend if successful.
+void UeberBackend::handle::selectNextBackend()
+{
+  if (d_backendIndex < d_parent->backends.size()) {
+    d_hinterBackend = d_parent->backends[d_backendIndex++].get();
+    d_hinterBackend->lookup(d_qtype, d_qname, d_zoneId, d_pkt_p);
+    ++(*s_backendQueries);
+  }
+  else {
+    d_hinterBackend = nullptr;
+  }
 }
 
 bool UeberBackend::handle::get(DNSZoneRecord& record)
 {
-  DLOG(g_log << "Ueber get() was called for a " << qtype << " record" << endl);
-  bool isMore = false;
-  while (d_hinterBackend != nullptr && !(isMore = d_hinterBackend->get(record))) { // this backend out of answers
-    if (i < parent->backends.size()) {
-      DLOG(g_log << "Backend #" << i << " of " << parent->backends.size()
-                 << " out of answers, taking next" << endl);
-
-      d_hinterBackend = parent->backends[i++].get();
-      d_hinterBackend->lookup(qtype, qname, zoneId, pkt_p);
-      ++(*s_backendQueries);
+  DLOG(SLOG(g_log << "Ueber get() was called for a " << d_qtype << " record" << endl,
+            d_slog->info(Logr::Debug, "get called", "type", Logging::Loggable(d_qtype))));
+  while (d_hinterBackend != nullptr && !(d_hinterBackend->get(record))) { // this backend is out of answers
+    DLOG(SLOG(g_log << "Backend #" << d_backendIndex << " of " << d_parent->backends.size()
+                    << " out of answers, trying next" << endl,
+              d_slog->info(Logr::Debug, "backend out of answers, taking next", "zero-based backend index", Logging::Loggable(d_backendIndex), "backend count", Logging::Loggable(d_parent->backends.size()))));
+    selectNextBackend();
+    if (d_hinterBackend != nullptr) {
+      DLOG(SLOG(g_log << "Now asking backend #" << d_backendIndex << endl,
+                d_slog->info(Logr::Debug, "Now asking backend", "index", Logging::Loggable(d_backendIndex))));
     }
-    else {
-      break;
-    }
-
-    DLOG(g_log << "Now asking backend #" << i << endl);
   }
 
-  if (!isMore && i == parent->backends.size()) {
-    DLOG(g_log << "UeberBackend reached end of backends" << endl);
+  if (d_hinterBackend == nullptr) {
+    DLOG(SLOG(g_log << "UeberBackend reached end of backends" << endl,
+              d_slog->info(Logr::Debug, "end of backends reached")));
     return false;
   }
 
-  DLOG(g_log << "Found an answering backend - will not try another one" << endl);
-  i = parent->backends.size(); // don't go on to the next backend
+  DLOG(SLOG(g_log << "Found an answering backend - will not try another one" << endl,
+            d_slog->info(Logr::Debug, "found an answering backend - will not try any other one")));
+  d_backendIndex = d_parent->backends.size(); // don't go on to the next backend
   return true;
 }
 

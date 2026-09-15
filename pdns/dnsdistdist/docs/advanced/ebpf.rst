@@ -42,16 +42,16 @@ The BPF filter can be used to block incoming queries manually::
 .. note::
     Before 2.0.0 the value used to block queries for all types was 255. This was changed because it prevented blocking only queries for the ``ANY`` (255) qtype.
 
-The :meth:`BPFFilter:blockQName` method can be used to block queries based on the exact qname supplied, in a case-insensitive way, and an optional qtype.
+The :meth:`BPFFilter.blockQName` method can be used to block queries based on the exact qname supplied, in a case-insensitive way, and an optional qtype.
 Using the ``65535`` value for the qtype will block all queries for the qname, regardless of the qtype.
 
 Contrary to source address filtering, qname filtering only works over UDP. TCP qname filtering can be done the usual way::
 
   addAction(AndRule({TCPRule(true), QNameSuffixRule("evildomain.com")}), DropAction())
 
-The :meth:`BPFFilter:attachToAllBinds` method attaches the filter to every existing bind at runtime. It cannot use at configuration time. The :func:`setDefaultBPFFilter()` should be used at configuration time.
+The :meth:`BPFFilter.attachToAllBinds` method attaches the filter to every existing bind at runtime. It cannot use at configuration time. The :func:`setDefaultBPFFilter()` should be used at configuration time.
 
-The :meth:`BPFFilter:attachToAllBinds` automatically attached to every bind::
+The :meth:`BPFFilter.attachToAllBinds` automatically attached to every bind::
 
   bpf = newBPFFilter({ipv4MaxItems=1024, ipv6MaxItems=1024, qnamesMaxItems=1024})
   setDefaultBPFFilter(bpf)
@@ -128,8 +128,8 @@ For example, to instruct dnsdist to create under the ``/sys/fs/bpf`` mount point
 
 The last parameter to :func:`newBPFFilter` is set to ``true`` to indicate to dnsdist not to load its internal eBPF socket filter program, which is not needed since packets will be intercepted by an external program and would at best duplicate the work done by the other program. It also tell dnsdist to use a slightly different format for the eBPF maps:
 
- * IPv4 and IPv6 maps still use the address as key, but the value contains an action field in addition to the 'matched' counter, to allow for more actions than just dropping the packet
- * the qname map now uses the qname and qtype as key, instead of using only the qname, and the value contains the action and counter fields described above instead of having a counter and the qtype
+* IPv4 and IPv6 maps still use the address as key, but the value contains an action field in addition to the 'matched' counter, to allow for more actions than just dropping the packet
+* the qname map now uses the qname and qtype as key, instead of using only the qname, and the value contains the action and counter fields described above instead of having a counter and the qtype
 
 The first, legacy format is still used because of the limitations of eBPF socket filter programs on older kernels, and the number of instructions in particular, that prevented us from using the qname and qtype as key. We will likely switch to the newer format by default once Linux distributions stop shipping these older kernels. XDP programs require newer kernel versions anyway and have thus fewer limitations.
 

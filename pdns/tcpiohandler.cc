@@ -200,33 +200,23 @@ public:
     }
 
     if (hostIsAddr) {
-#if (OPENSSL_VERSION_NUMBER >= 0x10002000L)
       X509_VERIFY_PARAM *param = SSL_get0_param(d_conn.get());
       /* Enable automatic IP checks */
       X509_VERIFY_PARAM_set_hostflags(param, X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);
       if (X509_VERIFY_PARAM_set1_ip_asc(param, d_hostname.c_str()) != 1) {
         throw std::runtime_error("Error setting TLS IP for certificate validation");
       }
-#else
-      /* no validation for you, see https://wiki.openssl.org/index.php/Hostname_validation */
-#endif
     }
     else {
-#if (OPENSSL_VERSION_NUMBER >= 0x1010000fL) && defined(HAVE_SSL_SET_HOSTFLAGS) // grrr libressl
       SSL_set_hostflags(d_conn.get(), X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);
-      if (SSL_set1_host(d_conn.get(), d_hostname.c_str()) != 1) {
-        throw std::runtime_error("Error setting TLS hostname for certificate validation");
-      }
-#elif (OPENSSL_VERSION_NUMBER >= 0x10002000L)
-      X509_VERIFY_PARAM *param = SSL_get0_param(d_conn.get());
-      /* Enable automatic hostname checks */
-      X509_VERIFY_PARAM_set_hostflags(param, X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);
-      if (X509_VERIFY_PARAM_set1_host(param, d_hostname.c_str(), d_hostname.size()) != 1) {
-        throw std::runtime_error("Error setting TLS hostname for certificate validation");
-      }
+#if !defined(OPENSSL_VERSION_MAJOR) || OPENSSL_VERSION_MAJOR < 4
+      auto ret = SSL_set1_host(d_conn.get(), d_hostname.c_str());
 #else
-      /* no hostname validation for you, see https://wiki.openssl.org/index.php/Hostname_validation */
+      auto ret = SSL_set1_dnsname(d_conn.get(), d_hostname.c_str());
 #endif
+      if (ret != 1) {
+        throw std::runtime_error("Error setting TLS hostname for certificate validation");
+      }
     }
 
     SSL_set_ex_data(d_conn.get(), getConnectionIndex(), this);
@@ -560,11 +550,9 @@ public:
 
     const unsigned char* alpn = nullptr;
     unsigned int alpnLen  = 0;
-#ifdef HAVE_SSL_GET0_ALPN_SELECTED
     if (alpn == nullptr) {
       SSL_get0_alpn_selected(d_conn.get(), &alpn, &alpnLen);
     }
-#endif /* HAVE_SSL_GET0_ALPN_SELECTED */
     if (alpn != nullptr && alpnLen > 0) {
       result.insert(result.end(), alpn, alpn + alpnLen);
     }
@@ -750,6 +738,9 @@ public:
 
     try {
       if (frontend.d_tlsConfig.d_ticketKeyFile.empty()) {
+        if (d_ticketsKeyRotationDelay == 0) {
+          throw std::runtime_error("Trying to start a TLS frontend without any TLS session ticket encryption key loaded AND with rotation disabled!");
+        }
         handleTicketsKeyRotation(time(nullptr));
       }
       else {
@@ -794,11 +785,7 @@ public:
 
     OpenSSLTLSConnection::generateConnectionIndexIfNeeded();
 
-#ifdef HAVE_TLS_CLIENT_METHOD
     d_tlsCtx = std::shared_ptr<SSL_CTX>(SSL_CTX_new(TLS_client_method()), SSL_CTX_free);
-#else
-    d_tlsCtx = std::shared_ptr<SSL_CTX>(SSL_CTX_new(SSLv23_client_method()), SSL_CTX_free);
-#endif
     if (!d_tlsCtx) {
       ERR_print_errors_fp(stderr);
       throw std::runtime_error("Error creating TLS context");
@@ -806,7 +793,9 @@ public:
 
     SSL_CTX_set_options(d_tlsCtx.get(), sslOptions);
 #if defined(SSL_CTX_set_ecdh_auto)
+#if !defined(OPENSSL_VERSION_MAJOR) || OPENSSL_VERSION_MAJOR < 4
     SSL_CTX_set_ecdh_auto(d_tlsCtx.get(), 1);
+#endif /* OPENSSL_VERSION_MAJOR < 4 */
 #endif
 
     if (!params.d_ciphers.empty()) {
@@ -824,6 +813,13 @@ public:
     }
 #endif /* HAVE_SSL_CTX_SET_CIPHERSUITES */
 
+  if (!params.d_ecdheCurves.empty()) {
+    if (SSL_CTX_set1_groups_list(d_tlsCtx.get(), params.d_ecdheCurves.c_str()) != 1) {
+      ERR_print_errors_fp(stderr);
+      throw std::runtime_error("Failed to set the TLS ECDHE curve to '" + params.d_ecdheCurves + "' for the TLS context");
+    }
+  }
+
     if (params.d_validateCertificates) {
       if (params.d_caStore.empty())  {
         if (SSL_CTX_set_default_verify_paths(d_tlsCtx.get()) != 1) {
@@ -836,14 +832,6 @@ public:
       }
 
       SSL_CTX_set_verify(d_tlsCtx.get(), SSL_VERIFY_PEER, nullptr);
-#if (OPENSSL_VERSION_NUMBER < 0x10002000L)
-#if defined(DNSDIST)
-      SLOG(warnlog("TLS hostname validation requested but not supported for OpenSSL < 1.0.2"),
-           dnsdist::logging::getTopLogger("openssl-client-side")->info(Logr::Warning, "TLS hostname validation requested but not supported for OpenSSL < 1.0.2"));
-#else /* DNSDIST */
-      warnlog("TLS hostname validation requested but not supported for OpenSSL < 1.0.2");
-#endif /* DNSDIST */
-#endif /* OPENSSL_VERSION_NUMBER < 0x10002000L */
     }
 
     /* we need to set SSL_SESS_CACHE_CLIENT for the "new ticket" callback (below) to be called,
@@ -856,6 +844,20 @@ public:
     }
 
     libssl_set_alpn_protos(d_tlsCtx.get(), getALPNVector(params.d_alpn, true));
+
+    if (!params.d_client_certificate.empty()) {
+      std::optional<std::string> key = std::nullopt;
+      if (!params.d_client_certificate_key.empty()) {
+        key = params.d_client_certificate_key;
+      }
+      std::optional<std::string> password = std::nullopt;
+      if (!params.d_client_certificate_password.empty()) {
+        password = params.d_client_certificate_password;
+      }
+      TLSCertKeyPair pair{params.d_client_certificate, std::move(key), std::move(password)};
+      std::vector<int> keyTypes;
+      libssl_setup_context_no_sni(d_tlsCtx.get(), pair, keyTypes);
+    }
 
 #ifdef SSL_MODE_RELEASE_BUFFERS
     if (params.d_releaseBuffers) {
@@ -922,7 +924,13 @@ public:
       return 0;
     }
 
-    conn->addNewTicket(session);
+    try {
+      conn->addNewTicket(session);
+    }
+    // NOLINTNEXTLINE(bugprone-empty-catch)
+    catch (...) {
+    }
+
     return 1;
   }
 
@@ -1037,6 +1045,7 @@ private:
 
 #ifdef HAVE_GNUTLS
 #include <gnutls/gnutls.h>
+#include <gnutls/socket.h>
 #include <gnutls/x509.h>
 
 static void safe_memory_lock([[maybe_unused]] void* data, [[maybe_unused]] size_t size)
@@ -1050,23 +1059,8 @@ static void safe_memory_release(void* data, size_t size)
 {
 #ifdef HAVE_LIBSODIUM
   sodium_munlock(data, size);
-#elif defined(HAVE_EXPLICIT_BZERO)
-  explicit_bzero(data, size);
-#elif defined(HAVE_EXPLICIT_MEMSET)
-  explicit_memset(data, 0, size);
-#elif defined(HAVE_GNUTLS_MEMSET)
-  gnutls_memset(data, 0, size);
 #else
-  /* shamelessly taken from Dovecot's src/lib/safe-memset.c */
-  volatile unsigned int volatile_zero_idx = 0;
-  volatile unsigned char *p = reinterpret_cast<volatile unsigned char *>(data);
-
-  if (size == 0)
-    return;
-
-  do {
-    memset(data, 0, size);
-  } while (p[volatile_zero_idx] != 0);
+  SensitiveData::reallyClearContent(data, size);
 #endif
 }
 
@@ -1284,7 +1278,8 @@ public:
       return 0;
     }
 
-    GnuTLSConnection* conn = reinterpret_cast<GnuTLSConnection*>(gnutls_session_get_ptr(session));
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast): GnuTLS API
+    auto* conn = reinterpret_cast<GnuTLSConnection*>(gnutls_session_get_ptr(session));
     if (conn == nullptr) {
       return 0;
     }
@@ -1293,7 +1288,10 @@ public:
     auto ret = gnutls_session_get_data2(session, &sess);
     /* GnuTLS returns a 'fake' ticket of 4 bytes set to zero when there is no ticket available */
     if (ret != GNUTLS_E_SUCCESS || sess.size <= 4) {
-      throw std::runtime_error("Error getting GnuTLSSession: " + std::string(gnutls_strerror(ret)));
+      if (sess.data != nullptr) {
+        gnutls_free(sess.data);
+      }
+      return 0;
     }
     conn->d_tlsSessions.push_back(std::make_unique<GnuTLSSession>(sess));
     return 0;
@@ -1784,6 +1782,9 @@ public:
 
     try {
       if (frontend.d_tlsConfig.d_ticketKeyFile.empty()) {
+        if (d_ticketsKeyRotationDelay == 0) {
+          throw std::runtime_error("Trying to start a TLS frontend without any TLS session ticket encryption key loaded AND with rotation disabled!");
+        }
         handleTicketsKeyRotation(time(nullptr));
       }
       else {

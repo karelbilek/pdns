@@ -12,11 +12,13 @@
         type DNSSelector;
         type DNSActionWrapper;
         type DNSResponseActionWrapper;
-        fn registerProtobufLogger(config: &ProtobufLoggerConfiguration);
-        fn registerDnstapLogger(config: &DnstapLoggerConfiguration);
-        fn registerKVSObjects(config: &KeyValueStoresConfiguration);
-        fn registerNMGObjects(nmgs: &Vec<NetmaskGroupConfiguration>);
-        fn registerTimedIPSetObjects(sets: &Vec<TimedIpSetConfiguration>);
+        fn registerProtobufLogger(config: &ProtobufLoggerConfiguration) -> Result<()>;
+        fn registerDnstapLogger(config: &DnstapLoggerConfiguration) -> Result<()>;
+        fn registerOtlpLogger(config: &OtlpLoggerConfiguration) -> Result<()>;
+        fn registerKVSObjects(config: &KeyValueStoresConfiguration) -> Result<()>;
+        fn registerMMDBObjects(config: &Vec<MmdbConfiguration>) -> Result<()>;
+        fn registerNMGObjects(nmgs: &Vec<NetmaskGroupConfiguration>) -> Result<()>;
+        fn registerTimedIPSetObjects(sets: &Vec<TimedIpSetConfiguration>) -> Result<()>;
     }
 }
 
@@ -40,12 +42,16 @@ impl Default for dnsdistsettings::SharedDNSSelector {
 #[serde(deny_unknown_fields)]
 struct AndSelectorConfigurationSerde {
     #[serde(default, skip_serializing_if = "crate::is_default")]
+    name: String,
+    #[serde(default, skip_serializing_if = "crate::is_default")]
     selectors: Vec<Selector>,
 }
 
 #[derive(Default, Deserialize, Serialize, Debug, PartialEq)]
 #[serde(deny_unknown_fields)]
 struct OrSelectorConfigurationSerde {
+    #[serde(default, skip_serializing_if = "crate::is_default")]
+    name: String,
     #[serde(default, skip_serializing_if = "crate::is_default")]
     selectors: Vec<Selector>,
 }
@@ -54,12 +60,16 @@ struct OrSelectorConfigurationSerde {
 #[serde(deny_unknown_fields)]
 struct NotSelectorConfigurationSerde {
     #[serde(default, skip_serializing_if = "crate::is_default")]
+    name: String,
+    #[serde(default, skip_serializing_if = "crate::is_default")]
     selector: Box<Selector>,
 }
 
 #[derive(Default, Deserialize, Serialize, Debug, PartialEq)]
 #[serde(deny_unknown_fields)]
 struct ContinueActionConfigurationSerde {
+    #[serde(default, skip_serializing_if = "crate::is_default")]
+    name: String,
     #[serde(default, skip_serializing_if = "crate::is_default")]
     action: Box<Action>,
 }
