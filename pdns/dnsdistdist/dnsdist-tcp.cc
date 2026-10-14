@@ -42,6 +42,7 @@
 #include "dolog.hh"
 #include "gettime.hh"
 #include "lock.hh"
+#include "logging.hh"
 #include "sstuff.hh"
 #include "tcpiohandler.hh"
 #include "tcpiohandler-mplexer.hh"
@@ -666,7 +667,7 @@ void IncomingTCPConnectionState::handleResponse(const struct timeval& now, TCPRe
 
       memcpy(&response.d_cleartextDH, dnsResponse.getHeader().get(), sizeof(response.d_cleartextDH));
 
-      if (!processResponse(response.d_buffer, dnsResponse, false)) {
+      if (!processResponse(response.d_buffer, dnsResponse)) {
         state->terminateClientConnection();
         return;
       }
@@ -978,9 +979,18 @@ IncomingTCPConnectionState::QueryProcessingResult IncomingTCPConnectionState::ha
         dnsQuestion.ids.du = std::move(unit);
       }
     }
-    if (assignOutgoingUDPQueryToBackend(backend, queryID, dnsQuestion, query)) {
-      return QueryProcessingResult::Forwarded;
+
+    try {
+      if (assignOutgoingUDPQueryToBackend(backend, queryID, dnsQuestion, query)) {
+        return QueryProcessingResult::Forwarded;
+      }
     }
+    catch (const std::exception& e) {
+      VERBOSESLOG(infolog("Got exception trying to forward query (%s|%s, from %s) over UDP first to %s, dropping the query", dnsQuestion.ids.qname.toLogString(), QType(dnsQuestion.ids.qtype).toString(), d_proxiedRemote.toStringWithPort(), backend->getNameWithAddr()),
+                  dnsQuestion.ids.getLogger(getLogger())->error(Logr::Info, e.what(), "Got exception trying to forward query over UDP first, dropping the query", "backend.name", Logging::Loggable(backend->getName()), "backend.address", Logging::Loggable(backend->d_config.remote), "client.address", Logging::Loggable(d_proxiedRemote), "query.name", Logging::Loggable(dnsQuestion.ids.qname), "query.type", Logging::Loggable(dnsQuestion.ids.qtype)));
+      return QueryProcessingResult::Dropped;
+    }
+
     restoreDOHUnit(std::move(dnsQuestion.ids.du));
     // fallback to the normal flow
   }
@@ -1159,7 +1169,7 @@ IOState IncomingTCPConnectionState::handleIncomingQueryReceived(const struct tim
   return IOState::Done;
 };
 
-void IncomingTCPConnectionState::handleExceptionDuringIO(const std::exception& exp)
+void IncomingTCPConnectionState::handleExceptionDuringIO(const std::string& reason)
 {
   if (d_state == State::idle || d_state == State::waitingForQuery) {
     /* no need to increase any counters in that case, the client is simply done with us */
@@ -1173,12 +1183,12 @@ void IncomingTCPConnectionState::handleExceptionDuringIO(const std::exception& e
   }
 
   if (d_ioState->isWaitingForWrite() || d_queriesCount == 0) {
-    VERBOSESLOG(infolog("Got an exception while handling (%s) TCP query from %s: %s", (d_ioState->isWaitingForRead() ? "reading" : "writing"), d_ci.remote.toStringWithPort(), exp.what()),
-                getLogger()->error(Logr::Info, exp.what(), "Got an exception while handling TCP query", "io", Logging::Loggable(d_ioState->isWaitingForRead() ? "reading" : "writing")));
+    VERBOSESLOG(infolog("Got an exception while handling (%s) TCP query from %s: %s", (d_ioState->isWaitingForRead() ? "reading" : "writing"), d_ci.remote.toStringWithPort(), reason),
+                getLogger()->error(Logr::Info, reason, "Got an exception while handling TCP query", "io", Logging::Loggable(d_ioState->isWaitingForRead() ? "reading" : "writing")));
   }
   else {
-    VERBOSESLOG(infolog("Closing TCP client connection with %s: %s", d_ci.remote.toStringWithPort(), exp.what()),
-                getLogger()->error(Logr::Info, exp.what(), "Closing TCP client connection"));
+    VERBOSESLOG(infolog("Closing TCP client connection with %s: %s", d_ci.remote.toStringWithPort(), reason),
+                getLogger()->error(Logr::Info, reason, "Closing TCP client connection"));
   }
   /* remove this FD from the IO multiplexer */
   terminateClientConnection();
@@ -1360,7 +1370,14 @@ void IncomingTCPConnectionState::handleIO()
          but it might also be a real IO error or something else.
          Let's just drop the connection
       */
-      handleExceptionDuringIO(exp);
+      handleExceptionDuringIO(exp.what());
+    }
+    catch (const PDNSException& exp) {
+      /* most likely an EOF because the other end closed the connection,
+         but it might also be a real IO error or something else.
+         Let's just drop the connection
+      */
+      handleExceptionDuringIO(exp.reason);
     }
 
     if (!active()) {
@@ -1777,11 +1794,19 @@ static void tcpClientThread(pdns::channel::Receiver<ConnectionInfo>&& queryRecei
         SLOG(warnlog("Error in TCP worker thread: %s", e.what()),
              logger->error(Logr::Warning, e.what(), "Error in incoming TCP worker thread"));
       }
+      catch (const PDNSException& exp) {
+        SLOG(warnlog("Error in TCP worker thread: %s", exp.reason),
+             logger->error(Logr::Warning, exp.reason, "Error in incoming TCP worker thread"));
+      }
     }
   }
   catch (const std::exception& e) {
     SLOG(errlog("Fatal error in TCP worker thread: %s", e.what()),
          logger->error(Logr::Error, e.what(), "Fatal error in incoming TCP worker thread"));
+  }
+  catch (const PDNSException& exp) {
+    SLOG(errlog("Fatal error in TCP worker thread: %s", exp.reason),
+         logger->error(Logr::Error, exp.reason, "Fatal error in incoming TCP worker thread"));
   }
 }
 
@@ -1812,7 +1837,7 @@ static void acceptNewConnection(const TCPAcceptorParam& param, TCPClientThreadDa
       throw std::runtime_error((boost::format("accepting new connection on socket: %s") % stringerror()).str());
     }
 
-    if (checkACL && !dnsdist::configuration::getCurrentRuntimeConfiguration().d_ACL.match(remote)) {
+    if (checkACL && !dnsdist::configuration::getCurrentRuntimeConfiguration().d_ACL.match(remote) && !(clientState.d_enableProxyProtocol && expectProxyProtocolFrom(remote))) {
       ++dnsdist::metrics::g_stats.aclDrops;
       VERBOSESLOG(infolog("Dropped TCP connection from %s because of ACL", remote.toStringWithPort()),
                   dnsdist::logging::getTopLogger("incoming-tcp-worker")->info(Logr::Info, "Dropped TCP connection because of ACL", "frontend.address", Logging::Loggable(param.local), "client.address", Logging::Loggable(remote)));

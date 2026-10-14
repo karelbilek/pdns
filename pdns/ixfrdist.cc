@@ -21,6 +21,7 @@
  */
 #include "dns.hh"
 #include "dnsparser.hh"
+#include <exception>
 #include <stdexcept>
 #ifdef HAVE_CONFIG_H
 #include "config.h"
@@ -500,8 +501,14 @@ static void updateThread(const string& workdir, const uint16_t& keep, const uint
         auto newSerial = getSerialFromPrimary(nullptr /* no structured logging */, primary, domain, sr); // TODO TSIG
         if(current_soa != nullptr) {
           g_log << Logger::Info << "Got SOA Serial for " << domain << " from " << primary.toStringWithPort() << ": " << newSerial << ", had Serial: " << current_soa->d_st.serial;
-          if (newSerial == current_soa->d_st.serial) {
-            g_log<<Logger::Info<<", not updating."<<endl;
+          if (rfc1982LessThanOrEqual(newSerial, current_soa->d_st.serial)) {
+            g_log<<Logger::Info<<", not updating"<<endl;
+            if (rfc1982LessThan(newSerial, current_soa->d_st.serial)) {
+              g_log<<Logger::Info<<", new serial is smaller than the existing serial."<<endl;
+            } else {
+              g_log<<Logger::Info<<", new serial is the same as the existing serial."<<endl;
+            }
+            g_log<<Logger::Info<<"."<<endl;
             continue;
           }
           g_log<<Logger::Info<<", will update."<<endl;
@@ -537,7 +544,7 @@ static void updateThread(const string& workdir, const uint16_t& keep, const uint
             dr.d_name.makeUsRelative(domain);
             records.insert(dr);
             nrecords++;
-            if (dr.d_type == QType::SOA) {
+            if (dr.d_type == QType::SOA && dr.d_name.isRoot()) {
               soa = getRR<SOARecordContent>(dr);
               soaTTL = dr.d_ttl;
             }
@@ -597,7 +604,7 @@ static void updateThread(const string& workdir, const uint16_t& keep, const uint
       } catch (PDNSException &e) {
         g_stats.incrementAXFRFailures(domain);
         g_log<<Logger::Warning<<"Could not save zone '"<<domain<<"' to disk: "<<e.reason<<endl;
-      } catch (runtime_error &e) {
+      } catch (std::exception &e) {
         g_stats.incrementAXFRFailures(domain);
         g_log<<Logger::Warning<<"Could not save zone '"<<domain<<"' to disk: "<<e.what()<<endl;
       }

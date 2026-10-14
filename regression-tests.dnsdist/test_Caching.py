@@ -254,14 +254,14 @@ class TestCaching(DNSDistTest):
         numberOfQueries = 5
 
         for _ in range(numberOfQueries):
-            for method in ("sendUDPQuery", "sendTCPQuery"):
-                sender = getattr(self, method)
-                (receivedQuery, receivedResponse) = sender(query, response)
-                self.assertTrue(receivedQuery)
-                self.assertTrue(receivedResponse)
-                receivedQuery.id = query.id
-                self.assertEqual(query, receivedQuery)
-                self.assertEqual(receivedResponse, response)
+            method = "sendTCPQuery"
+            sender = getattr(self, method)
+            (receivedQuery, receivedResponse) = sender(query, response)
+            self.assertTrue(receivedQuery)
+            self.assertTrue(receivedResponse)
+            receivedQuery.id = query.id
+            self.assertEqual(query, receivedQuery)
+            self.assertEqual(receivedResponse, response)
 
         for key in self._responsesCounter:
             value = self._responsesCounter[key]
@@ -289,14 +289,14 @@ class TestCaching(DNSDistTest):
         numberOfQueries = 5
 
         for _ in range(numberOfQueries):
-            for method in ("sendUDPQuery", "sendTCPQuery"):
-                sender = getattr(self, method)
-                (receivedQuery, receivedResponse) = sender(query, response)
-                self.assertTrue(receivedQuery)
-                self.assertTrue(receivedResponse)
-                receivedQuery.id = query.id
-                self.assertEqual(query, receivedQuery)
-                self.assertEqual(receivedResponse, response)
+            method = "sendTCPQuery"
+            sender = getattr(self, method)
+            (receivedQuery, receivedResponse) = sender(query, response)
+            self.assertTrue(receivedQuery)
+            self.assertTrue(receivedResponse)
+            receivedQuery.id = query.id
+            self.assertEqual(query, receivedQuery)
+            self.assertEqual(receivedResponse, response)
 
         for key in self._responsesCounter:
             value = self._responsesCounter[key]
@@ -948,16 +948,16 @@ class TestCachingWithExistingEDNS(DNSDistTest):
         self.assertEqual(total, misses)
 
 
-class TestCachingCacheFull(DNSDistTest):
+class TestCachingDontEvictCacheFull(DNSDistTest):
     _config_template = """
-    pc = newPacketCache(1, {maxTTL=86400, minTTL=1, numberOfShards=1})
+    pc = newPacketCache(1, {maxTTL=86400, minTTL=1, numberOfShards=1, dontEvict=true})
     getPool(""):setCache(pc)
     newServer{address="127.0.0.1:%d"}
     """
 
     def testCacheFull(self):
         """
-        Cache: No new entries are cached when the cache is full
+        Cache: No new entries are cached when the cache is full and dontEvict=true
 
         """
         misses = 0

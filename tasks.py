@@ -24,6 +24,7 @@ all_build_deps = [
     "pkg-config",
     "python3-venv",
     "systemd",
+    "systemd-dev",
 ]
 git_build_deps = ["autoconf", "automake", "bison", "bzip2", "curl", "flex", "git", "ragel"]
 auth_build_deps = [  # FIXME: perhaps we should be stealing these from the debian (Ubuntu) control file
@@ -86,6 +87,7 @@ dnsdist_build_deps = [
     "catch2",
     "libcdb-dev",
     "libcurl4",
+    "libcurl4-openssl-dev",
     "libedit-dev",
     "libfstrm-dev",
     "libgnutls28-dev",
@@ -896,13 +898,16 @@ def dev_rec_configure_meson(
     )
 
 
-def ci_rec_configure_meson(c, features, build_dir):
+def ci_rec_configure_meson(c, features, build_dir, skipDist):
     builder_version = os.getenv("BUILDER_VERSION")
-    dist_dir = "/tmp/rec-meson-dist-build"
-    c.run(f". {repo_home}/.venv/bin/activate && meson setup {dist_dir} && meson dist -C {dist_dir} --no-tests")
-    with c.cd(f"{dist_dir}/meson-dist"):
-        c.run(f"tar xf pdns-recursor-{builder_version}.tar.xz")
-    src_dir = f"{dist_dir}/meson-dist/pdns-recursor-{builder_version}"
+    if not skipDist:
+        dist_dir = "/tmp/rec-meson-dist-build"
+        c.run(f". {repo_home}/.venv/bin/activate && meson setup {dist_dir} && meson dist -C {dist_dir} --no-tests")
+        with c.cd(f"{dist_dir}/meson-dist"):
+            c.run(f"tar xf pdns-recursor-{builder_version}.tar.xz")
+        src_dir = f"{dist_dir}/meson-dist/pdns-recursor-{builder_version}"
+    else:
+        src_dir = "."
 
     unittests = get_unit_tests(meson=True, auth=False)
     if features == "full":
@@ -932,8 +937,8 @@ def ci_rec_configure_meson(c, features, build_dir):
 
 
 @task
-def ci_rec_configure(c, features, build_dir):
-    ci_rec_configure_meson(c, features, build_dir)
+def ci_rec_configure(c, features, build_dir, skipDist=False):
+    ci_rec_configure_meson(c, features, build_dir, skipDist)
 
 
 DNSDIST_CONFIGURE_CXXFLAGS_LEAST = " ".join(
@@ -973,8 +978,15 @@ DNSDIST_CONFIGURE_CXXFLAGS_LEAST = " ".join(
 )
 
 
+DNSDIST_CONFIGURE_CXXFLAGS_MOCK_ASYNC_ENGINE = " ".join(
+    [
+        "-DMOCK_SSL_ASYNC",
+    ]
+)
+
+
 @task
-def ci_dnsdist_configure(c, features, build_dir, benchmark=False):
+def ci_dnsdist_configure(c, features, build_dir, benchmark=False, mockAsyncEngine=False, skipDist=False):
     additional_flags = ""
     additional_ld_flags = ""
     if is_compiler_clang():
@@ -983,7 +995,10 @@ def ci_dnsdist_configure(c, features, build_dir, benchmark=False):
     if features == "least":
         additional_flags = DNSDIST_CONFIGURE_CXXFLAGS_LEAST
 
-    cmd = ci_dnsdist_configure_meson(c, features, additional_flags, additional_ld_flags, build_dir, benchmark)
+    if mockAsyncEngine:
+        additional_flags += " " + DNSDIST_CONFIGURE_CXXFLAGS_MOCK_ASYNC_ENGINE
+
+    cmd = ci_dnsdist_configure_meson(c, features, additional_flags, additional_ld_flags, build_dir, benchmark, skipDist)
     logfile = "meson-logs/meson-log.txt"
 
     res = c.run(cmd, warn=True)
@@ -1048,7 +1063,7 @@ DNSDIST_CONFIGURE_MESON_FEATURE_SET_LEAST = " ".join(
 )
 
 
-def ci_dnsdist_configure_meson(c, features, additional_flags, additional_ld_flags, build_dir, benchmark=False):
+def ci_dnsdist_configure_meson(c, features, additional_flags, additional_ld_flags, build_dir, benchmark, skipDist):
     if features == "full":
         features_set = DNSDIST_CONFIGURE_MESON_FEATURE_SET_FULL
     else:
@@ -1072,13 +1087,17 @@ def ci_dnsdist_configure_meson(c, features, additional_flags, additional_ld_flag
     )
 
     builder_version = os.getenv("BUILDER_VERSION")
-    dist_dir = "/tmp/dnsdist-meson-dist-build"
+    if not skipDist:
+        dist_dir = "/tmp/dnsdist-meson-dist-build"
 
-    c.run(f". {repo_home}/.venv/bin/activate && meson setup {dist_dir} && meson dist -C {dist_dir} --no-tests")
-    with c.cd(f"{dist_dir}/meson-dist/"):
-        c.run(f"tar xf dnsdist-{builder_version}.tar.xz")
+        c.run(f". {repo_home}/.venv/bin/activate && meson setup {dist_dir} && meson dist -C {dist_dir} --no-tests")
+        with c.cd(f"{dist_dir}/meson-dist/"):
+            c.run(f"tar xf dnsdist-{builder_version}.tar.xz")
 
-    src_dir = f"{dist_dir}/meson-dist/dnsdist-{builder_version}"
+        src_dir = f"{dist_dir}/meson-dist/dnsdist-{builder_version}"
+    else:
+        src_dir = "."
+
     return " ".join(
         [
             f". {repo_home}/.venv/bin/activate && {env} meson setup {build_dir} {src_dir}",

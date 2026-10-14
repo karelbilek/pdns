@@ -19,6 +19,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
+#include "svc-records.hh"
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -397,8 +398,9 @@ void RecordTextReader::xfrSvcParamKeyVals(set<SvcParam>& val) // NOLINT(readabil
     }
 
     switch (key) {
-    case SvcParam::no_default_alpn:
-    case SvcParam::ohttp:
+    case SvcParam::no_default_alpn: [[fallthrough]];
+    case SvcParam::ohttp: [[fallthrough]];
+    case SvcParam::pvd:
       if (d_pos != d_end && d_string.at(d_pos) != ' ') {
         throw RecordTextException(k + " key can not have values");
       }
@@ -447,7 +449,8 @@ void RecordTextReader::xfrSvcParamKeyVals(set<SvcParam>& val) // NOLINT(readabil
       }
       break;
     }
-    case SvcParam::alpn: {
+    case SvcParam::alpn: [[fallthrough]];
+    case SvcParam::docpath: {
       vector<string> value;
       if (generic) {
         string v;
@@ -457,13 +460,13 @@ void RecordTextReader::xfrSvcParamKeyVals(set<SvcParam>& val) // NOLINT(readabil
           len = v.at(spos);
           spos += 1;
           if (len == 0) {
-            throw RecordTextException("ALPN values cannot be empty strings");
+            throw RecordTextException("values for " + k + " cannot be empty strings");
           }
           if (len > 255) {
-            throw RecordTextException("Length of ALPN value goes over 255");
+            throw RecordTextException("Length of " + k + " value goes over 255");
           }
           if (len > v.length() - spos) {
-            throw RecordTextException("Length of ALPN value goes over total length of alpn SVC Param");
+            throw RecordTextException("Length of value goes over total length of " + k + " SVC Param");
           }
           value.push_back(v.substr(spos, len));
           spos += len;
@@ -476,12 +479,12 @@ void RecordTextReader::xfrSvcParamKeyVals(set<SvcParam>& val) // NOLINT(readabil
           }
         }
       }
-      if (value.empty()) {
+      if (value.empty() && key != SvcParam::docpath) {
         throw RecordTextException("value is required for SVC Param " + k);
       }
       for (const auto &alpn_value : value) {
         if (alpn_value.empty()) {
-          throw RecordTextException("ALPN values cannot be empty strings");
+          throw RecordTextException(k + " values cannot be empty strings");
         }
       }
       val.insert(SvcParam(key, std::move(value)));
@@ -615,18 +618,22 @@ void RecordTextReader::xfrSvcParamKeyVals(set<SvcParam>& val) // NOLINT(readabil
   }
 }
 
-static inline uint8_t hextodec(uint8_t val)
+static uint8_t hextodec(uint8_t val)
 {
-  if(val >= '0' && val<='9')
+  if (val >= '0' && val<='9') {
     return val-'0';
-  else if(val >= 'A' && val<='F')
+  }
+  if (val >= 'A' && val<='F') {
     return 10+(val-'A');
-  else if(val >= 'a' && val<='f')
+  }
+  if (val >= 'a' && val<='f') {
     return 10+(val-'a');
-  else
-    throw RecordTextException("Unknown hexadecimal character '"+std::to_string(val)+"'");
+  }
+  // We do not perform an isprint() check before printing the offending
+  // character, as we are relying upon our only caller to only pass
+  // values which satisfy isalnum().
+  throw RecordTextException("Invalid hexadecimal character '"+std::string(1, static_cast<char>(val))+"'");
 }
-
 
 static void HEXDecode(std::string_view chunk, string& out)
 {
@@ -1015,13 +1022,14 @@ void RecordTextWriter::xfrSvcParamKeyVals(const set<SvcParam>& val) {
       d_string.append(1, ' ');
 
     d_string.append(SvcParam::keyToString(param.getKey()));
-    if (param.getKey() != SvcParam::no_default_alpn && param.getKey() != SvcParam::ohttp) {
+    if (param.getKey() != SvcParam::no_default_alpn && param.getKey() != SvcParam::ohttp && !(param.getKey() == SvcParam::docpath && param.getALPN().empty()) && param.getKey() != SvcParam::pvd) { // NOLINT(readability-simplify-boolean-expr)
       d_string.append(1, '=');
     }
 
     switch (param.getKey())
     {
-    case SvcParam::no_default_alpn:
+    case SvcParam::no_default_alpn: [[fallthrough]];
+    case SvcParam::pvd:
       break;
     case SvcParam::ipv4hint: /* fall-through */
     case SvcParam::ipv6hint:
@@ -1032,7 +1040,8 @@ void RecordTextWriter::xfrSvcParamKeyVals(const set<SvcParam>& val) {
       }
       d_string.append(ComboAddress::caContainerToString(param.getIPHints(), false));
       break;
-    case SvcParam::alpn:
+    case SvcParam::alpn: [[fallthrough]];
+    case SvcParam::docpath:
       xfrSVCBValueList(param.getALPN());
       break;
     case SvcParam::mandatory:

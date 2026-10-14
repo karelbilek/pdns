@@ -750,6 +750,13 @@ LMDBBackend::LMDBBackend(const std::string& suffix)
     // Old configuration with only one settings for main and shards.
     d_mapsize_shards = d_mapsize_main;
   }
+  d_pagesize = 0;
+  try {
+    d_pagesize = std::stoi(getArg("page-size"));
+  }
+  catch (const std::exception& e) {
+    throw std::runtime_error(std::string("Unable to parse the 'page-size' LMDB value: ") + e.what());
+  }
 
   d_write_notification_update = mustDo("write-notification-update");
   d_split_domains_table = mustDo("split-domains-table");
@@ -890,7 +897,7 @@ LMDBBackend::~LMDBBackend()
 void LMDBBackend::openAllTheDatabases()
 {
   const auto& filename = getArg("filename");
-  d_tdomains = std::make_shared<tdomains_t>(getMDBEnv(filename.c_str(), MDB_NOSUBDIR | MDB_NORDAHEAD | d_asyncFlag, 0600, d_mapsize_main), "domains_v5");
+  d_tdomains = std::make_shared<tdomains_t>(getMDBEnv(filename.c_str(), MDB_NOSUBDIR | MDB_NORDAHEAD | d_asyncFlag, 0600, d_mapsize_main, d_pagesize), "domains_v5");
   d_tmeta = std::make_shared<tmeta_t>(d_tdomains->getEnv(), "metadata_v5");
   d_tkdb = std::make_shared<tkdb_t>(d_tdomains->getEnv(), "keydata_v5");
   d_ttsig = std::make_shared<ttsig_t>(d_tdomains->getEnv(), "tsig_v5");
@@ -1707,20 +1714,21 @@ bool LMDBBackend::replaceRRSet(domainid_t domain_id, const DNSName& qname, const
     d_rwtxn->txn->put_header_in_place(d_rwtxn->db->rdbi, match, ser);
   }
 
+  // Delete comments if the complete RRset gets removed
+  if (rrset.empty()) {
+    deleteComments(domain_id, relative, qt);
+  }
+
   return true;
 }
 
-bool LMDBBackend::replaceComments(const domainid_t domain_id, const DNSName& qname, const QType& qtype, const vector<Comment>& comments)
+void LMDBBackend::deleteComments(const domainid_t domain_id, const DNSName& relqname, const QType& qtype)
 {
-  // delete all existing comments for the RRset
-  // this could be smarter and not del+replace unchanged comments
   auto cursor = d_rwtxn->txn->getCursor(d_rwtxn->db->cdbi);
   MDBOutVal key{};
   MDBOutVal val{};
 
   compoundOrdername co;
-
-  auto relqname = qname.makeRelative(d_transactiondomain);
 
   string match = co(domain_id, relqname, qtype);
 
@@ -1729,6 +1737,14 @@ bool LMDBBackend::replaceComments(const domainid_t domain_id, const DNSName& qna
       cursor.del(key);
     } while (cursor.next(key, val) == 0);
   }
+}
+
+bool LMDBBackend::replaceComments(const domainid_t domain_id, const DNSName& qname, const QType& qtype, const vector<Comment>& comments)
+{
+  // delete all existing comments for the RRset
+  // this could be smarter and not del+replace unchanged comments
+  auto relqname = qname.makeRelative(d_transactiondomain);
+  deleteComments(domain_id, relqname, qtype);
 
   for (const auto& comment : comments) {
     feedComment(comment);
@@ -1921,7 +1937,7 @@ std::shared_ptr<LMDBBackend::RecordsRWTransaction> LMDBBackend::getRecordsRWTran
   auto& shard = d_trecords[id % s_shards];
   if (!shard.env) {
     shard.env = getMDBEnv((getArg("filename") + "-" + std::to_string(id % s_shards)).c_str(),
-                          MDB_NOSUBDIR | MDB_NORDAHEAD | d_asyncFlag, 0600, d_mapsize_shards);
+                          MDB_NOSUBDIR | MDB_NORDAHEAD | d_asyncFlag, 0600, d_mapsize_shards, d_pagesize);
     shard.rdbi = shard.env->openDB("records_v5", MDB_CREATE);
     shard.cdbi = shard.env->openDB("comments_v7", MDB_CREATE);
   }
@@ -1940,7 +1956,7 @@ std::shared_ptr<LMDBBackend::RecordsROTransaction> LMDBBackend::getRecordsROTran
       throw DBException("attempting to start nested transaction without open parent env");
     }
     shard.env = getMDBEnv((getArg("filename") + "-" + std::to_string(id % s_shards)).c_str(),
-                          MDB_NOSUBDIR | MDB_NORDAHEAD | d_asyncFlag, 0600, d_mapsize_shards);
+                          MDB_NOSUBDIR | MDB_NORDAHEAD | d_asyncFlag, 0600, d_mapsize_shards, d_pagesize);
     shard.rdbi = shard.env->openDB("records_v5", MDB_CREATE);
     shard.cdbi = shard.env->openDB("comments_v7", MDB_CREATE);
   }
@@ -2016,7 +2032,20 @@ bool LMDBBackend::deleteDomain(const ZoneName& domain)
       txn.commit();
     }
 
-    // Remove records
+    { // Remove comments
+      auto cursor = d_rwtxn->txn->getCursor(d_rwtxn->db->cdbi);
+      MDBOutVal key{};
+      MDBOutVal val{};
+      compoundOrdername co; // NOLINT(readability-identifier-length)
+      string match = co(id, domain.operator const DNSName&());
+      if (cursor.prefix(match, key, val) == 0) {
+        do {
+          cursor.del(key);
+        } while (cursor.next(key, val) == 0);
+      }
+    }
+
+    // Remove records (actually done by startTransaction)
     commitTransaction();
 
     // Remove zone
@@ -3766,6 +3795,7 @@ public:
     declare(suffix, "random-ids", "Numeric IDs inside the database are generated randomly instead of sequentially", "no");
     declare(suffix, "map-size", "main LMDB map size in megabytes", (sizeof(void*) == 4) ? "100" : "16000");
     declare(suffix, "shards-map-size", "shard LMDB map size in megabytes, zero to use the same size as main", "0");
+    declare(suffix, "page-size", "LMDB page size in kilobytes", "0");
     declare(suffix, "flag-deleted", "Flag entries on deletion instead of deleting them", "no");
     declare(suffix, "write-notification-update", "Update domain table upon notification", "yes");
     declare(suffix, "split-domains-table", "Use a split domain table to reduce I/O load after XFR notifications", "no");

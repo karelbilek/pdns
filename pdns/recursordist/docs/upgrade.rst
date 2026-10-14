@@ -12,6 +12,10 @@ Building
 ^^^^^^^^
 Building using autotools is no longer possible, use meson. See :doc:`appendices/compiling`.
 
+Changed Behaviour
+^^^^^^^^^^^^^^^^^
+- A (re)load of an RPZ will wipe relevant packet cache entries. For a large RPZ, this can take some time. See :ref:`wipePacketCache`.
+
 Changed Settings
 ^^^^^^^^^^^^^^^^
 - The :ref:`incoming-ws-config` YAML struct has been extended to be able to specify an encrypted PKCS12 file to configure TLS key and certificate chain for the embedded web server.
@@ -26,8 +30,23 @@ New Settings
 - The :ref:`setting-yaml-dnssec.nta_extended_error` setting has been introduced, disabled by default.
   When enabled and a Negative Trust Anchor is in effect, the recursor adds an EDNS Extended Error (:rfc:`8914`) with info-code 33 ("Negative Trust Anchor") to insecure responses covered by the NTA as a diagnostic signal.
   It does not change validation or the AD bit.
-  Because responses are packet-cached, adding or removing an NTA only affects the presence of this   Extended Error once the relevant cache entries expire or are flushed.
+  Because responses are packet-cached, adding or removing an NTA only affects the presence of this Extended Error once the relevant cache entries expire or are flushed.
   See :ref:`ntas`.
+- The :ref:`setting-yaml-recursor.serve_rfc6761` setting has been introduced to NXDomain .test and .invalid by default, unless any subdomains are forwarded.
+
+Special-Use Domain Names
+^^^^^^^^^^^^^^^^^^^^^^^^
+
+Several special use domains have been added. These domains (and names under them) should not be sent to authoritatives on the Internet, and will be responded to with an NXDOMAIN response.
+However, these domains and names under them can still be forwarded or served locally by :program:`PowerDNS Recursor`.
+This is the case for the following domains:
+
+* .onion, specified in :rfc:`7686`.
+* .test, specified in :rfc:`6761`
+* .invalid, specified in :rfc:`6761`
+* home.arpa, specified in :rfc:`8375`
+* resolver.arpa, specified in :rfc:`9462`
+* service.arpa, specified in :rfc:`9665`
 
 5.1.10, 5.2.8, 5.3.5 and 5.5.0
 ------------------------------

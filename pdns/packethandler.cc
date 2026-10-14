@@ -1349,7 +1349,7 @@ bool PacketHandler::tryReferral(DNSPacket& p, std::unique_ptr<DNSPacket>& r, con
   if(!retargeted)
     r->setA(false);
 
-  if(isSecuredZone() && !addDSforNS(p, r, name) && d_dnssec) {
+  if(d_dnssec && !addDSforNS(p, r, name)) {
     addNSECX(p, r, name, DNSName(), 1);
   }
 
@@ -1787,6 +1787,7 @@ bool PacketHandler::opcodeQueryInner2(DNSPacket& pkt, queryState &state, bool re
   }
 
   // Reset possibly dangling data associated to d_sd.
+  d_doLua.reset();
   d_ispresigned.reset();
   d_issecuredzone.reset();
 

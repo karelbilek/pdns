@@ -88,6 +88,11 @@ subdir('meson' / 'yaml-configuration')      # YAML configuration
 subdir('meson' / 'catch2')                  # Microbenchmark
 subdir('meson' / 'mmdb')                    # MMDB (MaxmindDB)
 
+if get_option('otlp').enabled() and not dep_libcurl.found()
+  # OTLP is explicitly requested, but curl is not available
+  error('OTLP requested but libcurl was not found')
+endif
+
 common_sources = []
 
 fs = import('fs')
@@ -140,6 +145,7 @@ common_sources += files(
   src_dir / 'dnsdist-doh-common.cc',
   src_dir / 'dnsdist-dynblocks.cc',
   src_dir / 'dnsdist-dynbpf.cc',
+  src_dir / 'dnsdist-ebpf.cc',
   src_dir / 'dnsdist-ecs.cc',
   src_dir / 'dnsdist-edns.cc',
   src_dir / 'dnsdist-frontend.cc',
@@ -175,7 +181,6 @@ common_sources += files(
   src_dir / 'dnsdist-nghttp2.cc',
   src_dir / 'dnsdist-nghttp2-in.cc',
   src_dir / 'dnsdist-opentelemetry.cc',
-  src_dir / 'dnsdist-packet-processing.cc',
   src_dir / 'dnsdist-protobuf.cc',
   src_dir / 'dnsdist-protocols.cc',
   src_dir / 'dnsdist-proxy-protocol.cc',
@@ -199,6 +204,7 @@ common_sources += files(
   src_dir / 'dnsname.cc',
   src_dir / 'dnsparser.cc',
   src_dir / 'dnswriter.cc',
+  src_dir / 'dnstap.cc',
   src_dir / 'dolog.cc',
   src_dir / 'doh3.cc',
   src_dir / 'ednscookies.cc',
@@ -206,6 +212,7 @@ common_sources += files(
   src_dir / 'ednsoptions.cc',
   src_dir / 'ednspadding.cc',
   src_dir / 'ednssubnet.cc',
+  src_dir / 'fstrm_logger.cc',
   src_dir / 'gettime.cc',
   src_dir / 'iputils.cc',
   src_dir / 'libssl.cc',
@@ -475,12 +482,12 @@ tools = {
   'dnsdist': {
     'main': src_dir / 'dnsdist.cc',
     'files-extra': [
-      src_dir / 'dnstap.cc',
-      src_dir / 'fstrm_logger.cc',
       # FFI files are directly added to the binary, because otherwise the visibility
       # is ignored and the functions that are not used in the binary are not exported
       src_dir / 'dnsdist-lua-ffi.cc',
       src_dir / 'dnsdist-lua-inspection-ffi.cc',
+      # different build options for the unit tests
+      src_dir / 'dnsdist-packet-processing.cc',
       mplexer_sources,
       selectors_actions_sources,
     ],
@@ -501,7 +508,14 @@ tools = {
 }
 
 if get_option('fuzz-targets')
-  fuzz_extra_sources = []
+  fuzz_extra_sources = [mplexer_sources,
+    # FFI files are directly added to the binary, because otherwise the visibility
+    # is ignored and the functions that are not used in the binary are not exported
+    src_dir / 'dnsdist-lua-ffi.cc',
+    src_dir / 'dnsdist-mock-functions.cc',
+    # different build options for the unit tests
+    src_dir / 'dnsdist-packet-processing.cc',
+  ]
   fuzzer_ldflags = []
   # https://github.com/harfbuzz/harfbuzz/pull/2549/files
   if get_option('fuzzer_ldflags') == ''
@@ -515,7 +529,11 @@ if get_option('fuzz-targets')
       'link-args': fuzzer_ldflags,
       'files-extra': fuzz_extra_sources,
       'deps-extra': [
+         dep_ffi_interface,
+         dep_boost,
          dep_libsystemd,
+         dep_lua,
+         dep_protozero,
        ],
       'fuzzing-target': true,
     },
@@ -524,7 +542,11 @@ if get_option('fuzz-targets')
       'link-args': fuzzer_ldflags,
       'files-extra': fuzz_extra_sources,
       'deps-extra': [
+         dep_boost,
+         dep_ffi_interface,
          dep_libsystemd,
+         dep_lua,
+         dep_protozero,
        ],
       'fuzzing-target': true,
     },
@@ -542,8 +564,12 @@ if get_option('fuzz-targets')
            src_dir / 'xsk.cc'
            ],
          'deps-extra': [
+           dep_boost,
+           dep_ffi_interface,
            dep_libsystemd,
-          ],
+           dep_lua,
+           dep_protozero,
+         ],
          'fuzzing-target': true,
        },
     }
@@ -620,6 +646,9 @@ if get_option('unit-tests')
           # is ignored and the functions that are not used in the binary are not exported
           src_dir / 'dnsdist-lua-ffi.cc',
           src_dir / 'dnsdist-lua-inspection-ffi.cc',
+          src_dir / 'dnsdist-mock-functions.cc',
+          # different build options for the unit tests
+          src_dir / 'dnsdist-packet-processing.cc',
         ],
         'deps-extra': [
           libdnsdist_test,
@@ -629,6 +658,7 @@ if get_option('unit-tests')
           dep_protozero,
           dep_libsystemd, # because of the journal logging backend
         ],
+        'cpp_args': ['-DDNSDIST_UNIT_TESTS'],
     }
   }
 endif
@@ -656,10 +686,12 @@ if get_option('benchmark')
         mplexer_sources,
         src_dir / 'dnsdist-lbpolicies.cc',
         src_dir / 'dnsdist-lua-ffi.cc',
-        src_dir / 'dnstap.cc',
-        src_dir / 'fstrm_logger.cc',
+        src_dir / 'dnsdist-mock-functions.cc',
+        # different build options for the unit tests
+        src_dir / 'dnsdist-packet-processing.cc',
       ],
       'deps-extra': [
+        dep_boost,
         dep_catch2,
         dep_dnstap,
         dep_ffi_interface,
@@ -682,6 +714,7 @@ foreach tool, info: tools
   deps_extra = 'deps-extra' in info ? info['deps-extra'] : []
   link_args = 'link-args' in info ? info['link-args'] : []
   install = 'install' in info ? info['install'] : false
+  cpp_args = 'cpp_args' in info ? info['cpp_args'] : []
 
   new_binary = executable(
     tool,
@@ -695,6 +728,7 @@ foreach tool, info: tools
       deps_extra,
     ],
     install: install,
+    cpp_args: cpp_args,
   )
   set_variable(
     var_name,

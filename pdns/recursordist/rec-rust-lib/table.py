@@ -1951,7 +1951,8 @@ Usually this comes down to ``/var/lib/pdns-recursor/nod`` or ``/usr/local/var/li
 
 The newly observed domain feature uses a stable bloom filter to store
 a history of previously observed domains. The data structure is
-synchronized to disk every 10 minutes, and is also initialized from
+synchronized to disk at the interval specified by
+:ref:`setting-yaml-nod.db_snapshot_interval`, and is also initialized from
 disk on startup. This ensures that previously observed domains are
 preserved across recursor restarts.
 If you change the new-domain-db-size setting, you must remove any files
@@ -2532,6 +2533,24 @@ Individual parts of these zones can still be loaded or forwarded.
 :ref:`setting-serve-rfc1918` must be enabled for this option to take effect.
 """,
         "versionadded": ["5.1.3", "5.2.0"],
+        "runtime": ["reload-zones"],
+    },
+    {
+        "name": "serve_rfc6761",
+        "section": "recursor",
+        "type": LType.Bool,
+        "default": "true",
+        "help": "If we should be authoritative for some of the RFC 6761 Special-Use domains",
+        "doc": """
+This makes the server authoritatively aware of some of the zones in :rfc:`6761`.
+These are:
+
+* .test
+* .invalid
+
+Individual parts of these zones can still be loaded or forwarded.
+""",
+        "versionadded": ["5.5.0"],
         "runtime": ["reload-zones"],
     },
     {
@@ -3142,7 +3161,8 @@ Usually this comes down to ``/var/lib/pdns-recursor/udr`` or ``/usr/local/var/li
 
 The newly observed domain feature uses a stable bloom filter to store
 a history of previously observed responses. The data structure is
-synchronized to disk every 10 minutes, and is also initialized from
+synchronized to disk at the interval specified by
+:ref:`setting-yaml-nod.db_snapshot_interval`, and is also initialized from
 disk on startup. This ensures that previously observed responses are
 preserved across recursor restarts. If you change the
 unique-response-db-size, you must remove any files from this directory.
@@ -3314,7 +3334,7 @@ When set to ``detailed``, all available information about the request and respon
         "default": "",
         "help": "Password required for accessing the webserver",
         "doc": """
-Password required to access the webserver. Since 4.6.0 the password can be hashed and salted using ``rec_control hash-password`` instead of being present in the configuration in plaintext, but the plaintext version is still supported.
+Password required to access the webserver. Since 4.6.0 the password can be hashed and salted using ``rec_control hash-password`` instead of being present in the configuration in plaintext, but the plaintext version is still supported. Not setting a password means that the internal dashboard and some metrics will be accessible to any client IP allowed by :ref:`setting-webserver-allow-from` without any authentication.
  """,
         "versionchanged": ("4.6.0", "This setting now accepts a hashed and salted version."),
     },

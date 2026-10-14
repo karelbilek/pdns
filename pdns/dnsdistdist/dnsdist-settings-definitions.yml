@@ -283,6 +283,22 @@ dnstap_logger:
       default: 1
       description: "Number of connections to open to the endpoint"
 
+http_out_options:
+  description: "Options for the HTTP client for outgoing HTTP connection"
+  parameters:
+    - name: "timeout"
+      type: "u32"
+      default: 2
+      description: "Timeout in seconds for the connection to establish"
+    - name: "fastopen"
+      type: "bool"
+      default: "false"
+      description: "Whether or not to use TCP fast-open"
+    - name: "verify"
+      type: "bool"
+      default: "true"
+      description: "Verify SSL/TLS certificate when connecting"
+
 otlp_logger:
   description: "List of endpoints to send OpenTelemetry Traces to, using OTLP."
   parameters:
@@ -304,6 +320,10 @@ otlp_logger:
       type: "u32"
       description: "Maximum number of traces to send to the endpoint"
       default: 100
+    - name: "http_options"
+      type: HttpOutOptionsConfiguration
+      default: true
+      description: "Options for the HTTP endpoint"
 
 proto_buf_meta:
   description: "Meta-data entry to be added to a Protocol Buffer message"
@@ -394,7 +414,7 @@ kvs_lookup_key_source_ip:
     - name: "include_port"
       type: "bool"
       default: "false"
-      description: "Whether to append the port (in network byte-order) after the address"
+      description: "Whether to append the port (in network byte-order) after the address. Note that this option is NOT compatible with MMDB databases"
 
 kvs_lookup_key_qname:
   description: "Lookup key that can be used with :ref:`yaml-settings-KeyValueStoreLookupAction` or :ref:`yaml-settings-KeyValueStoreLookupSelector`, will return the qname of the query in DNS wire format"
@@ -492,7 +512,7 @@ webserver:
     - name: "password"
       type: "String"
       default: ""
-      description: "The password used to access the internal webserver. Since 1.7.0 the password should be hashed and salted via the ``hashPassword()`` command"
+      description: "The password used to access the internal webserver. Since 1.7.0 the password should be hashed and salted via the ``hashPassword()`` command. Not setting a password means that the internal dashboard and some metrics will be accessible to any client IP allowed by the webserver ACL without any authentication"
     - name: "api_key"
       type: "String"
       default: ""
@@ -2180,7 +2200,15 @@ packet_cache:
     - name: "keep_stale_data"
       type: "bool"
       default: "false"
-      description: "Whether to suspend the removal of expired entries from the cache when there is no backend available in at least one of the pools using this cache"
+      description: "Whether to suspend the removal of expired entries from the cache when there is no backend available in at least one of the pools using this cache. This is similar but slightly different from dont_expire; dont_expire always keeps entries in the cache"
+    - name: "dont_evict"
+      type: "bool"
+      default: "false"
+      description: "Whether the cache should evict when shard is full or give up. The default is false - evict (using SIEVE algorithm). Note: if both dont_expire and dont_evict are true, nothing from cache will ever be removed (only by manual purgeExpired from lua); you probably don't want both set to true."
+    - name: "dont_expire"
+      type: "bool"
+      default: "false"
+      description: "Whether cache should remove expired entries or keep them in perpetuity. The default is false (expire). This option differs from keep_stale_data that only keeps stale data when backend is down; with this option, data are always kept until they are evicted. Note: if both dont_expire and dont_evict are true, nothing from cache will be automatically removed (only by manual purgeExpired from lua); you probably don't want both set to true."
     - name: "shuffle"
       type: "bool"
       default: "false"
@@ -2240,7 +2268,7 @@ proxy_protocol:
     - name: "acl"
       type: "Vec<String>"
       default: ""
-      description: "Set the list of netmasks from which a Proxy Protocol header will be required, over UDP, TCP and DNS over TLS. The default is empty. Note that a proxy protocol payload will be required from these clients, regular DNS queries will no longer be accepted if they are not preceded by a proxy protocol payload. Be also aware that, if ``apply_acl_to_proxied_clients`` is set (default is false), the general ACL will be applied to the source IP address as seen by dnsdist first, but also to the source IP address provided in the Proxy Protocol header."
+      description: "Set the list of netmasks from which a Proxy Protocol header will be required, over UDP, TCP and DNS over TLS. The default is empty. Note that:\n   * netmasks present in this list automatically bypass the general ACL\n   * proxy protocol payload will be required from these clients, regular DNS queries will no longer be accepted if they are not preceded by a proxy protocol payload\n   * if ``apply_acl_to_proxied_clients`` is set (default is false), the general ACL will be applied to the source IP address provided in the Proxy Protocol header.\n"
     - name: "maximum_payload_size"
       type: "u32"
       default: "512"
@@ -2254,7 +2282,7 @@ proxy_protocol:
       lua-name: "setProxyProtocolApplyACLToProxiedClients"
       internal-field-name: "d_applyACLToProxiedClients"
       runtime-configurable: true
-      description: "Whether the general ACL should be applied to the source IP address provided in the Proxy Protocol header, in addition to being applied to the source IP address as seen by dnsdist first"
+      description: "Whether the general ACL should be applied to the source IP address provided in the Proxy Protocol header"
 
 snmp:
   description: "SNMP-related settings"

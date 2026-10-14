@@ -24,6 +24,8 @@
 
 #include "dnsdist-rings.hh"
 
+Rings g_rings;
+
 thread_local size_t Rings::t_samplingQueryCounter{0};
 thread_local size_t Rings::t_samplingResponseCounter{0};
 
@@ -203,4 +205,9 @@ bool Rings::Response::isACacheHit() const
     hit = true;
   }
   return hit;
+}
+
+bool Rings::Response::isADrop() const
+{
+  return dh.rcode == 0 && usec == std::numeric_limits<uint32_t>::max();
 }

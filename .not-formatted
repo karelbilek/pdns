@@ -12,8 +12,6 @@
 ./pdns/auth-primarycommunicator.cc
 ./pdns/auth-querycache.cc
 ./pdns/auth-querycache.hh
-./pdns/axfr-retriever.cc
-./pdns/axfr-retriever.hh
 ./pdns/backends/gsql/gsqlbackend.cc
 ./pdns/backends/gsql/gsqlbackend.hh
 ./pdns/base32.cc
@@ -62,8 +60,6 @@
 ./pdns/dynmessenger.hh
 ./pdns/histog.hh
 ./pdns/inflighter.cc
-./pdns/ixfr.cc
-./pdns/ixfr.hh
 ./pdns/ixfrdist-stats.cc
 ./pdns/ixfrdist-stats.hh
 ./pdns/ixfrdist-web.cc

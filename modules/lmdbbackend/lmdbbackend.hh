@@ -363,6 +363,7 @@ private:
   bool genChangeDomain(domainid_t id, const std::function<void(DomainInfo&)>& func);
   bool genChangeTransientDomain(domainid_t id, const std::function<void(DomainInfo&)>& func);
   static void deleteDomainRecords(RecordsRWTransaction& txn, const std::string& match, QType qtype = QType::ANY);
+  void deleteComments(domainid_t domain_id, const DNSName& relqname, const QType& qt);
 
   bool findDomain(const ZoneName& domain, DomainInfo& info) const;
   bool findDomain(domainid_t domainid, DomainInfo& info) const;
@@ -455,4 +456,5 @@ private:
   DTime d_dtime; // used only for logging
   uint64_t d_mapsize_main;
   uint64_t d_mapsize_shards;
+  int d_pagesize;
 };

@@ -411,10 +411,6 @@ Webserver configuration
   Launch the :doc:`../guides/webserver` with statistics and the API. Use :func:`setWebserverConfig` to configure the webserver
 
   :param str listen_address: The IP address and Port to listen on
-  :param str password: The password required to access the webserver
-  :param str apikey: The key required to access the API
-  :param {[str]=str,...} customHeaders: Allows setting custom headers and removing the defaults
-  :param str acl: List of netmasks, as a string, that are allowed to open a connection to the web server. Defaults to "127.0.0.1, ::1". It accepts the same syntax that :func:`NetmaskGroup:addMask` does
 
 .. function:: setAPIWritable(allow [,dir])
 
@@ -445,7 +441,7 @@ Webserver configuration
 
   Options:
 
-  * ``password=newPassword``: string - Set the password used to access the internal webserver. Since 1.7.0 the password should be hashed and salted via the :func:`hashPassword` command.
+  * ``password=newPassword``: string - Set the password used to access the internal webserver. Since 1.7.0 the password should be hashed and salted via the :func:`hashPassword` command. Not setting a password means that the internal dashboard and some metrics will be accessible to any client IP allowed by the webserver ACL without any authentication.
   * ``apiKey=newKey``: string - Changes the API Key (set to an empty string do disable it). Since 1.7.0 the key should be hashed and salted via the :func:`hashPassword` command.
   * ``customHeaders={[str]=str,...}``: map of string - Allows setting custom headers and removing the defaults.
   * ``acl=newACL``: string - List of IP addresses, as a string, that are allowed to open a connection to the web server. Defaults to "127.0.0.1, ::1".
@@ -535,13 +531,17 @@ Access Control Lists
 
 .. function:: setProxyProtocolACL(netmasks)
 
-  Set the list of netmasks from which a Proxy Protocol header will be required, over UDP, TCP and DNS over TLS. The default is empty. Note that a proxy protocol payload will be required from these clients, regular DNS queries will no longer be accepted if they are not preceded by a proxy protocol payload. Be also aware that, if :func:`setProxyProtocolApplyACLToProxiedClients` is set (default is false), the general ACL will be applied to the source IP address as seen by dnsdist first, but also to the source IP address provided in the Proxy Protocol header.
+  Set the list of netmasks from which a Proxy Protocol header will be required, over UDP, TCP and DNS over TLS. The default is empty. Note that:
+
+  * netmasks present in this list automatically bypass the general ACL
+  * proxy protocol payload will be required from these clients, regular DNS queries will no longer be accepted if they are not preceded by a proxy protocol payload
+  * if :func:`setProxyProtocolApplyACLToProxiedClients` is set (default is false), the general ACL will be applied to the source IP address provided in the Proxy Protocol header.
 
   :param {str} netmasks: A table of CIDR netmask, e.g. ``{"192.0.2.0/24", "2001:DB8:14::/56"}``. Without a subnetmask, only the specific address is allowed.
 
 .. function:: setProxyProtocolApplyACLToProxiedClients(apply)
 
-  Whether the general ACL should be applied to the source IP address provided in the Proxy Protocol header, in addition to being applied to the source IP address as seen by dnsdist first.
+  Whether the general ACL should be applied to the source IP address provided in the Proxy Protocol header.
 
   :param bool apply: Whether it should be applied or not (default is false).
 
@@ -1058,13 +1058,12 @@ See :doc:`../guides/cache` for a how to.
 
   Creates a new :class:`PacketCache` with the settings specified.
 
-  :param int maxEntries: The maximum number of entries in this cache
+  :param int maxEntries: The maximum number of entries in this cache. If new items are inserted over this size, unused entries are evicted. This can be disabled by dontEvict; with dontEvict=true, new entries are not inserted.
 
   Options:
 
   * ``deferrableInsertLock=true``: bool - Whether the cache should give up insertion if the lock is held by another thread, or simply wait to get the lock.
   * ``dontAge=false``: bool - Don't reduce TTLs when serving from the cache. Use this when :program:`dnsdist` fronts a cluster of authoritative servers.
-  * ``keepStaleData=false``: bool - Whether to suspend the removal of expired entries from the cache when there is no backend available in at least one of the pools using this cache.
   * ``maxNegativeTTL=3600``: int - Cache a NXDomain or NoData answer from the backend for at most this amount of seconds, even if the TTL of the SOA record is higher.
   * ``maxTTL=86400``: int - Cap the TTL for records to his number.
   * ``minTTL=0``: int - Don't cache entries with a TTL lower than this.
@@ -1078,6 +1077,10 @@ See :doc:`../guides/cache` for a how to.
   * ``maximumEntrySize=4096``: int - The maximum size, in bytes, of a DNS packet that can be inserted into the packet cache. Default is 4096 bytes, which was the fixed size before 1.9.0, and is also a hard limit for UDP responses.
   * ``payloadRanks={}``: List of payload size used when hashing the packet. The list will be sorted in ascending order and searched to find a lower bound value for the payload size in the packet. If found then it will be used for packet hashing. Values less than 512 or greater than ``maximumEntrySize`` above will be discarded. This option is to enable cache entry sharing between clients using different payload sizes when needed.
   * ``shuffle=false``: bool - Whether A and AAAA records should be shuffled when serving from cache, for load-balancing. The cache might not be shuffled if the cached packet is too complex for the simple parser used for this feature.
+  * ``keepStaleData=false``: bool - Whether to suspend the removal of expired entries from the cache when there is no backend available in at least one of the pools using this cache. This is similar but slightly different from dontExpire; dontExpire always keeps entries in the cache
+  * ``dontExpire=false``: bool - Whether the cache should evict when shard is full or give up. The default is false - evict (using SIEVE algorithm). Note - if both dontExpire and dontEvict are true, nothing from cache will ever be removed (only by manual purgeExpired from lua); you probably don't want both set to true.
+  * ``dontEvict=false``: bool - Whether cache should remove expired entries or keep them in perpetuity. The default is false (expire). This option differs from keep_stale_data that only keeps stale data when backend is down; with this option, data are always kept until they are evicted. Note - if both dontExpire and dontEvict are true, nothing from cache will be automatically removed (only by manual purgeExpired from lua); you probably don't want both set to true.
+
 
 .. class:: PacketCache
 
@@ -1136,7 +1139,7 @@ See :doc:`../guides/cache` for a how to.
 
   .. method:: purgeExpired(n)
 
-    Remove expired entries from the cache until there is at most ``n`` entries remaining in the cache.
+    Remove expired entries from the cache until there is at most ``n`` entries remaining in the cache. This ignores dontExpire option.
 
     :param int n: Number of entries to keep
 
@@ -1195,6 +1198,8 @@ ClientState functions
     :returns: The address and port this frontend is listening on
 
   .. attribute:: muted
+
+    .. versionremoved:: 2.2.0
 
     If set to true, queries received on this frontend will be normally processed and sent to a backend if needed, but no response will be ever be sent to the client over UDP. TCP queries are processed normally and responses sent to the client.
 

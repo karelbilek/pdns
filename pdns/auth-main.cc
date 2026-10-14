@@ -360,6 +360,10 @@ static void declareArguments()
   ::arg().set("gss-max-contexts", "The maximum number of simultaneous GSS contexts allowed") = "1000";
 #endif
 
+#ifdef HAVE_P11KIT1
+  ::arg().set("pkcs11", "Enable the use of PKCS#11 providers") = "no";
+#endif
+
   ::arg().setSwitch("views", "Enable views (variants) of zones, for backends which support them") = "no";
 
   // explicitly declared outside of HAVE_LUA_RECORDS guard to prevent writes
@@ -856,7 +860,9 @@ static void mainthread()
     DNSPacket::s_doEDNSCookieProcessing = true;
     std::vector<std::string> secrets;
     stringtok(secrets, ::arg()["edns-cookie-secret"], ",");
-    DNSPacket::s_OldEDNSCookieKeys.reserve(secrets.size() - 1);
+    auto lockedEDNSCookieKey = DNSPacket::s_EDNSCookieKey.lock();
+    auto lockedOldEDNSCookieKeys = DNSPacket::s_OldEDNSCookieKeys.lock();
+    lockedOldEDNSCookieKeys->reserve(secrets.size() - 1);
 
     bool first{true};
     for (const auto& secret : secrets) {
@@ -868,7 +874,7 @@ static void mainthread()
         }
         std::array<char, EDNSCookiesOpt::EDNSCookieSecretSize / 2> key{};
         dns_random(key.data(), key.size());
-        DNSPacket::s_EDNSCookieKey = std::string(key.data(), key.size());
+        *lockedEDNSCookieKey = std::string(key.data(), key.size());
       }
       else {
         try {
@@ -877,10 +883,10 @@ static void mainthread()
           }
           auto secretBytes = makeBytesFromHex(secret);
           if (first) {
-            DNSPacket::s_EDNSCookieKey = std::move(secretBytes);
+            *lockedEDNSCookieKey = std::move(secretBytes);
           }
           else {
-            DNSPacket::s_OldEDNSCookieKeys.emplace_back(std::move(secretBytes));
+            lockedOldEDNSCookieKeys->emplace_back(std::move(secretBytes));
           }
         }
         catch (const std::range_error& e) {
