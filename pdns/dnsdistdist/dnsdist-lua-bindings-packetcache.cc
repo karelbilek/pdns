@@ -28,7 +28,8 @@
 #include "dnsdist-cache.hh"
 #include "dnsdist-lua.hh"
 
-std::shared_ptr<DNSDistPacketCache> newPacketCache(bool client, size_t maxEntries, std::optional<LuaAssociativeTable<boost::variant<bool, size_t, std::string, LuaArray<uint16_t>>>> vars) {
+std::shared_ptr<DNSDistPacketCache> newPacketCache(bool client, size_t maxEntries, std::optional<LuaAssociativeTable<boost::variant<bool, size_t, std::string, LuaArray<uint16_t>>>> vars)
+{
   DNSDistPacketCache::CacheSettings settings{
     .d_maxEntries = maxEntries,
     .d_shardCount = 20,
